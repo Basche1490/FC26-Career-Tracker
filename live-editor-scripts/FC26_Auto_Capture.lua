@@ -2325,41 +2325,131 @@ local function atlas_exporter_active()
         or rawget(_G, "FC26_EXPORT_MATCH_STATS_AUTOMATIC_PLAYER_EXPORTER_STATE") ~= nil
 end
 
--- Starts the Atlas exporter next to this script unless it is already running (running it twice is harmless).
+-- BEGIN find_script (this exact block is also run by tests/lua/test_transfer_logic.lua)
+-- Live Editor does not always tell a script which folder it was started from, so "next to this script" cannot be
+-- trusted. Besides that folder, look where Live Editor scripts usually are: its working folder and lua\scripts, and
+-- the FC26-LE folder on the Desktop (also when Windows keeps the Desktop in OneDrive), Downloads and Documents.
+local function list_subdirs(path)
+    local temp_dir = os.getenv("TEMP") or os.getenv("TMP") or "."
+    local temp_file = temp_dir .. "/fc26_dirs_" .. tostring(os.time()) .. ".txt"
+    pcall(os.execute, string.format('cmd /c dir /b /ad "%s" > "%s" 2>nul', win_path(path), win_path(temp_file)))
+    local names = {}
+    local tf = io.open(temp_file, "r")
+    if tf then
+        for line in tf:lines() do
+            local name = trim(line)
+            if name ~= "" then names[#names + 1] = name end
+        end
+        tf:close()
+        pcall(os.remove, temp_file)
+    end
+    return names
+end
+
+local function script_search_dirs()
+    local dirs, seen = {}, {}
+    local function add(dir)
+        dir = tostring(dir or "")
+        if dir ~= "" then
+            dir = win_path(dir)
+            if dir:sub(-1) ~= "\\" then dir = dir .. "\\" end
+        end
+        if not seen[dir:lower()] then
+            seen[dir:lower()] = true
+            dirs[#dirs + 1] = dir
+        end
+    end
+
+    add(SCRIPT_DIR)
+    add("") -- Live Editor's working folder
+    add("lua\\scripts")
+    add("scripts")
+    pcall(function()
+        local p = io.popen("cd")
+        if p then
+            local cwd = trim(p:read("*l"))
+            p:close()
+            if cwd ~= "" then
+                add(cwd)
+                add(cwd .. "\\lua\\scripts")
+                add(cwd .. "\\scripts")
+            end
+        end
+    end)
+
+    local roots = {}
+    for _, var in ipairs({ "OneDrive", "OneDriveConsumer", "OneDriveCommercial" }) do
+        local v = os.getenv(var)
+        if v and v ~= "" then roots[#roots + 1] = v .. "\\Desktop" end
+    end
+    if user_profile ~= "" then
+        roots[#roots + 1] = user_profile .. "\\Desktop"
+        roots[#roots + 1] = user_profile .. "\\OneDrive\\Desktop"
+        roots[#roots + 1] = user_profile .. "\\Downloads"
+        roots[#roots + 1] = user_profile .. "\\Documents"
+    end
+    for _, root in ipairs(roots) do
+        add(root)
+        add(root .. "\\FC26-LE")
+        add(root .. "\\FC26-LE\\lua\\scripts")
+        for _, sub in ipairs(list_subdirs(root .. "\\FC26-LE")) do
+            add(root .. "\\FC26-LE\\" .. sub .. "\\lua\\scripts")
+            add(root .. "\\FC26-LE\\" .. sub)
+        end
+    end
+    return dirs
+end
+
+-- Full path of one of our scripts, or nil. Returns the folders that were searched as a second value.
+local function find_script(name)
+    local dirs = script_search_dirs()
+    for _, dir in ipairs(dirs) do
+        local path = dir .. name
+        if file_exists(path) then return path, dirs end
+    end
+    return nil, dirs
+end
+-- END find_script
+
+-- Starts the Atlas exporter unless it is already running (running it twice is harmless).
 local function start_atlas_exporter()
     if atlas_exporter_active() then
         log_monitor("Project Atlas exporter is already running")
         return true
     end
+    local searched = nil
     for _, name in ipairs(ATLAS_EXPORTER_FILES) do
-        for _, base in ipairs({ SCRIPT_DIR, "" }) do
-            local path = base .. name
-            if file_exists(path) then
-                log_monitor("Starting the Project Atlas exporter: " .. path)
-                local ok, err = pcall(dofile, path)
-                if not ok then log_monitor("Project Atlas exporter error: " .. tostring(err)) end
-                return ok
-            end
+        local path, dirs = find_script(name)
+        searched = dirs
+        if path then
+            log_monitor("Starting the Project Atlas exporter: " .. path)
+            local ok, err = pcall(dofile, path)
+            if not ok then log_monitor("Project Atlas exporter error: " .. tostring(err)) end
+            return ok
         end
     end
-    log_monitor("Project Atlas exporter NOT started: " .. ATLAS_EXPORTER_FILES[1] .. " was not found in the same folder as this script ("
-        .. (SCRIPT_DIR ~= "" and SCRIPT_DIR or "the Live Editor scripts folder") .. "). "
+    local source = "unknown"
+    pcall(function() source = tostring(debug.getinfo(1, "S").source):sub(1, 160) end)
+    log_monitor("Project Atlas exporter NOT started: " .. ATLAS_EXPORTER_FILES[1] .. " was not found in any of "
+        .. tostring(searched and #searched or 0) .. " folders (this script's own folder, Live Editor's working folder, "
+        .. "lua\\scripts, the FC26-LE folder on the Desktop / OneDrive Desktop, Downloads, Documents). "
+        .. "Script source reported by Live Editor: " .. source .. ". "
         .. "Matches are still sent, but without detailed player statistics, and NO snapshots are written "
-        .. "(Documents\\FC26 Export\\Snapshots stays empty). Copy that file next to this script and run this script again.")
+        .. "(Documents\\FC26 Export\\Snapshots stays empty). Workaround: run FC26_AutoCapture_v1.1.1.lua yourself first, "
+        .. "then run this script again; it notices the running exporter.")
     return false
 end
 
 local function run_snapshot()
     -- FC26 AutoCapture publishes the paired snapshot by itself; a second one would only slow the game down
     if rawget(_G, "FC26_EXPORT_AUTO_CAPTURE_STATE") ~= nil then return true end
-    for _, path in ipairs({ SCRIPT_DIR .. "FC26_Snapshot.lua", "FC26_Snapshot.lua" }) do
-        if file_exists(path) then
-            local ok, err = pcall(dofile, path)
-            if not ok then log_monitor("FC26_Snapshot.lua error: " .. tostring(err)) end
-            return ok
-        end
+    local path = find_script("FC26_Snapshot.lua")
+    if path then
+        local ok, err = pcall(dofile, path)
+        if not ok then log_monitor("FC26_Snapshot.lua error: " .. tostring(err)) end
+        return ok
     end
-    log_monitor("FC26_Snapshot.lua not found next to this script - snapshot skipped")
+    log_monitor("FC26_Snapshot.lua not found - snapshot skipped")
     return false
 end
 
@@ -2602,9 +2692,9 @@ print(" Real Data Capture: Match Telemetry & Instant Real-Time Transfer Tracking
 if atlas_started then
     print(" Project Atlas exporter: running (detailed player stats). Matches wait up to " .. ATLAS_WAIT_SECONDS_EXPORTER .. "s for its export.")
 else
-    print(" Project Atlas exporter: NOT running. FC26_AutoCapture_v1.1.1.lua is missing from the folder of this script.")
+    print(" Project Atlas exporter: NOT running. FC26_AutoCapture_v1.1.1.lua could not be found or started.")
     print("   Without it there are no snapshots (Documents\\FC26 Export\\Snapshots stays empty) and player stats are estimated.")
-    print("   Copy FC26_AutoCapture_v1.1.1.lua next to FC26_Auto_Capture.lua and run FC26_Auto_Capture.lua again.")
+    print("   Run FC26_AutoCapture_v1.1.1.lua yourself first, then run FC26_Auto_Capture.lua again (see auto_capture_monitor.log).")
 end
 print(" Delivery log: Documents\\FC26 Export\\bridge_send_log.txt (undelivered items are retried).")
 print(" Background timer active (2s loop). Event listeners hooked.")

@@ -35,8 +35,13 @@ Keep these two files together in the same Live Editor scripts folder:
 **Both files must sit in the same folder.** "Project Atlas" is only the name of that exporter; you do not need
 any Atlas desktop app, just the `.lua` file. If it is missing, the Live Editor console says
 `Project Atlas exporter: NOT running`. Matches and transfers are still sent, but no snapshots are written
-(`Documents\FC26 Export\Snapshots` stays empty) and player stats are estimated. Copy the file next to
-`FC26_Auto_Capture.lua` and run `FC26_Auto_Capture.lua` again.
+(`Documents\FC26 Export\Snapshots` stays empty) and player stats are estimated.
+
+Live Editor does not always tell a script which folder it runs from, so `FC26_Auto_Capture.lua` also looks in
+Live Editor's working folder and `lua\scripts`, in `FC26-LE` on the Desktop (also when the Desktop is in
+OneDrive), and in Downloads and Documents. If it still reports the exporter as missing, run
+`FC26_AutoCapture_v1.1.1.lua` yourself first, then `FC26_Auto_Capture.lua`: it notices that the exporter is
+already running. `auto_capture_monitor.log` says what was searched.
 
 With the exporter running you get, under `Documents\FC26 Export`:
 
@@ -97,7 +102,8 @@ the capture script can be fixed against the real data instead of guesses.
 ## If something does not arrive
 
 - The capture script sends to the **bridge**, and the app fetches from the bridge. The bridge must be running
-  (step 1) as well as the script and the app. Opening the app alone is not enough.
+  (step 1) while the script runs. The app does not need to be open at that moment: the bridge keeps the latest
+  100 events and the app picks them up the next time it checks. Opening the app alone is not enough.
 - Delivery log: `Documents\FC26 Export\bridge_send_log.txt`. One line per attempt with the bridge's answer
   (200 = delivered). Anything undelivered is kept in `Documents\FC26 Export\outbox` and retried every 30 seconds,
   also after restarting Live Editor, so nothing is lost while the bridge is closed.

@@ -83,6 +83,68 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------------------
+print("2b. the exporter is found even when Live Editor does not say where the script lives")
+do
+    local src = read_file(scripts .. "FC26_Auto_Capture.lua")
+    local block = src:match("%-%- BEGIN find_script[^\n]*\n(.-)%-%- END find_script")
+    check(block ~= nil, "find_script block found between the markers")
+
+    local function run_search(files, env, cwd, subdirs_of)
+        local saved_getenv, saved_execute, saved_popen = os.getenv, os.execute, io.popen
+        os.getenv = function(k) return env[k] end
+        io.popen = function()
+            return { read = function() return cwd end, close = function() end }
+        end
+        os.execute = function(cmd)
+            -- mimic:  cmd /c dir /b /ad "<folder>" > "<file>" 2>nul
+            local folder, out = cmd:match('dir /b /ad "([^"]*)" > "([^"]*)"')
+            if folder then
+                local list = subdirs_of[folder:lower()] or {}
+                local f = io.open((out:gsub("\\", "/")), "w")
+                if f then f:write(table.concat(list, "\r\n")) f:close() end
+            end
+            return true
+        end
+        local prelude = [[
+            local SCRIPT_DIR, user_profile, FILES = ...
+            local function trim(v) return (tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+            local function win_path(p) return (tostring(p or ""):gsub("/", "\\")) end
+            local function file_exists(path) return FILES[path:lower()] == true end
+        ]]
+        local fn = assert(load(prelude .. block .. "\nreturn find_script", "find_script"))
+        local lower = {}
+        for path in pairs(files) do lower[path:lower()] = true end
+        local find = fn("", env.USERPROFILE or "", lower)
+        local found, dirs = find("FC26_AutoCapture_v1.1.1.lua")
+        os.getenv, os.execute, io.popen = saved_getenv, saved_execute, saved_popen
+        return found, dirs
+    end
+
+    local base_env = { USERPROFILE = "C:\\Users\\Joel", TEMP = os.getenv("TMPDIR") or "/tmp" }
+    local EXE = "FC26_AutoCapture_v1.1.1.lua"
+
+    local found = run_search({ ["C:\\Users\\Joel\\Desktop\\FC26-LE\\FC 26 LE v26.3.6\\lua\\scripts\\" .. EXE] = true },
+        base_env, nil, { ["c:\\users\\joel\\desktop\\fc26-le"] = { "FC 26 LE v26.3.6" } })
+    check(found == "C:\\Users\\Joel\\Desktop\\FC26-LE\\FC 26 LE v26.3.6\\lua\\scripts\\" .. EXE,
+        "found in Desktop\\FC26-LE\\<version>\\lua\\scripts", tostring(found))
+
+    local env2 = { USERPROFILE = "C:\\Users\\Joel", OneDrive = "C:\\Users\\Joel\\OneDrive", TEMP = base_env.TEMP }
+    found = run_search({ ["C:\\Users\\Joel\\OneDrive\\Desktop\\FC26-LE\\LE 26\\lua\\scripts\\" .. EXE] = true },
+        env2, nil, { ["c:\\users\\joel\\onedrive\\desktop\\fc26-le"] = { "LE 26" } })
+    check(found == "C:\\Users\\Joel\\OneDrive\\Desktop\\FC26-LE\\LE 26\\lua\\scripts\\" .. EXE,
+        "found when the Desktop lives in OneDrive", tostring(found))
+
+    found = run_search({ ["D:\\Tools\\LE\\lua\\scripts\\" .. EXE] = true }, base_env, "D:\\Tools\\LE", {})
+    check(found == "D:\\Tools\\LE\\lua\\scripts\\" .. EXE, "found through Live Editor's working folder", tostring(found))
+
+    found = run_search({ ["C:\\Users\\Joel\\Downloads\\" .. EXE] = true }, base_env, nil, {})
+    check(found == "C:\\Users\\Joel\\Downloads\\" .. EXE, "found in Downloads", tostring(found))
+
+    local missing, searched = run_search({}, base_env, nil, {})
+    check(missing == nil and #searched > 5, "returns nil and the searched folders when it is nowhere", tostring(missing))
+end
+
+-- ---------------------------------------------------------------------------------------------------------
 print("3. FC26_Probe.lua runs against a pretend game database")
 
 local MANAGED = 115486
