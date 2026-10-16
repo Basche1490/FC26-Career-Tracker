@@ -472,6 +472,21 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         }
     }
     
+    /**
+     * Saves an edited transfer. When only the fee, club, date or flags changed, the entry is replaced in place and the
+     * squad is left alone (deleting and re-adding an incoming transfer would throw the player away and add a blank card).
+     */
+    fun updateTransferLog(old: TransferLog, updated: TransferLog) {
+        if (old.playerName == updated.playerName && old.type == updated.type) {
+            _state.update { state ->
+                state.copy(transfers = state.transfers.map { if (it.id == old.id) updated else it })
+            }
+        } else {
+            deleteTransferLog(old.id)
+            addTransferLog(updated)
+        }
+    }
+
     fun deleteTransferLog(logId: String) {
         _state.update { state ->
             val log = state.transfers.find { it.id == logId } ?: return@update state

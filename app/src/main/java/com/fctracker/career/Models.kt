@@ -284,8 +284,17 @@ data class TransferLog(
     val includeSwap: Boolean = false,
     val isRegen: Boolean = false,
     val headshotUrl: String = "",
-    val position: String = "CM"
+    val position: String = "CM",
+    /** The game does not store most transfer fees: true when the fee is not known (shown as "Fee ?" until edited). */
+    val feeUnknown: Boolean = false
 )
+
+/** "€26.0M", "Free", or "Fee ?" when the game did not store the fee and nobody has entered it yet. */
+fun TransferLog.feeLabel(currencySymbol: String): String = when {
+    feeM > 0 -> "$currencySymbol${feeM}M"
+    feeUnknown -> "Fee ?"
+    else -> "Free"
+}
 
 data class LiveEvent(val title: String, val message: String, val timestamp: Long)
 

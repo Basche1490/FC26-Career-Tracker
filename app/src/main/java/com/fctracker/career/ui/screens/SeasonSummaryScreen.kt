@@ -1,4 +1,5 @@
 package com.fctracker.career.ui.screens
+import com.fctracker.career.feeLabel
 import com.fctracker.career.TeamTrophy
 import com.fctracker.career.PlayerAward
 
@@ -187,7 +188,7 @@ fun OverviewTab(state: AppState, viewModel: MainViewModel) {
                             }
                             Column(horizontalAlignment = Alignment.End) {
                                 Text(
-                                    text = if (tr.feeM > 0) "${state.currencySymbol}${tr.feeM}M" else "Free",
+                                    text = tr.feeLabel(state.currencySymbol),
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (!isIncoming) Color(0xFF81C784) else Color.White

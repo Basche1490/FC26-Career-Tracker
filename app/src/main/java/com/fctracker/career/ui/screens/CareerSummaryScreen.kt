@@ -1,4 +1,5 @@
 package com.fctracker.career.ui.screens
+import com.fctracker.career.feeLabel
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 
@@ -243,7 +244,7 @@ fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                                                     }
                                                 }
                                                 Text(
-                                                    text = if (tr.feeM > 0) "${state.currencySymbol}${tr.feeM}M" else "Free",
+                                                    text = tr.feeLabel(state.currencySymbol),
                                                     fontSize = 13.sp,
                                                     fontWeight = FontWeight.Bold,
                                                     color = if (!isIncoming) Color(0xFF81C784) else Color.White

@@ -86,20 +86,28 @@ object TelemetryProcessor {
                         val date = data.optString("date")
                         val feeM = data.optDouble("feeM", 0.0)
                         val fromToClub = data.optString("fromToClub")
+                        val feeUnknown = data.optBoolean("feeUnknown", false)
 
-                        val duplicate = transfers.any {
-                            it.playerName.equals(name, ignoreCase = true) &&
-                                it.type.equals(type, ignoreCase = true) &&
-                                it.date == date
-                        }
-                        if (!duplicate) {
+                        val existingIdx = transfers.indexOfFirst { sameDeal(it, name, type, date) }
+                        if (existingIdx >= 0) {
+                            // The same deal again. Take over what the earlier copy was missing (a club, a fee, a
+                            // corrected type) but never overwrite what is already there, so edits made by hand stay.
+                            val merged = mergeRepeatedTransfer(transfers[existingIdx], type, feeM, fromToClub, feeUnknown)
+                            if (merged != transfers[existingIdx]) {
+                                transfers[existingIdx] = merged
+                                hasNew = true
+                            }
+                        } else {
                             if (events.none { it.title == evTitle && it.timestamp == timestamp }) {
                                 events.add(LiveEvent(evTitle, evMessage, timestamp))
                             }
                             hasNew = true
                             transfers.add(
                                 0,
-                                TransferLog(playerName = name, type = type, feeM = feeM, fromToClub = fromToClub, date = date)
+                                TransferLog(
+                                    playerName = name, type = type, feeM = feeM, fromToClub = fromToClub,
+                                    date = date, feeUnknown = feeUnknown && feeM <= 0.0
+                                )
                             )
                             squad = applyTransferToSquad(squad, name, type, feeM, signedPlayer)
                             if (notify) notices.add(TelemetryNotice(evTitle, evMessage, "transfers", true))
@@ -182,6 +190,42 @@ object TelemetryProcessor {
     // ---------------------------------------------------------------------------------------------
     // Transfers
     // ---------------------------------------------------------------------------------------------
+
+    /** Same player, same day and same kind of deal. An earlier "Promoted In" is the same deal as a later signing. */
+    private fun sameDeal(existing: TransferLog, name: String, type: String, date: String): Boolean {
+        if (!existing.playerName.equals(name, ignoreCase = true) || existing.date != date) return false
+        return existing.type.equals(type, ignoreCase = true) ||
+            (existing.type.equals("Promoted In", ignoreCase = true) && type.equals("In (Permanent)", ignoreCase = true))
+    }
+
+    private fun isKnownClub(club: String): Boolean {
+        val c = club.trim()
+        return c.isNotEmpty() && !c.equals("Unknown club", true) && !c.equals("External Club", true) &&
+            !c.equals("Youth Academy", true)
+    }
+
+    private fun mergeRepeatedTransfer(
+        existing: TransferLog,
+        type: String,
+        feeM: Double,
+        fromToClub: String,
+        feeUnknown: Boolean
+    ): TransferLog {
+        var merged = existing
+        if (existing.type.equals("Promoted In", true) && type.equals("In (Permanent)", true)) {
+            // The first copy took the player for a promotion; the corrected copy knows he was signed.
+            merged = merged.copy(type = "In (Permanent)")
+            if (!isKnownClub(existing.fromToClub) || existing.fromToClub.equals("Youth Academy", true)) {
+                merged = merged.copy(fromToClub = if (isKnownClub(fromToClub)) fromToClub else "Unknown club")
+            }
+        }
+        if (!isKnownClub(merged.fromToClub) && isKnownClub(fromToClub)) merged = merged.copy(fromToClub = fromToClub)
+        if (merged.feeM <= 0.0 && feeM > 0.0) merged = merged.copy(feeM = feeM, feeUnknown = false)
+        if (merged.feeM <= 0.0 && feeUnknown && !merged.feeUnknown && existing.type != merged.type) {
+            merged = merged.copy(feeUnknown = true) // a corrected signing whose fee the game does not store
+        }
+        return merged
+    }
 
     private fun applyTransferToSquad(
         squad: MutableList<Player>,

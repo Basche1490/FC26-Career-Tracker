@@ -4,6 +4,7 @@ import com.fctracker.career.AppState
 import com.fctracker.career.LiveEvent
 import com.fctracker.career.MatchResult
 import com.fctracker.career.Player
+import com.fctracker.career.feeLabel
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -242,6 +243,75 @@ class TelemetryProcessorTest {
         assertEquals(1, second.state.transfers.size)
         assertEquals(first.state, second.state)
         assertTrue(second.notices.isEmpty())
+    }
+
+    private fun deal(
+        name: String, type: String, fee: Double, club: String, date: String = "2028-07-09", feeUnknown: Boolean = false
+    ): String {
+        val unknownField = if (feeUnknown) ",\"feeUnknown\":true" else ""
+        return """{"dataType":"transfer","title":"Transfer","message":"$name $type","playerName":"$name","type":"$type",
+           "feeM":$fee,"fromToClub":"$club","date":"$date"$unknownField}"""
+    }
+
+    @Test
+    fun aFeeTheGameDoesNotStoreIsKeptAsUnknownNotAsFree() {
+        val result = run(AppState(), event(deal("Oliver Ebner", "In (Permanent)", 0.0, "Unknown club", feeUnknown = true)))
+        val log = result.state.transfers.single()
+        assertTrue(log.feeUnknown)
+        assertEquals("Fee ?", log.feeLabel("€"))
+        assertEquals("Free", log.copy(feeUnknown = false).feeLabel("€"))
+        assertEquals("€26.0M", log.copy(feeM = 26.0).feeLabel("€"))
+    }
+
+    @Test
+    fun aKnownFeeIsNeverMarkedUnknown() {
+        val result = run(AppState(), event(deal("Leo Guerra", "In (Permanent)", 26.0, "Unknown club", feeUnknown = true)))
+        assertFalse(result.state.transfers.single().feeUnknown)
+    }
+
+    @Test
+    fun aRepeatedLoanFillsInTheClubTheFirstCopyDidNotHave() {
+        val first = run(AppState(players = squad(3)), event(deal("Player 2", "Out (Loan)", 0.0, ""), time = 1))
+        val second = run(first.state, event(deal("Player 2", "Out (Loan)", 0.0, "FC Porto"), time = 2))
+        assertEquals(1, second.state.transfers.size)
+        assertEquals("FC Porto", second.state.transfers.single().fromToClub)
+    }
+
+    @Test
+    fun aCorrectedSigningReplacesTheEarlierWrongPromotion() {
+        val first = run(AppState(), event(deal("Leo Guerra", "Promoted In", 0.0, "Youth Academy"), time = 1))
+        val second = run(first.state, event(deal("Leo Guerra", "In (Permanent)", 26.0, "Roma"), time = 2))
+        val log = second.state.transfers.single()
+        assertEquals("In (Permanent)", log.type)
+        assertEquals(26.0, log.feeM, 0.001)
+        assertEquals("Roma", log.fromToClub)
+        assertFalse(log.feeUnknown)
+    }
+
+    @Test
+    fun aCorrectedSigningWithAnUnknownFeeKeepsThatHonest() {
+        val first = run(AppState(), event(deal("Oliver Ebner", "Promoted In", 0.0, "Youth Academy", "2028-07-14"), time = 1))
+        val second = run(
+            first.state,
+            event(deal("Oliver Ebner", "In (Permanent)", 0.0, "Unknown club", "2028-07-14", feeUnknown = true), time = 2)
+        )
+        val log = second.state.transfers.single()
+        assertEquals("In (Permanent)", log.type)
+        assertTrue(log.feeUnknown)
+        assertEquals("Unknown club", log.fromToClub)
+    }
+
+    @Test
+    fun aRepeatedTransferNeverOverwritesWhatWasEditedByHand() {
+        val edited = AppState(
+            transfers = listOf(
+                com.fctracker.career.TransferLog(
+                    playerName = "Oliver Ebner", type = "In (Permanent)", feeM = 11.7, fromToClub = "Athletic Club", date = "2028-07-14"
+                )
+            )
+        )
+        val result = run(edited, event(deal("Oliver Ebner", "In (Permanent)", 5.0, "Elsewhere", "2028-07-14")))
+        assertEquals(edited, result.state)
     }
 
     @Test

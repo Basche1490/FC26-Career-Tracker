@@ -1,4 +1,5 @@
 package com.fctracker.career.ui.screens
+import com.fctracker.career.feeLabel
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
@@ -290,7 +291,7 @@ fun TransferMarketTab(
                                 if (isRetirement) {
                                     Text("Retired", fontWeight = FontWeight.Bold, color = Color(0xFFF59E0B))
                                 } else {
-                                    Text(if (log.feeM > 0) "${state.currencySymbol}${log.feeM}M" else "Free", fontWeight = FontWeight.Bold, color = if (!isIncoming) Color(0xFF4CAF50) else Color(0xFFF44336))
+                                    Text(log.feeLabel(state.currencySymbol), fontWeight = FontWeight.Bold, color = if (!isIncoming) Color(0xFF4CAF50) else Color(0xFFF44336))
                                 }
                                 Text(log.date, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
@@ -873,10 +874,7 @@ fun TransferFormModal(
                             TextButton(onClick = onDismiss) { Text("Cancel", color = Color.White) }
                             Button(
                                 onClick = {
-                                    if (logToEdit != null) {
-                                        viewModel.deleteTransferLog(logToEdit.id)
-                                    }
-                                    viewModel.addTransferLog(com.fctracker.career.TransferLog(
+                                    val savedLog = com.fctracker.career.TransferLog(
                                         id = logToEdit?.id ?: java.util.UUID.randomUUID().toString(),
                                         playerName = playerQuery,
                                         type = transferType,
@@ -884,8 +882,15 @@ fun TransferFormModal(
                                         fromToClub = if (transferType == "Retirement") "Retired" else teamQuery,
                                         date = transferDate,
                                         includeSwap = if (transferType == "Retirement") false else includeSwap,
-                                        isRegen = if (transferType == "Retirement") false else isRegen
-                                    ))
+                                        isRegen = if (transferType == "Retirement") false else isRegen,
+                                        headshotUrl = logToEdit?.headshotUrl ?: "",
+                                        position = logToEdit?.position ?: "CM"
+                                    )
+                                    if (logToEdit != null) {
+                                        viewModel.updateTransferLog(logToEdit, savedLog)
+                                    } else {
+                                        viewModel.addTransferLog(savedLog)
+                                    }
                                     onDismiss()
                                 },
                                 colors = if (transferType == "Retirement") ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B), contentColor = Color.Black) else ButtonDefaults.buttonColors()
@@ -1131,7 +1136,7 @@ fun RecordDealCard(title: String, log: com.fctracker.career.TransferLog, state: 
         Column {
             Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
                 Text(title, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
-                Text(if (log.feeM > 0) "${state.currencySymbol}${log.feeM}M" else "Free", fontSize = 10.sp, color = if (isIncoming) Color(0xFF4CAF50) else Color(0xFFF44336), fontWeight = FontWeight.Bold)
+                Text(log.feeLabel(state.currencySymbol), fontSize = 10.sp, color = if (isIncoming) Color(0xFF4CAF50) else Color(0xFFF44336), fontWeight = FontWeight.Bold)
             }
             Spacer(modifier = Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {

@@ -1,4 +1,4 @@
--- FC26 AutoCapture v2.4.0 (Precision Live Telemetry & Atlas Tracker)
+-- FC26 AutoCapture v2.5.0 (Precision Live Telemetry & Atlas Tracker)
 -- Complete support for EFL Championship, Premier League, FA Cup, Carabao Cup, Play-offs.
 -- Gathers REAL in-game data: Real League Position, Real Lineups, Real Goal Scorers, Real MOTM.
 -- Strict League Rules: League matches NEVER have extra time or penalty shootouts.
@@ -12,7 +12,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "2.4.0"
+local VERSION = "2.5.0"
 local SCRIPT_INSTANCE = "FC26_AUTOCAP_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
 _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] = SCRIPT_INSTANCE
 
@@ -918,8 +918,15 @@ local function send_payload_to_bridge(payload, log_label)
             return
         end
 
-        local id = tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999))
-        local json_path = OUTBOX_DIR .. "/" .. id .. ".json"
+        -- Several payloads are often sent within the same second (a transfer window): never reuse a file name,
+        -- or the later payload would overwrite the earlier one before it was delivered.
+        local stamp, serial = tostring(os.time()), math.random(1000, 9999)
+        local id, json_path
+        repeat
+            id = stamp .. "_" .. tostring(serial)
+            json_path = OUTBOX_DIR .. "/" .. id .. ".json"
+            serial = serial + 1
+        until not file_exists(json_path) and not outbox_pending[json_path]
         local jf = io.open(json_path, "wb")
         if not jf then
             log_monitor("Cannot write " .. json_path .. " - payload not sent")
@@ -1682,49 +1689,40 @@ local function get_active_loans(managed_tid, squad, club_links)
     return classify_loans(read_loan_rows(), managed_tid, squad, club_links)
 end
 
--- Single-pass player info loader (OVR, join date, academy status) for just the players asked for.
-local function get_squad_players_info(wanted_pids)
+-- Join dates (EA day count or yyyymmdd) of the wanted players, from the player table: pid -> { join_days = n }.
+-- Only two fields are read, so the 20 000+ rows of the table stay cheap.
+local function get_player_join_info(wanted_pids)
     local info_map = {}
-    local function add(pid, ovr, join_days, isAcad)
-        ovr = tonumber(ovr) or 70
-        info_map[pid] = {
-            ovr = ovr,
-            join_days = tonumber(join_days) or 0,
-            is_academy = ((tonumber(isAcad) or 0) == 1 or pid >= 300000),
-            val_m = math.floor(((ovr * ovr * 800) / 100000) * 10) / 100
-        }
+    local function add(pid, join_days)
+        if pid > 0 and wanted_pids[pid] then
+            info_map[pid] = { join_days = tonumber(join_days) or 0 }
+        end
     end
     pcall(function()
-        if type(GetDBTableRows) == "function" then
-            local rows = GetDBTableRows("players")
-            if type(rows) == "table" and #rows > 0 then
-                for _, r in ipairs(rows) do
-                    local pid = tonumber(r.playerid and r.playerid.value or r.playerid) or 0
+        if LE and LE.db then
+            local pt = LE.db:GetTable("players")
+            if pt then
+                local r = pt:GetFirstRecord()
+                while r and r > 0 do
+                    local pid = tonumber(pt:GetRecordFieldValue(r, "playerid")) or 0
                     if pid > 0 and wanted_pids[pid] then
-                        add(pid,
-                            r.overallrating and r.overallrating.value or r.overallrating,
-                            r.playerjointeamdate and r.playerjointeamdate.value or r.playerjointeamdate,
-                            r.isacademy and r.isacademy.value or r.isacademy)
+                        add(pid, pt:GetRecordFieldValue(r, "playerjointeamdate"))
                     end
+                    r = pt:GetNextValidRecord()
                 end
             end
         end
     end)
     if next(info_map) == nil then
         pcall(function()
-            if LE and LE.db then
-                local pt = LE.db:GetTable("players")
-                if pt then
-                    local r = pt:GetFirstRecord()
-                    while r and r > 0 do
-                        local pid = tonumber(pt:GetRecordFieldValue(r, "playerid")) or 0
+            if type(GetDBTableRows) == "function" then
+                local rows = GetDBTableRows("players")
+                if type(rows) == "table" then
+                    for _, r in ipairs(rows) do
+                        local pid = tonumber(r.playerid and r.playerid.value or r.playerid) or 0
                         if pid > 0 and wanted_pids[pid] then
-                            add(pid,
-                                pt:GetRecordFieldValue(r, "overallrating"),
-                                pt:GetRecordFieldValue(r, "playerjointeamdate"),
-                                pt:GetRecordFieldValue(r, "isacademy"))
+                            add(pid, r.playerjointeamdate and r.playerjointeamdate.value or r.playerjointeamdate)
                         end
-                        r = pt:GetNextValidRecord()
                     end
                 end
             end
@@ -1733,67 +1731,349 @@ local function get_squad_players_info(wanted_pids)
     return info_map
 end
 
--- Career transfer history rows that involve the managed club (case-insensitive column names).
-local function get_career_transfer_history(managed_tid)
-    local history = {}
-
-    local function parse_cth_row(get_val)
-        local pid = tonumber(get_val("playerid")) or 0
-        local from_tid = tonumber(get_val("fromteamid") or get_val("teamidfrom") or get_val("sourceteamid") or get_val("sellerteamid")) or 0
-        local to_tid = tonumber(get_val("toteamid") or get_val("teamidto") or get_val("targetteamid") or get_val("destteamid") or get_val("buyerteamid")) or 0
-        local fee = tonumber(get_val("transferfee") or get_val("fee") or get_val("amount") or get_val("value")) or 0
-        local date_raw = tonumber(get_val("transferdate") or get_val("date")) or 0
-
-        if pid > 0 and (from_tid == managed_tid or to_tid == managed_tid) then
-            history[#history + 1] = {
-                playerid = pid,
-                fromteamid = from_tid,
-                toteamid = to_tid,
-                fee = fee,
-                date_raw = date_raw,
-                date = decode_fifa_date(date_raw) -- nil when unknown
-            }
-        end
-    end
-
+-- Reads a small career table into plain { field = value } rows. GetDBTableRows comes first because it gives real
+-- column names and text columns (the names in career_managerhistory); record-by-record access is the fallback.
+-- Only ask for columns that exist: Live Editor logs "no field X" for a missing one.
+local function read_table_rows(table_name, fields)
+    local rows = {}
     pcall(function()
         if type(GetDBTableRows) == "function" then
-            local rows = GetDBTableRows("career_transferhistory")
-            if type(rows) == "table" and #rows > 0 then
-                for _, r in ipairs(rows) do
-                    parse_cth_row(function(fieldName)
-                        local target = fieldName:lower()
-                        for k, v in pairs(r) do
-                            if tostring(k):lower() == target then
-                                return (type(v) == "table" and v.value) or v
+            local raw = GetDBTableRows(table_name)
+            if type(raw) == "table" then
+                for _, rr in ipairs(raw) do
+                    local row = {}
+                    for _, f in ipairs(fields) do
+                        local v = rr[f]
+                        if v == nil then
+                            for k, val in pairs(rr) do
+                                if tostring(k):lower() == f then v = val break end
                             end
                         end
-                        return nil
-                    end)
+                        if type(v) == "table" then v = v.value end
+                        row[f] = v
+                    end
+                    rows[#rows + 1] = row
                 end
             end
         end
     end)
-
-    if #history == 0 then
+    if #rows == 0 then
         pcall(function()
             if LE and LE.db then
-                local cth = LE.db:GetTable("career_transferhistory")
-                if cth then
-                    local r = cth:GetFirstRecord()
+                local t = LE.db:GetTable(table_name)
+                if t then
+                    local r = t:GetFirstRecord()
                     while r and r > 0 do
-                        parse_cth_row(function(fieldName)
-                            return cth:GetRecordFieldValue(r, fieldName)
-                        end)
-                        r = cth:GetNextValidRecord()
+                        local row = {}
+                        for _, f in ipairs(fields) do row[f] = t:GetRecordFieldValue(r, f) end
+                        rows[#rows + 1] = row
+                        r = t:GetNextValidRecord()
                     end
                 end
             end
         end)
     end
-
-    return history
+    return rows
 end
+
+-- Players in the club's youth academy right now (career_youthplayers). A player who leaves this list and joins the
+-- first team was promoted, not bought.
+local function read_youth_set()
+    local set = {}
+    for _, row in ipairs(read_table_rows("career_youthplayers", { "playerid" })) do
+        local pid = tonumber(row.playerid) or 0
+        if pid > 0 then set[pid] = true end
+    end
+    return set
+end
+
+-- Contracts of the managed club (career_playercontract): pid -> { signon, wage, date, changed, status, split }.
+-- "date" is when the contract was signed (the day a signing joined); for a loan, "changed" is the day the loan began.
+local function read_contracts(managed_tid)
+    local map = {}
+    local fields = { "playerid", "teamid", "contract_date", "last_status_change_date", "signon_bonus", "wage",
+                     "contract_status", "loan_wage_split" }
+    for _, row in ipairs(read_table_rows("career_playercontract", fields)) do
+        local pid = tonumber(row.playerid) or 0
+        local tid = tonumber(row.teamid) or 0
+        if pid > 0 and (tid == managed_tid or tid == 0) then
+            map[pid] = {
+                signon = tonumber(row.signon_bonus) or 0,
+                wage = tonumber(row.wage) or 0,
+                date = decode_fifa_date(row.contract_date),
+                changed = decode_fifa_date(row.last_status_change_date),
+                status = tonumber(row.contract_status) or 0,
+                split = tonumber(row.loan_wage_split) or -1
+            }
+        end
+    end
+    return map
+end
+
+-- The biggest signing and the biggest sale of the current season, from career_managerhistory (the last season row of
+-- the managed club). The game keeps only the SURNAME and the fee of those two deals; every other fee is not stored.
+local function read_big_deals(managed_tid)
+    local fields = { "teamid", "season", "bigbuyplayername", "bigbuyamount", "bigsellplayername", "bigsellamount" }
+    local best = nil
+    for _, row in ipairs(read_table_rows("career_managerhistory", fields)) do
+        local tid = tonumber(row.teamid) or 0
+        local season = tonumber(row.season) or 0
+        if (tid == managed_tid or tid == 0) and (not best or season >= best.season) then
+            best = { season = season, row = row }
+        end
+    end
+    local deals = {}
+    if best then
+        local function fee_m(amount)
+            amount = tonumber(amount) or 0
+            return math.floor(amount / 10000 + 0.5) / 100
+        end
+        local buy_name = trim(best.row.bigbuyplayername)
+        local sell_name = trim(best.row.bigsellplayername)
+        if buy_name ~= "" and (tonumber(best.row.bigbuyamount) or 0) > 0 then
+            deals.buy_name, deals.buy_fee = buy_name, fee_m(best.row.bigbuyamount)
+        end
+        if sell_name ~= "" and (tonumber(best.row.bigsellamount) or 0) > 0 then
+            deals.sell_name, deals.sell_fee = sell_name, fee_m(best.row.bigsellamount)
+        end
+    end
+    return deals
+end
+
+-- BEGIN transfer_rules (this exact block is also run by tests/lua/test_transfer_logic.lua)
+-- What an FC 26 career save really holds about transfers (checked against a real save and the game's own
+-- transfer-history screen):
+--   * there is NO transfer-history table, so fees and clubs are not stored for most deals;
+--   * career_managerhistory keeps the surname and fee of the single biggest signing and sale of each season;
+--   * a player's join date (players.playerjointeamdate) is the day he joined his CURRENT club: for a signing that is
+--     the signing day, for a player we sold it is the sale day at the buyer;
+--   * career_playercontract has the signing day (contract_date), the sign-on bonus and, for loans, the day the loan
+--     began (last_status_change_date);
+--   * career_youthplayers lists the academy: a player who leaves that list for the first team was promoted.
+-- Whatever cannot be read is reported as unknown (feeUnknown / "Unknown club"), never guessed.
+
+local function norm_name(s)
+    local t = tostring(s or ""):lower()
+    t = t:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
+    return t
+end
+
+-- The manager history stores only a surname ("Guerra"). A full name fits when it is equal or ends with " surname".
+local function name_matches(full_name, short_name)
+    local f, s = norm_name(full_name), norm_name(short_name)
+    if f == "" or s == "" then return false end
+    if f == s then return true end
+    return #f > #s and f:sub(-(#s + 1)) == " " .. s
+end
+
+-- candidates: list of { pid =, name = }. Returns the pid only when exactly one candidate has that surname.
+local function match_big_deal(short_name, candidates)
+    if not short_name or short_name == "" then return nil end
+    local found = nil
+    for _, c in ipairs(candidates) do
+        if name_matches(c.name, short_name) then
+            if found then return nil end
+            found = c.pid
+        end
+    end
+    return found
+end
+
+-- A date read from the save is trusted only when it lies inside the current season so far (ISO strings compare
+-- correctly as text). Anything else (an old contract date, an unreadable value) falls back to the career date.
+local function trusted_date(iso, season_start, today)
+    if type(iso) == "string" and iso >= season_start and iso <= today then return iso end
+    return nil
+end
+
+-- A loan's start day is the contract's last status change. It is used even when the loan began in an earlier season
+-- (a loan can run for years), as long as it is a real date that is not in the future.
+local function past_date(iso, today)
+    if type(iso) == "string" and iso <= today then return iso end
+    return nil
+end
+
+-- a: loan_parent (club id or nil), was_youth, have_youth_list, is_big_buy, signon (sign-on bonus or nil)
+-- Returns the transfer type and the reason (the reason is written to the monitor log).
+local function classify_arrival(a)
+    if a.loan_parent then return "In (Loan)", "on loan from another club" end
+    if a.was_youth then return "Promoted In", "was in the youth academy list" end
+    if a.is_big_buy then return "In (Permanent)", "named as the season's biggest signing" end
+    if a.have_youth_list then return "In (Permanent)", "not in the youth academy list" end
+    -- No academy list from an earlier session to compare with. Promoted youth get a first contract without a sign-on
+    -- bonus, signings and free agents get one. This is a best guess and is said so in the log.
+    if (a.signon or 0) > 0 then return "In (Permanent)", "has a sign-on bonus (guess)" end
+    return "Promoted In", "no sign-on bonus (guess)"
+end
+
+-- ctx: managed_tid, today, season_start, season_year, loans_in, loans_out, all_links, previous_teams, youth_before,
+--      contracts, info, decode(raw)->iso, team_name(tid), player_name(pid), big_buy_pid/big_buy_fee,
+--      big_sell_pid/big_sell_fee
+-- Each describe_* returns a table ready to send: playerName, type, feeM, feeUnknown, fromToClub, date, message,
+-- key (stable for the whole season, so a deal is sent once) and why.
+local function describe_arrival(pid, ctx)
+    local name = ctx.player_name(pid)
+    local info = ctx.info[pid] or {}
+    local contract = ctx.contracts[pid]
+    local join = trusted_date(ctx.decode(info.join_days), ctx.season_start, ctx.today)
+    local signed = contract and trusted_date(contract.date, ctx.season_start, ctx.today)
+    local loan_parent = ctx.loans_in[pid]
+    local youth_list = ctx.youth_before
+    local kind, why = classify_arrival({
+        loan_parent = loan_parent,
+        was_youth = youth_list and youth_list[pid] or false,
+        have_youth_list = youth_list ~= nil and next(youth_list) ~= nil,
+        is_big_buy = (ctx.big_buy_pid == pid),
+        signon = contract and contract.signon
+    })
+    local d = { pid = pid, playerName = name, type = kind, why = why, feeM = 0.0, feeUnknown = false }
+    if kind == "In (Loan)" then
+        d.fromToClub = ctx.team_name(loan_parent)
+        d.date = (contract and past_date(contract.changed, ctx.today)) or join or ctx.today
+        d.message = string.format("%s joined on loan from %s.", name, d.fromToClub)
+        d.key = string.format("V25_LOANIN_%d_%d_%d", pid, loan_parent, ctx.season_year)
+    elseif kind == "Promoted In" then
+        d.fromToClub = "Youth Academy"
+        d.date = join or signed or ctx.today
+        d.message = string.format("%s was promoted from the youth academy.", name)
+        d.key = string.format("V25_IN_%d_%d", pid, ctx.season_year)
+    else
+        local prev = ctx.previous_teams[pid]
+        d.fromToClub = (prev and prev > 0 and prev ~= ctx.managed_tid) and ctx.team_name(prev) or "Unknown club"
+        d.date = join or signed or ctx.today
+        if ctx.big_buy_pid == pid and ctx.big_buy_fee then
+            d.feeM = ctx.big_buy_fee
+            d.message = string.format("%s signed for EUR %.2fM.", name, d.feeM)
+        else
+            d.feeUnknown = true
+            d.message = string.format("%s signed (fee not stored in the save).", name)
+        end
+        d.key = string.format("V25_IN_%d_%d", pid, ctx.season_year)
+    end
+    return d
+end
+
+local function describe_departure(pid, ctx)
+    local name = ctx.player_name(pid)
+    local info = ctx.info[pid] or {}
+    local contract = ctx.contracts[pid]
+    local current = ctx.all_links[pid] or 0
+    if current == ctx.managed_tid then current = 0 end
+    local loan_dest = ctx.loans_out[pid]
+    local d = { pid = pid, playerName = name, feeM = 0.0, feeUnknown = false }
+    if loan_dest ~= nil then
+        local dest = (loan_dest > 0) and loan_dest or current
+        d.type = "Out (Loan)"
+        d.fromToClub = (dest > 0) and ctx.team_name(dest) or "Unknown club"
+        d.date = (contract and past_date(contract.changed, ctx.today)) or ctx.today
+        d.message = (dest > 0) and string.format("%s loaned out to %s.", name, d.fromToClub)
+            or string.format("%s loaned out.", name)
+        d.key = string.format("V25_LOANOUT_%d_%d_%d", pid, dest, ctx.season_year)
+        d.why = "listed in playerloans with us as the parent club"
+    else
+        local released = current <= 0
+        d.type = "Out (Permanent)"
+        d.fromToClub = released and "Free Agent / Released" or ctx.team_name(current)
+        d.date = trusted_date(ctx.decode((ctx.info[pid] or {}).join_days), ctx.season_start, ctx.today) or ctx.today
+        if released then
+            d.message = string.format("%s left the club.", name)
+            d.why = "no longer linked to any club"
+        elseif ctx.big_sell_pid == pid and ctx.big_sell_fee then
+            d.feeM = ctx.big_sell_fee
+            d.message = string.format("%s sold to %s for EUR %.2fM.", name, d.fromToClub, d.feeM)
+            d.why = "named as the season's biggest sale"
+        else
+            d.feeUnknown = true
+            d.message = string.format("%s sold to %s (fee not stored in the save).", name, d.fromToClub)
+            d.why = "now at another club"
+        end
+        d.key = string.format("V25_OUT_%d_%d", pid, ctx.season_year)
+    end
+    return d
+end
+
+-- Finds who the season's biggest signing / sale was among the players that just arrived / left.
+local function assign_big_deals(ctx, deals, arrival_pids, departure_pids)
+    local function candidates(pids)
+        local list = {}
+        for _, pid in ipairs(pids) do list[#list + 1] = { pid = pid, name = ctx.player_name(pid) } end
+        return list
+    end
+    ctx.big_buy_pid, ctx.big_buy_fee = nil, nil
+    ctx.big_sell_pid, ctx.big_sell_fee = nil, nil
+    if deals.buy_name then
+        local pid = match_big_deal(deals.buy_name, candidates(arrival_pids))
+        if pid then ctx.big_buy_pid, ctx.big_buy_fee = pid, deals.buy_fee end
+    end
+    if deals.sell_name then
+        local pid = match_big_deal(deals.sell_name, candidates(departure_pids))
+        if pid then ctx.big_sell_pid, ctx.big_sell_fee = pid, deals.sell_fee end
+    end
+end
+-- END transfer_rules
+
+-- BEGIN manual_transfers (this exact block is also run by tests/lua/test_transfer_logic.lua)
+-- Deals the game does not store (most fees, anything from before the script was first run) can be listed by hand in
+-- Documents\FC26 Export\manual_transfers.csv, one per line:   date,player,type,fee_m,club
+--   2028-07-06,Pedro Lima,Out (Permanent),20.0,Brighton
+-- type: In (Permanent) | Out (Permanent) | In (Loan) | Out (Loan) | Promoted In (short forms such as in, out, loan in,
+-- loan out, promoted are fine); fee_m: millions, "free", or empty when unknown; a leading # makes a comment line.
+local function parse_manual_fee(text)
+    local t = tostring(text or ""):lower():gsub("\226\130\172", ""):gsub("\194\163", ""):gsub("[%s$,]", "")
+    if t == "" or t == "?" or t == "unknown" then return 0.0, true end
+    if t == "free" or t == "0" then return 0.0, false end
+    local num, unit = t:match("^([%d%.]+)([mk]?)")
+    num = tonumber(num)
+    if not num then return 0.0, true end
+    if unit == "k" then num = num / 1000 end
+    return math.floor(num * 100 + 0.5) / 100, false
+end
+
+local function parse_manual_type(text)
+    local t = tostring(text or ""):lower():gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    if t == "promoted in" or t == "promoted" or t == "promotion" then return "Promoted In" end
+    local loan = t:find("loan", 1, true) ~= nil
+    if t:find("out", 1, true) or t == "sold" or t == "sale" or t == "sell" then
+        return loan and "Out (Loan)" or "Out (Permanent)"
+    end
+    if t:find("in", 1, true) or t == "signed" or t == "signing" or t == "bought" or t == "buy" then
+        return loan and "In (Loan)" or "In (Permanent)"
+    end
+    return nil
+end
+
+-- Returns a list of { date, player, type, feeM, feeUnknown, club } and a list of lines that could not be read.
+local function parse_manual_transfers(text)
+    local rows, bad = {}, {}
+    for line in tostring(text or ""):gmatch("[^\r\n]+") do
+        local l = line:gsub("^\239\187\191", ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if l ~= "" and l:sub(1, 1) ~= "#" then
+            local date, player, ttype, fee, club = l:match("^([^,]*),([^,]*),([^,]*),([^,]*),?(.*)$")
+            if date then
+                date = date:gsub("%s", "")
+                local y, m, d = date:match("^(%d%d%d%d)-(%d%d?)-(%d%d?)$")
+                local kind = parse_manual_type(ttype)
+                player = tostring(player):gsub("^%s+", ""):gsub("%s+$", "")
+                if y and kind and player ~= "" then
+                    local fee_m, unknown = parse_manual_fee(fee)
+                    if kind == "Promoted In" or kind:find("Loan", 1, true) then fee_m, unknown = 0.0, false end
+                    club = tostring(club or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                    if club == "" then club = (kind == "Promoted In") and "Youth Academy" or "Unknown club" end
+                    rows[#rows + 1] = {
+                        date = string.format("%04d-%02d-%02d", tonumber(y), tonumber(m), tonumber(d)),
+                        player = player, type = kind, feeM = fee_m, feeUnknown = unknown, club = club
+                    }
+                elseif not (date:lower() == "date") then
+                    bad[#bad + 1] = l
+                end
+            else
+                bad[#bad + 1] = l
+            end
+        end
+    end
+    return rows, bad
+end
+-- END manual_transfers
 
 local function beam_transfer_to_bridge(t_data)
     local managed_club = t_data.clubName or (state and state.managed_team_name) or safe_team_name(t_data.managed_tid or get_managed_team_id())
@@ -1813,21 +2093,23 @@ local function beam_transfer_to_bridge(t_data)
         string.format('"fromToClub": "%s"', jstr(other)),
         string.format('"date": "%s"', jstr(date))
     }
-    if t_data.feeEstimated then parts[#parts + 1] = '"feeEstimated": true' end
+    if t_data.feeUnknown then parts[#parts + 1] = '"feeUnknown": true' end
     local payload = "{\n  " .. table.concat(parts, ",\n  ") .. "\n}"
 
     send_payload_to_bridge(payload, string.format("Transfer [%s]: %s (%s)", tostring(t_data.type), player, other))
-    log_monitor(string.format(">>> BEAMED TRANSFER: %s | %s | %s | EUR %.2fM | %s <<<",
-        player, tostring(t_data.type), other, feeM, date))
-    print(string.format("[FC26 AutoCapture TRANSFER] %s | %s | %s | EUR %.2fM | %s",
-        player, tostring(t_data.type), other, feeM, date))
+    local feeText = t_data.feeUnknown and "fee unknown" or string.format("EUR %.2fM", feeM)
+    log_monitor(string.format(">>> BEAMED TRANSFER: %s | %s | %s | %s | %s <<<",
+        player, tostring(t_data.type), other, feeText, date))
+    print(string.format("[FC26 AutoCapture TRANSFER] %s | %s | %s | %s | %s",
+        player, tostring(t_data.type), other, feeText, date))
 end
 
 -- ---------------------------------------------------------------------------
--- Saved state (squad baseline + keys of transfers that were already sent)
+-- Saved state (squad baseline, academy list, loans out) + keys of transfers that were already sent
 -- ---------------------------------------------------------------------------
 local STATE_FILE = COMMUNITY_ROOT .. "/auto_capture_state.lua"
 local BEAMED_FILE = COMMUNITY_ROOT .. "/beamed_transfers.txt"
+local MANUAL_FILE = COMMUNITY_ROOT .. "/manual_transfers.csv"
 
 local function load_saved_telemetry_state()
     local candidatePaths = {
@@ -1849,16 +2131,20 @@ local function load_saved_telemetry_state()
     return nil
 end
 
-local function save_auto_capture_state(squad, all_teams)
+local function save_auto_capture_state(squad, all_teams, youth, loans_out)
     pcall(function()
-        local squadDump = {}
-        for pid, _ in pairs(squad or {}) do squadDump[#squadDump + 1] = "[" .. pid .. "]=true" end
+        local function dump_set(set)
+            local parts = {}
+            for pid in pairs(set or {}) do parts[#parts + 1] = "[" .. pid .. "]=true" end
+            return table.concat(parts, ",")
+        end
         local teamsDump = {}
         for pid, tid in pairs(all_teams or {}) do teamsDump[#teamsDump + 1] = "[" .. pid .. "]=" .. tid end
 
         local f = io.open(STATE_FILE, "w")
         if f then
-            f:write("return { squad = {" .. table.concat(squadDump, ",") .. "}, allPlayerTeams = {" .. table.concat(teamsDump, ",") .. "} }\n")
+            f:write("return { squad = {" .. dump_set(squad) .. "}, allPlayerTeams = {" .. table.concat(teamsDump, ",")
+                .. "}, youth = {" .. dump_set(youth) .. "}, loansOut = {" .. dump_set(loans_out) .. "} }\n")
             f:close()
         end
     end)
@@ -1897,198 +2183,181 @@ local function emit_transfer(key, data, force_sync)
     return false
 end
 
--- Latest history row for a player entering / leaving the managed club (the table holds every past spell too).
-local function latest_history_row(history, pid, field, managed_tid)
-    local found = nil
-    for _, th in ipairs(history) do
-        if th.playerid == pid and th[field] == managed_tid then
-            if not found or (th.date_raw or 0) >= (found.date_raw or 0) then found = th end
-        end
-    end
-    return found
+-- Players listed in manual_transfers.csv win over what the script works out for the same player and direction.
+local manual_override = {}
+
+local function transfer_direction(transfer_type)
+    return (tostring(transfer_type):sub(1, 3) == "Out") and "OUT" or "IN"
 end
 
-local function fee_from_history(th)
-    if th and th.fee and th.fee > 0 then
-        return math.floor((th.fee / 1000000) * 100) / 100
+local function import_manual_transfers(managed_club, force_sync)
+    local f = io.open(MANUAL_FILE, "r")
+    if not f then return 0 end
+    local text = f:read("*a")
+    f:close()
+    local rows, bad = parse_manual_transfers(text)
+    for _, line in ipairs(bad) do
+        log_monitor("manual_transfers.csv: line not understood and skipped: " .. line)
     end
-    return nil
+    local sent = 0
+    for _, r in ipairs(rows) do
+        manual_override[norm_name(r.player) .. "|" .. transfer_direction(r.type)] = true
+        local message = r.feeUnknown and string.format("%s: %s (%s), fee not known.", r.type, r.player, r.club)
+            or string.format("%s: %s (%s), EUR %.2fM.", r.type, r.player, r.club, r.feeM)
+        local key = string.format("MANUAL_%s_%s_%s", r.date, norm_name(r.player), r.type)
+        if emit_transfer(key, {
+            playerName = r.player, type = r.type, feeM = r.feeM, feeUnknown = r.feeUnknown,
+            fromToClub = r.club, date = r.date, clubName = managed_club, message = message
+        }, force_sync) then
+            sent = sent + 1
+        end
+    end
+    if #rows > 0 then
+        log_monitor(string.format("manual_transfers.csv: %d line(s) read, %d sent.", #rows, sent))
+    end
+    return sent
+end
+
+-- Sends one described deal (see describe_arrival / describe_departure).
+local function emit_described(d, managed_club, force_sync)
+    if manual_override[norm_name(d.playerName) .. "|" .. transfer_direction(d.type)] then return false end
+    local sent = emit_transfer(d.key, {
+        playerName = d.playerName, type = d.type, feeM = d.feeM, feeUnknown = d.feeUnknown,
+        fromToClub = d.fromToClub, date = d.date, clubName = managed_club, message = d.message
+    }, force_sync)
+    if sent then
+        log_monitor(string.format("Transfer rule: %s -> %s (%s)", d.playerName, d.type, d.why or "?"))
+    end
+    return sent
+end
+
+local function season_of(today_year, today_month)
+    local year = (today_month < 7) and (today_year - 1) or today_year
+    return year, string.format("%04d-07-01", year)
+end
+
+local function sorted_keys(set)
+    local list = {}
+    for pid in pairs(set) do list[#list + 1] = pid end
+    table.sort(list)
+    return list
+end
+
+local function make_transfer_context(managed_tid, today, season_year, season_start, d)
+    return {
+        managed_tid = managed_tid, today = today, season_year = season_year, season_start = season_start,
+        loans_in = d.loans_in, loans_out = d.loans_out, all_links = d.all_links,
+        previous_teams = d.previous_teams or {}, youth_before = d.youth_before,
+        contracts = read_contracts(managed_tid), info = d.info,
+        decode = function(raw) return (decode_fifa_date(raw)) end,
+        team_name = safe_team_name, player_name = safe_player_name
+    }
 end
 
 -- Sync current-season transfers that happened before / while the script was not running.
+--   * loans come from playerloans,
+--   * signings and promotions from the join dates of the squad (and from the squad saved at the end of the last run),
+--   * sales and releases from the squad saved at the end of the last run (the very first run has no such baseline,
+--     so deals made before it can only be added through manual_transfers.csv).
 local function sync_season_transfers(managed_tid, force_sync)
     managed_tid = managed_tid or (state and state.managed_team_id) or get_managed_team_id()
     local managed_club = (state and state.managed_team_name) or safe_team_name(managed_tid)
-    local todayDateStr, curY, curM, _ = get_current_career_date()
-    local seasonStartYear = (curM < 7) and (curY - 1) or curY
-    local seasonStartDateStr = string.format("%04d-07-01", seasonStartYear)
+    local todayDateStr, curY, curM = get_current_career_date()
+    local seasonYear, seasonStart = season_of(curY, curM)
 
     log_monitor(string.format("Scanning transfers for %s (ID: %d) | Date: %s | Season Start: %s",
-        managed_club, managed_tid, todayDateStr, seasonStartDateStr))
+        managed_club, managed_tid, todayDateStr, seasonStart))
 
     local current_squad, all_teams, club_links = get_managed_squad_state(managed_tid)
     if next(current_squad) == nil then
         log_monitor("Transfer scan skipped: could not read the squad (is a career loaded?)")
         return 0
     end
+
+    local saved = load_saved_telemetry_state()
     local loans_in, loans_out = get_active_loans(managed_tid, current_squad, club_links)
-    local transfer_history = get_career_transfer_history(managed_tid)
+    local was_on_loan = (saved and saved.loansOut) or {}
+
+    -- Players who left permanently since the saved baseline (a loan is handled through playerloans).
+    local leavers = {}
+    if saved and saved.squad then
+        for pid in pairs(saved.squad) do
+            if not current_squad[pid] and not loans_out[pid] then leavers[#leavers + 1] = pid end
+        end
+        if #leavers > 15 then
+            log_monitor(string.format("Saved squad differs by %d players - not treated as transfers (different career?)", #leavers))
+            leavers = {}
+        end
+        table.sort(leavers)
+    end
 
     local wanted = {}
     for pid in pairs(current_squad) do wanted[pid] = true end
-    local squad_info = get_squad_players_info(wanted)
+    for _, pid in ipairs(leavers) do wanted[pid] = true end
+    local info = get_player_join_info(wanted)
 
-    local synced_count = 0
-    local synced_pids = {}
-
-    -- 1. career_transferhistory: incoming AND outgoing deals of this season
-    for _, th in ipairs(transfer_history) do
-        local pid = th.playerid
-        local inSeason
-        if th.date then inSeason = (th.date >= seasonStartDateStr) else inSeason = force_sync end
-        if inSeason then
-            local pName = safe_player_name(pid)
-            local feeM = fee_from_history(th) or 0.0
-            local transferDate = th.date or todayDateStr
-
-            if th.toteamid == managed_tid and th.fromteamid ~= managed_tid then
-                local fromClub = (th.fromteamid > 0) and safe_team_name(th.fromteamid) or "Free Agency"
-                local tType = loans_in[pid] and "In (Loan)" or "In (Permanent)"
-                if emit_transfer(string.format("CTH_IN_%d_%d_%s", pid, th.fromteamid, transferDate), {
-                    playerName = pName, type = tType, feeM = feeM, fromToClub = fromClub, date = transferDate,
-                    clubName = managed_club,
-                    message = string.format("%s joined %s from %s for EUR %.2fM!", pName, managed_club, fromClub, feeM)
-                }, force_sync) then
-                    synced_count = synced_count + 1
-                end
-                synced_pids[pid] = true
-            elseif th.fromteamid == managed_tid and th.toteamid ~= managed_tid then
-                local toClub = (th.toteamid > 0) and safe_team_name(th.toteamid) or "Free Agent / Released"
-                local tType = loans_out[pid] and "Out (Loan)" or "Out (Permanent)"
-                if emit_transfer(string.format("CTH_OUT_%d_%d_%s", pid, th.toteamid, transferDate), {
-                    playerName = pName, type = tType, feeM = feeM, fromToClub = toClub, date = transferDate,
-                    clubName = managed_club,
-                    message = string.format("%s transferred to %s for EUR %.2fM.", pName, toClub, feeM)
-                }, force_sync) then
-                    synced_count = synced_count + 1
-                end
-            end
-        end
+    -- Arrivals: loans in, join dates inside this season, and anyone new compared with the saved squad.
+    local arrivals, seen = {}, {}
+    local function add_arrival(pid)
+        if not seen[pid] then seen[pid] = true arrivals[#arrivals + 1] = pid end
     end
+    for _, pid in ipairs(sorted_keys(loans_in)) do add_arrival(pid) end
 
-    -- 2. active loans table
-    for pid, from_tid in pairs(loans_in) do
-        if not synced_pids[pid] then
-            local pName = safe_player_name(pid)
-            local fromClub = safe_team_name(from_tid)
-            if emit_transfer(string.format("LOAN_IN_%d_%d", pid, from_tid), {
-                playerName = pName, type = "In (Loan)", feeM = 0.0, fromToClub = fromClub, date = todayDateStr,
-                clubName = managed_club,
-                message = string.format("%s joined %s on loan from %s!", pName, managed_club, fromClub)
-            }, force_sync) then
-                synced_count = synced_count + 1
-            end
-            synced_pids[pid] = true
-        end
-    end
-
-    for pid, to_tid in pairs(loans_out) do
-        local pName = safe_player_name(pid)
-        -- to_tid is 0 when the loan club cannot be read; say so instead of sending an empty club name
-        local toClub = (to_tid > 0) and safe_team_name(to_tid) or "Unknown club"
-        local loanMessage = (to_tid > 0) and string.format("%s loaned out to %s.", pName, toClub)
-            or string.format("%s loaned out.", pName)
-        if emit_transfer(string.format("LOAN_OUT_%d_%d", pid, to_tid), {
-            playerName = pName, type = "Out (Loan)", feeM = 0.0, fromToClub = toClub, date = todayDateStr,
-            clubName = managed_club,
-            message = loanMessage
-        }, force_sync) then
-            synced_count = synced_count + 1
-        end
-    end
-
-    -- 3. join dates in the player table (signings the history table did not list). A real window rarely
-    --    brings in more than a handful of players, so a long list means "initial squad": skip it.
     local joins = {}
-    for pid in pairs(current_squad) do
-        if not synced_pids[pid] then
-            local pInfo = squad_info[pid]
-            if pInfo and pInfo.join_days and pInfo.join_days > 0 then
-                local joinDateStr, joinY, joinM = decode_fifa_date(pInfo.join_days)
-                if joinDateStr then
-                    local joinSeason = (joinM < 7) and (joinY - 1) or joinY
-                    if joinSeason >= seasonStartYear then
-                        joins[#joins + 1] = { pid = pid, info = pInfo, date = joinDateStr }
-                    end
-                end
-            end
+    for _, pid in ipairs(sorted_keys(current_squad)) do
+        if not loans_in[pid] and not was_on_loan[pid] and info[pid] then
+            local iso = decode_fifa_date(info[pid].join_days)
+            if iso and iso >= seasonStart and iso <= todayDateStr then joins[#joins + 1] = pid end
         end
     end
+    -- A real transfer window rarely brings in more than a handful of players: a long list means "initial squad".
     if #joins > 15 then
         log_monitor(string.format("Join-date scan found %d players - looks like the initial squad, not signings; skipped", #joins))
     else
-        for _, j in ipairs(joins) do
-            local pName = safe_player_name(j.pid)
-            local tType = j.info.is_academy and "Promoted In" or "In (Permanent)"
-            local fromClub = j.info.is_academy and "Youth Academy" or "External Club"
-            local feeM = j.info.is_academy and 0.0 or j.info.val_m
-            if emit_transfer(string.format("JOIN_%d_%s_%s", j.pid, tType, j.date), {
-                playerName = pName, type = tType, feeM = feeM, fromToClub = fromClub, date = j.date,
-                clubName = managed_club, feeEstimated = (not j.info.is_academy),
-                message = string.format("%s joined %s (%s)!", pName, managed_club, tType)
-            }, force_sync) then
-                synced_count = synced_count + 1
-            end
-            synced_pids[j.pid] = true
-        end
+        for _, pid in ipairs(joins) do add_arrival(pid) end
     end
-
-    -- 4. squad compared with the baseline saved at the end of the last session
-    local saved_state = load_saved_telemetry_state()
-    if saved_state and saved_state.squad then
-        for pid in pairs(current_squad) do
-            if not saved_state.squad[pid] and not synced_pids[pid] then
-                local pName = safe_player_name(pid)
-                local pInfo = squad_info[pid]
-                local isAcad = pInfo and pInfo.is_academy
-                local tType = isAcad and "Promoted In" or "In (Permanent)"
-                local fromClub = isAcad and "Youth Academy" or "External Club"
-                local prev = all_teams[pid]
-                if not isAcad and prev and prev > 0 and prev ~= managed_tid then fromClub = safe_team_name(prev) end
-                local feeM = (pInfo and not isAcad) and pInfo.val_m or 0.0
-                if emit_transfer(string.format("STATE_DIFF_IN_%d_%s", pid, todayDateStr), {
-                    playerName = pName, type = tType, feeM = feeM, fromToClub = fromClub, date = todayDateStr,
-                    clubName = managed_club, feeEstimated = (feeM > 0),
-                    message = string.format("%s joined %s from %s!", pName, managed_club, fromClub)
-                }, force_sync) then
-                    synced_count = synced_count + 1
+    if saved and saved.squad then
+        local newcomers = {}
+        for _, pid in ipairs(sorted_keys(current_squad)) do
+            if not saved.squad[pid] and not loans_in[pid] then
+                if was_on_loan[pid] then
+                    log_monitor(string.format("%s is back from a loan (not a transfer)", safe_player_name(pid)))
+                else
+                    newcomers[#newcomers + 1] = pid
                 end
             end
         end
-
-        local left = {}
-        for pid in pairs(saved_state.squad) do
-            if not current_squad[pid] then left[#left + 1] = pid end
-        end
-        if #left <= 15 then
-            for _, pid in ipairs(left) do
-                local pName = safe_player_name(pid)
-                local newTid = all_teams[pid] or 0
-                local toClub = (newTid > 0 and newTid ~= managed_tid) and safe_team_name(newTid) or "Free Agent / Released"
-                if emit_transfer(string.format("STATE_DIFF_OUT_%d_%s", pid, todayDateStr), {
-                    playerName = pName, type = "Out (Permanent)", feeM = 0.0, fromToClub = toClub, date = todayDateStr,
-                    clubName = managed_club,
-                    message = string.format("%s transferred out of %s.", pName, managed_club)
-                }, force_sync) then
-                    synced_count = synced_count + 1
-                end
-            end
+        if #newcomers > 15 then
+            log_monitor(string.format("Squad differs from the saved one by %d new players - not treated as transfers (different career?)", #newcomers))
         else
-            log_monitor(string.format("Saved squad differs by %d players - not treated as transfers (different career?)", #left))
+            for _, pid in ipairs(newcomers) do add_arrival(pid) end
         end
     end
 
-    save_auto_capture_state(current_squad, all_teams)
+    local ctx = make_transfer_context(managed_tid, todayDateStr, seasonYear, seasonStart, {
+        loans_in = loans_in, loans_out = loans_out, all_links = all_teams,
+        previous_teams = saved and saved.allPlayerTeams, youth_before = saved and saved.youth, info = info
+    })
+    assign_big_deals(ctx, read_big_deals(managed_tid), arrivals, leavers)
+
+    local synced_count = 0
+    for _, pid in ipairs(arrivals) do
+        if emit_described(describe_arrival(pid, ctx), managed_club, force_sync) then synced_count = synced_count + 1 end
+    end
+    for _, pid in ipairs(sorted_keys(loans_out)) do
+        if emit_described(describe_departure(pid, ctx), managed_club, force_sync) then synced_count = synced_count + 1 end
+    end
+    for _, pid in ipairs(leavers) do
+        if emit_described(describe_departure(pid, ctx), managed_club, force_sync) then synced_count = synced_count + 1 end
+    end
+
+    local youth_now = read_youth_set()
+    if next(youth_now) == nil and saved and saved.youth then youth_now = saved.youth end
+    if state then
+        state.youth = youth_now
+        state.loans_out = loans_out
+    end
+    save_auto_capture_state(current_squad, all_teams, youth_now, loans_out)
 
     if synced_count > 0 then
         log_monitor(string.format("Synced %d current season transfer(s) to Bridge.", synced_count))
@@ -2120,19 +2389,36 @@ local function scan_squad_changes()
         return
     end
 
-    local arrivals, departures = {}, {}
+    local loans_in, loans_out = get_active_loans(managed_tid, current_squad, current_links)
+    local was_on_loan = state.loans_out or {}
+
+    local arrivals, departures, returned = {}, {}, {}
     local squad_size = 0
     for pid in pairs(state.squad) do squad_size = squad_size + 1 end
-    for pid in pairs(current_squad) do
-        if not state.squad[pid] then arrivals[#arrivals + 1] = pid end
+    for _, pid in ipairs(sorted_keys(current_squad)) do
+        if not state.squad[pid] then
+            if was_on_loan[pid] and not loans_in[pid] then
+                returned[#returned + 1] = pid
+            else
+                arrivals[#arrivals + 1] = pid
+            end
+        end
     end
-    for pid in pairs(state.squad) do
+    for _, pid in ipairs(sorted_keys(state.squad)) do
         if not current_squad[pid] then departures[#departures + 1] = pid end
     end
 
-    if #arrivals == 0 and #departures == 0 then
+    local function remember_state()
+        state.squad = current_squad
         state.all_player_teams = current_all_teams
+        state.loans_out = loans_out
+        local youth_now = read_youth_set()
+        if next(youth_now) ~= nil then state.youth = youth_now end
+    end
+
+    if #arrivals == 0 and #departures == 0 and #returned == 0 then
         state.suspect_reads = 0
+        remember_state()
         return
     end
 
@@ -2146,91 +2432,25 @@ local function scan_squad_changes()
     end
     state.suspect_reads = 0
 
-    local todayDateStr = get_current_career_date()
-    local loans_in, loans_out = get_active_loans(managed_tid, current_squad, current_links)
-    local transfer_history = get_career_transfer_history(managed_tid)
+    local todayDateStr, curY, curM = get_current_career_date()
+    local seasonYear, seasonStart = season_of(curY, curM)
     local wanted = {}
     for _, pid in ipairs(arrivals) do wanted[pid] = true end
     for _, pid in ipairs(departures) do wanted[pid] = true end
-    local squad_info = get_squad_players_info(wanted)
-    local previous_teams = state.all_player_teams or {}
+    local ctx = make_transfer_context(managed_tid, todayDateStr, seasonYear, seasonStart, {
+        loans_in = loans_in, loans_out = loans_out, all_links = current_all_teams,
+        previous_teams = state.all_player_teams, youth_before = state.youth, info = get_player_join_info(wanted)
+    })
+    assign_big_deals(ctx, read_big_deals(managed_tid), arrivals, departures)
 
-    for _, pid in ipairs(arrivals) do
-        local pName = safe_player_name(pid)
-        local pInfo = squad_info[pid]
-        local tType = "In (Permanent)"
-        local fromClub = "External Club"
-        local feeM = pInfo and pInfo.val_m or 0.0
-        local feeEstimated = true
-
-        local prevTid = previous_teams[pid] or 0
-        if prevTid > 0 and prevTid ~= managed_tid then fromClub = safe_team_name(prevTid) end
-
-        if loans_in[pid] then
-            tType = "In (Loan)"
-            fromClub = safe_team_name(loans_in[pid])
-            feeM, feeEstimated = 0.0, false
-        elseif (pInfo and pInfo.is_academy) or pid >= 300000 then
-            tType = "Promoted In"
-            fromClub = "Youth Academy"
-            feeM, feeEstimated = 0.0, false
-        else
-            local th = latest_history_row(transfer_history, pid, "toteamid", managed_tid)
-            if th then
-                if th.fromteamid > 0 then fromClub = safe_team_name(th.fromteamid) end
-                local f = fee_from_history(th)
-                if f then feeM, feeEstimated = f, false end
-            end
-        end
-
-        emit_transfer(string.format("IN_%d_%s_%s", pid, tType, todayDateStr), {
-            playerName = pName, type = tType, feeM = feeM, fromToClub = fromClub, date = todayDateStr,
-            clubName = managed_club, feeEstimated = feeEstimated and feeM > 0,
-            message = string.format("%s joined %s from %s!", pName, managed_club, fromClub)
-        }, false)
+    for _, pid in ipairs(returned) do
+        log_monitor(string.format("%s is back from a loan (not a transfer)", safe_player_name(pid)))
     end
+    for _, pid in ipairs(arrivals) do emit_described(describe_arrival(pid, ctx), managed_club, false) end
+    for _, pid in ipairs(departures) do emit_described(describe_departure(pid, ctx), managed_club, false) end
 
-    for _, pid in ipairs(departures) do
-        local pName = safe_player_name(pid)
-        local toClub = "Free Agent / Released"
-        local tType = "Out (Permanent)"
-        local feeM = 0.0
-        local feeEstimated = false
-
-        local newTid = current_all_teams[pid] or 0
-        if newTid > 0 and newTid ~= managed_tid then toClub = safe_team_name(newTid) end
-
-        if loans_out[pid] then
-            tType = "Out (Loan)"
-            if loans_out[pid] > 0 then
-                toClub = safe_team_name(loans_out[pid])
-            elseif toClub == "Free Agent / Released" then
-                toClub = "Unknown club" -- a loan is never a release
-            end
-        else
-            local th = latest_history_row(transfer_history, pid, "fromteamid", managed_tid)
-            if th then
-                if th.toteamid > 0 then toClub = safe_team_name(th.toteamid) end
-                local f = fee_from_history(th)
-                if f then feeM = f end
-            end
-            if feeM == 0.0 and toClub ~= "Free Agent / Released" then
-                local pInfo = squad_info[pid]
-                feeM = pInfo and pInfo.val_m or 0.0
-                feeEstimated = feeM > 0
-            end
-        end
-
-        emit_transfer(string.format("OUT_%d_%s_%s", pid, tType, todayDateStr), {
-            playerName = pName, type = tType, feeM = feeM, fromToClub = toClub, date = todayDateStr,
-            clubName = managed_club, feeEstimated = feeEstimated,
-            message = string.format("%s transferred to %s.", pName, toClub)
-        }, false)
-    end
-
-    state.squad = current_squad
-    state.all_player_teams = current_all_teams
-    save_auto_capture_state(current_squad, current_all_teams)
+    remember_state()
+    save_auto_capture_state(current_squad, current_all_teams, state.youth, loans_out)
 end
 
 local function check_for_squad_transfers(force)
@@ -2293,7 +2513,10 @@ _G["FC26_AUTO_CAPTURE_STATE"] = state
 -- Anything left undelivered by an earlier session goes out first, then the catch-up transfer sync.
 pcall(adopt_outbox_leftovers)
 do
-    local ok, err = xpcall(function() sync_season_transfers(managed_team_id, false) end, debug.traceback)
+    local ok, err = xpcall(function()
+        import_manual_transfers(managed_team_name, false)
+        sync_season_transfers(managed_team_id, false)
+    end, debug.traceback)
     if not ok then log_monitor("Startup transfer sync error: " .. tostring(err)) end
 end
 
@@ -2573,7 +2796,8 @@ FC26_SyncLatestMatch = FC26_AutoCapture_SyncLatest
 -- Force sync function: Immediately scans and beams current season transfers
 function FC26_AutoCapture_SyncTransfers()
     print("[FC26 AutoCapture] Force syncing current season transfers...")
-    local count = sync_season_transfers(state.managed_team_id, true)
+    local count = import_manual_transfers(state.managed_team_name, true)
+    count = count + sync_season_transfers(state.managed_team_id, true)
     print(string.format("[FC26 AutoCapture] Transfers sync complete! Processed %d transfer(s).", count))
 end
 
@@ -2703,5 +2927,7 @@ print(" Commands:")
 print("   - FC26_AutoCapture_SyncLatest()   : Force-send latest match")
 print("   - FC26_AutoCapture_SyncTransfers(): Force-send current season transfers")
 print("   - FC26_BeamTransfer(name, type, fee, club): Manually beam any transfer")
+print("   - Deals the game does not store (fees, July deals made before the first run): list them in")
+print("     Documents\\FC26 Export\\manual_transfers.csv  (date,player,type,fee_m,club) and run this script again")
 print("   - FC26_AutoCapture_Status()       : Show queue + last bridge answers")
 print("=========================================================================")

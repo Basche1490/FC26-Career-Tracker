@@ -23,7 +23,8 @@ Open FC Live Editor, load your Career Mode save, and run `live-editor-scripts/FC
 It watches your club every 2 seconds and sends:
 
 - every finished match, with real line-ups, ratings, scorers, man of the match and league position
-- every transfer (permanent and loan, in and out) as it happens
+- every transfer (permanent and loan, in and out) as it happens, as far as the game stores it (see
+  "What the game stores about transfers" below)
 
 Keep these two files together in the same Live Editor scripts folder:
 
@@ -69,6 +70,43 @@ Other scripts:
 | `telemetry_test_connection.lua` | Checks that the bridge is reachable and prints what is wrong if it is not. |
 | `telemetry_sender_v2.lua` | Small sender used by older setups. |
 
+## What the game stores about transfers
+
+FC 26 has no transfer-history table. The script therefore works out each deal from what the save does hold, and
+says "unknown" where it cannot know instead of guessing:
+
+| Part of a deal | Where it comes from | Reliable? |
+| --- | --- | --- |
+| Loans in and out, the other club, the day the loan began | loans table + the player's contract | yes |
+| Signings: who, and the day they joined | join date in the player table + contract | yes |
+| Sales: who, which club bought him, the day | the squad saved at the end of the last run + the buyer's join date | yes, from the second run on |
+| Promotion from the academy | the player was in the youth academy list in the last run | yes, from the second run on |
+| Fee of the **biggest** signing and the **biggest** sale of the season | manager history (the game keeps only these two, by surname) | yes |
+| Every other fee, and the club a player was bought from | not stored by the game | no: shown as **Fee ?** / "Unknown club" in the app |
+| Players returning from a loan | noticed and not sent as a transfer | - |
+
+The very first run has no earlier squad to compare with, so it cannot see sales made before it, and it has to
+guess promotion versus signing from the sign-on bonus (promoted players have none). The monitor log says
+`Transfer rule: <player> -> <type> (<reason>)` for every deal, so a guess is visible; a wrong one can be
+corrected in the app or in `manual_transfers.csv`.
+
+### Filling the gaps: manual_transfers.csv
+
+Create `Documents\FC26 Export\manual_transfers.csv`, one deal per line (`#` starts a comment):
+
+```
+date,player,type,fee_m,club
+2028-07-06,Pedro Lima,Out (Permanent),20.0,Brighton
+2028-07-13,Joe Crook,Out (Permanent),280K,Metaloglobus
+2028-07-14,Oliver Ebner,In (Permanent),11.7,Athletic Club
+2028-07-01,Denilson Fernandes,In (Permanent),free,Free Agents
+```
+
+`type` is `In (Permanent)`, `Out (Permanent)`, `In (Loan)`, `Out (Loan)` or `Promoted In` (short forms such as
+`in`, `out`, `loan out`, `promoted` also work). `fee_m` is in millions (`26.0`, `€26.0M`, `280K`), `free`, or
+empty when unknown. The file is read every time `FC26_Auto_Capture.lua` starts and each line is sent once. A
+player listed there replaces what the script works out for that player and direction.
+
 ## 3. Playing matches
 
 When a match finishes, click **Advance** on the post-match summary to return to the Career Central Hub. EA FC
@@ -110,6 +148,13 @@ the capture script can be fixed against the real data instead of guesses.
 - To send a season's transfers again from scratch (for example after a script fix), close the capture script,
   delete the files in `Documents\FC26 Export\outbox` plus `beamed_transfers.txt` and `auto_capture_state.lua`
   in `Documents\FC26 Export`, start the bridge, then run `FC26_Auto_Capture.lua` again.
+  Deleting `auto_capture_state.lua` also forgets which sales and promotions it had already seen, so do it only
+  when you really want a fresh start. If the phone has not fetched the old events yet, stop the bridge and delete
+  `pc-bridge\telemetry_events.json` first, otherwise the phone receives the old (wrong) version as well as the
+  corrected one. The app merges a repeated deal (same player and day) into one entry and fills in a missing club or
+  fee, but it cannot know that an old entry with a different day is the same deal.
+- After updating to script version 2.5, the current season's transfers are sent once more with corrected types,
+  dates and fees; the keys of the earlier versions are not reused.
 - Run `telemetry_test_connection.lua`.
 - The bridge window prints a line for every request, every duplicate it ignored and every payload it refused.
 

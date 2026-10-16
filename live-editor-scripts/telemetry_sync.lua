@@ -967,13 +967,14 @@ function run_telemetry_sync(isAuto)
                 -- If no fee is found, set to 0.0 as requested
             else
                 -- Not from an external club: check if Youth Academy
+                -- FC 26 has no academy flag and player ids do not tell a signing from a promotion (bought players
+                -- also have ids above 300000), so only an explicit flag counts. FC26_Auto_Capture.lua uses the
+                -- academy list and the contract instead; this older script cannot tell the two apart.
                 local p = playersMap[pId]
                 local isAcad = false
                 if p then
                     local isAcadField = tonumber(val(p, "isacademy", 0)) or 0
-                    if isAcadField == 1 or pId >= 300000 then isAcad = true end
-                elseif pId >= 300000 then
-                    isAcad = true
+                    if isAcadField == 1 then isAcad = true end
                 end
 
                 if isAcad then
@@ -981,7 +982,7 @@ function run_telemetry_sync(isAuto)
                     transferType = "Promoted In"
                     feeM = 0.0
                 else
-                    fromClub = "External Club"
+                    fromClub = "Unknown club"
                     feeM = 0.0
                 end
             end
