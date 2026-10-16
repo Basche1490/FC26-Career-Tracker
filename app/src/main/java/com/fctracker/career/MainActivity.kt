@@ -74,6 +74,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Live polling runs while the app is on screen (and, if switched on in Settings, in the background
+    // through LiveSyncService). Leaving the screen also writes the career to disk immediately.
+    override fun onStart() {
+        super.onStart()
+        mainViewModel.onAppStarted()
+    }
+
+    override fun onStop() {
+        mainViewModel.onAppStopped()
+        super.onStop()
+    }
+
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -107,10 +119,6 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
             }
         }
         
-        LaunchedEffect(Unit) {
-            viewModel.startTelemetryPolling()
-        }
-
         // Handle navigation triggered by clicking a notification
         LaunchedEffect(pendingRoute, state.isOnboarded) {
             val route = pendingRoute

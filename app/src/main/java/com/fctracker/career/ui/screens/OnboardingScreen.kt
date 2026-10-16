@@ -270,7 +270,7 @@ fun OnboardingScreen(viewModel: com.fctracker.career.MainViewModel, onComplete: 
     var secondaryColor by remember { mutableStateOf("#ffffff") }
     var clubCrestUrl by remember { mutableStateOf("") }
     
-    val aiAgents = listOf("Google Gemini", "Grok", "Claude Haiku", "ChatGPT 3.5", "Other")
+    val aiAgents = listOf("Google Gemini", "Claude", "ChatGPT", "Grok", "Other")
     var aiAgentExpanded by remember { mutableStateOf(false) }
     var selectedAiAgent by remember { mutableStateOf(aiAgents[0]) }
     

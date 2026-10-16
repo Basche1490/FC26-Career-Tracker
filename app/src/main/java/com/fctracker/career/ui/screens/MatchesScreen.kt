@@ -397,6 +397,15 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
                 }
             }
 
+            if (match.statsEstimated) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "ⓘ Estimated stats: the game did not send full match detail, so line-up, ratings and team numbers are typical values. Edit the match to correct them.",
+                    fontSize = 10.sp,
+                    color = Color(0xFFF59E0B)
+                )
+            }
+
             // Goal Details (Scorers)
             if (match.goalDetails.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
@@ -1024,7 +1033,11 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                             expectedGoalsAgainst = xGAgainst.toDoubleOrNull() ?: 0.0,
                             leaguePosition = leaguePosition.toIntOrNull() ?: 1,
                             motmName = motmSearchQuery,
-                            playerPerformances = finalPerformances
+                            playerPerformances = finalPerformances,
+                            // Editing a match must not throw away what the game recorded: scorers and substitutions
+                            goalDetails = initialMatch?.goalDetails ?: emptyList(),
+                            substitutions = initialMatch?.substitutions ?: emptyList()
+                            // statsEstimated stays false: saving through this form counts as the user's review
                         )
                         onSave(match)
                     },

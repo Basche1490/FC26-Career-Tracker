@@ -56,9 +56,12 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
     var clubCrestUrl by remember { mutableStateOf(state.clubCrestUrl) }
     var aiAgent by remember { mutableStateOf(state.aiAgent) }
     var aiApiUrl by remember { mutableStateOf(state.aiApiUrl) }
-    var aiApiKey by remember { mutableStateOf(state.aiApiKey) }
+    val storedApiKey by viewModel.aiApiKey.collectAsState()
+    var aiApiKey by remember(storedApiKey) { mutableStateOf(storedApiKey) }
+    var aiModel by remember { mutableStateOf(state.aiModel) }
+    val backgroundSync by viewModel.backgroundSync.collectAsState()
     var aiAgentExpanded by remember { mutableStateOf(false) }
-    val aiAgents = listOf("Google Gemini", "Grok", "Claude Haiku", "ChatGPT 3.5", "Other")
+    val aiAgents = listOf("Google Gemini", "Claude", "ChatGPT", "Grok", "Other")
 
     var showClubNamePromptDialog by remember { mutableStateOf(false) }
     var pendingImportedJson by remember { mutableStateOf<String?>(null) }
@@ -445,7 +448,7 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                     
                     val context = androidx.compose.ui.platform.LocalContext.current
                     Button(onClick = { 
-                        viewModel.updateSettings(clubName, managerName, leagueName, country, currencySymbol, primaryColorHex, secondaryColorHex, clubCrestUrl, aiAgent, aiApiUrl, aiApiKey)
+                        viewModel.updateSettings(clubName, managerName, leagueName, country, currencySymbol, primaryColorHex, secondaryColorHex, clubCrestUrl, aiAgent, aiApiUrl, aiApiKey, aiModel)
                         android.widget.Toast.makeText(context, "Profile saved", android.widget.Toast.LENGTH_SHORT).show()
                     }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
                         Text("Save Profile Settings")
@@ -503,6 +506,19 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true
                     )
+                    OutlinedTextField(
+                        value = aiModel,
+                        onValueChange = { aiModel = it },
+                        label = { Text("Model (blank = ${com.fctracker.career.ai.AiClient.defaultModel(aiAgent).ifBlank { "enter one" }})") },
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        singleLine = true
+                    )
+                    Text(
+                        "Your key is kept in encrypted storage on this phone and is not included in backups. Tap \"Save Profile Settings\" above to apply.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
                 }
             }
 
@@ -532,6 +548,22 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Keep syncing when the app is closed", fontSize = 13.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                            Text(
+                                "Shows a small \"Live sync\" notification so match and transfer alerts still arrive. For best results, keep the phone on the same Wi-Fi and exclude this app from battery optimisation.",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(checked = backgroundSync, onCheckedChange = { viewModel.setBackgroundSync(it) })
+                    }
                     Spacer(modifier = Modifier.height(10.dp))
                     var bridgeInput by remember(state.telemetryServerUrl) { mutableStateOf(state.telemetryServerUrl) }
                     var testStatusMsg by remember { mutableStateOf<String?>(null) }
@@ -635,7 +667,7 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Text(
-                                "1. Dual Ports: Start_Bridge.bat now listens on Port 5050 (recommended) and Port 8080.",
+                                "1. Start_Bridge.bat listens on port 5050. Keep its window open while you play.",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -645,13 +677,13 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                "3. Fully Automatic (Hands-Free): Start_Bridge.bat now continuously polls for match completion. Whenever you finish a match and click 'Advance' to the Central Hub, your match and player stats sync automatically!",
+                                "3. Fully automatic: run FC26_Auto_Capture.lua in FC Live Editor. After a match, click 'Advance' to reach the Career Hub and the match and your transfers sync by themselves.",
                                 fontSize = 11.sp,
                                 color = Color(0xFF10B981),
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                "4. Manual Backup: If you ever want an instant sync without waiting, press F9 in Live Editor or click 'Sync Now' on the Web Dashboard (http://localhost:5050).",
+                                "4. Manual sync: type FC26_AutoCapture_SyncLatest() in the Live Editor console, or use the Web Dashboard (http://localhost:5050).",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

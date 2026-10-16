@@ -95,7 +95,7 @@ fun DetailedPlayerStatsModal(
                     MetricBox("Apps", player.matchesPlayed.toString(), Modifier.weight(1f))
                     MetricBox("Goals", player.goals.toString(), Modifier.weight(1f), highlight = true)
                     MetricBox("Assists", player.assists.toString(), Modifier.weight(1f))
-                    MetricBox("MOTMs", "0", Modifier.weight(1f)) // Not tracked individually yet, mockup
+                    MetricBox("MOTMs", allPerformances.count { it.isMotm }.toString(), Modifier.weight(1f))
                 }
                 
                 Spacer(modifier = Modifier.height(16.dp))
