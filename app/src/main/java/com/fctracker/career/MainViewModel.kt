@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.lifecycle.viewModelScope
+import com.fctracker.career.data.CareerStore
 import com.fctracker.career.data.PlayerDatabase
 import com.google.gson.Gson
 import com.fctracker.career.telemetry.LiveSyncService
@@ -729,6 +730,11 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
                     isOnboarded = true
                 )
                 _state.value = finalState
+                // Backups from the earlier app carry the AI key inside the file. Move it to encrypted storage,
+                // but never replace a key that is already set.
+                if (store.aiApiKey.value.isBlank()) {
+                    CareerStore.legacyApiKey(json)?.let { store.setAiApiKey(it) }
+                }
                 persistData()
                 true
             } else false

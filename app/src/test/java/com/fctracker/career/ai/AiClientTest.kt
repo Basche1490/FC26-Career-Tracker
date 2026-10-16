@@ -8,19 +8,19 @@ import org.junit.Test
 class AiClientTest {
 
     @Test
-    fun everyProviderHasADefaultModelExceptOther() {
+    fun everyProviderHasADefaultModel() {
         assertTrue(AiClient.defaultModel("Google Gemini").startsWith("gemini"))
         assertTrue(AiClient.defaultModel("Claude").startsWith("claude"))
         assertTrue(AiClient.defaultModel("Claude Haiku").startsWith("claude")) // label from older saves
         assertTrue(AiClient.defaultModel("ChatGPT 3.5").startsWith("gpt")) // label from older saves
         assertTrue(AiClient.defaultModel("Grok").startsWith("grok"))
-        assertEquals("", AiClient.defaultModel("Other"))
+        assertEquals("gpt-3.5-turbo", AiClient.defaultModel("Other")) // what the earlier app always sent
     }
 
     @Test
-    fun missingKeyAndMissingModelAreExplainedWithoutAnyNetworkCall() = runBlocking {
+    fun missingKeyIsExplainedWithoutAnyNetworkCall() = runBlocking {
         assertTrue(AiClient.ask("hi", "Claude", "", "").contains("API key needed"))
-        assertTrue(AiClient.ask("hi", "Other", "https://example.invalid", "key").contains("Model name needed"))
+        assertTrue(AiClient.ask("hi", "Other", "https://example.invalid", "  ").contains("API key needed"))
     }
 
     @Test

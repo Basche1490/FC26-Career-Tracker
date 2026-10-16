@@ -166,4 +166,14 @@ class CareerStore(
     private fun saveMeta() {
         saves.saveMeta(SaveStore.Meta(activeSaveSlot, saveSlotNames.toMap(), savedNotes.toList()))
     }
+
+    companion object {
+        /** The AI key that the earlier app stored inside every save and backup file, if the file has one. */
+        fun legacyApiKey(json: String): String? = try {
+            com.google.gson.JsonParser.parseString(json).asJsonObject.get("aiApiKey")
+                ?.takeIf { it.isJsonPrimitive }?.asString?.trim()?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            null
+        }
+    }
 }

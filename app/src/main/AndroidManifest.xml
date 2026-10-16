@@ -34,6 +34,7 @@
         <service
             android:name=".telemetry.LiveSyncService"
             android:exported="false"
+            android:stopWithTask="true"
             android:foregroundServiceType="dataSync" />
     </application>
 

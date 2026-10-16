@@ -30,7 +30,7 @@ repository (`signing/`) so builds stay updatable. It is meant for sideloading on
 - **AI assistant** (Google Gemini, Claude, Grok, ChatGPT or any compatible endpoint) with your own API key
 - **Multiple save slots**, notes, encrypted export/import
 - **Live telemetry** from your PC: finished matches and transfers arrive on the phone by themselves, with
-  notifications. Works with the app closed (Settings → *Keep syncing in the background*).
+  notifications. Keeps working while the app is in the background (Settings → *Keep syncing in the background*); swiping the app away from recent apps stops it and removes the notification.
 
 ## PC companion
 
@@ -44,7 +44,7 @@ on r/seriousfifacareers.
 - Career data is written to one file per save slot, atomically, with a backup copy. A crash or power loss in the
   middle of a save can no longer damage a career.
 - The AI API key is stored encrypted with the Android Keystore and is left out of save files and backups.
-- Live sync runs in a foreground service, so matches arrive while the app is closed. It can be turned off in Settings.
+- Live sync runs in a foreground service, so matches arrive while the app is in the background. Swiping the app away from recent apps stops it and removes its notification. It can be turned off in Settings.
 - The match and transfer handling is one tested class (`TelemetryProcessor`) instead of code spread through the
   screen logic; about 60 unit tests run on every build.
 - Player stats that the game database could not provide are flagged as *estimated* instead of looking exact.

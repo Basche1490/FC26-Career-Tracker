@@ -33,16 +33,15 @@ object AiClient {
         agent.contains("Claude", true) -> "claude-haiku-5-5"
         agent.contains("Grok", true) -> "grok-4.7"
         agent.contains("ChatGPT", true) -> "gpt-5-mini"
-        else -> "" // "Other": there is no sensible default, the user must enter one
+        // "Other" (any OpenAI-compatible endpoint): what the earlier app always sent. Local servers such as
+        // LM Studio ignore the name; for others the user enters the right one in Settings.
+        else -> "gpt-3.5-turbo"
     }
 
     suspend fun ask(prompt: String, agent: String, apiUrl: String, apiKey: String, model: String = ""): String =
         withContext(Dispatchers.IO) {
             if (apiKey.isBlank()) return@withContext "API key needed. Please provide your API key in Settings."
             val chosenModel = model.trim().ifBlank { defaultModel(agent) }
-            if (chosenModel.isBlank()) {
-                return@withContext "Model name needed. Enter the model your provider offers in Settings > AI Assistant."
-            }
             try {
                 val request = when {
                     agent.contains("Gemini", true) -> geminiRequest(prompt, apiKey, chosenModel)
@@ -98,7 +97,8 @@ object AiClient {
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
         val url = when {
             agent == "Other" && apiUrl.isNotBlank() ->
-                if (apiUrl.endsWith("/chat/completions")) apiUrl else apiUrl.trimEnd('/') + "/chat/completions"
+                if (apiUrl.endsWith("/chat/completions") || apiUrl.endsWith("/messages")) apiUrl
+                else apiUrl.trimEnd('/') + "/chat/completions"
             agent.contains("Grok", true) -> "https://api.x.ai/v1/chat/completions"
             else -> "https://api.openai.com/v1/chat/completions"
         }

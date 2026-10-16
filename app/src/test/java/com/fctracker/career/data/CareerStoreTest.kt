@@ -9,6 +9,7 @@ import kotlinx.coroutines.cancel
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -144,5 +145,14 @@ class CareerStoreTest {
             Thread.sleep(25)
         }
         assertTrue(file.exists() && file.readText().contains("Autosaved"))
+    }
+
+    @Test
+    fun legacyBackupsKeyIsFoundAndMissingOrBlankKeysAreIgnored() {
+        assertEquals("sk-123", CareerStore.legacyApiKey("""{"clubName":"X","aiApiKey":"  sk-123 "}"""))
+        assertNull(CareerStore.legacyApiKey("""{"clubName":"X","aiApiKey":""}"""))
+        assertNull(CareerStore.legacyApiKey("""{"clubName":"X"}"""))
+        assertNull(CareerStore.legacyApiKey("""{"aiApiKey":{"nested":1}}"""))
+        assertNull(CareerStore.legacyApiKey("not json"))
     }
 }

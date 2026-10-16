@@ -555,9 +555,9 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Keep syncing when the app is closed", fontSize = 13.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                            Text("Keep syncing in the background", fontSize = 13.sp, color = Color.White, fontWeight = FontWeight.Medium)
                             Text(
-                                "Shows a small \"Live sync\" notification so match and transfer alerts still arrive. For best results, keep the phone on the same Wi-Fi and exclude this app from battery optimisation.",
+                                "Shows a small \"Live sync\" notification so match and transfer alerts still arrive while the app is in the background. Swiping the app away from recent apps stops syncing and removes the notification. For best results, keep the phone on the same Wi-Fi and exclude this app from battery optimisation.",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

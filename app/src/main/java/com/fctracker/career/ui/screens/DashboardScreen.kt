@@ -924,7 +924,7 @@ fun LiveTelemetryWidget(state: AppState, viewModel: MainViewModel) {
                         value = bridgeUrlInput,
                         onValueChange = { bridgeUrlInput = it },
                         label = { Text("Bridge IP & Port") },
-                        placeholder = { Text("http://192.168.2.24:8080") },
+                        placeholder = { Text("http://192.168.2.24:5050") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )

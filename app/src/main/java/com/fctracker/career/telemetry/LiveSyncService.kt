@@ -15,8 +15,11 @@ import com.fctracker.career.FcApplication
 import com.fctracker.career.R
 
 /**
- * Keeps the app watching the PC bridge while it is closed, so match and transfer alerts still arrive.
+ * Keeps the app watching the PC bridge while it is in the background, so match and transfer alerts still arrive.
  * It only shows a small "Live sync" notification; the polling itself is done by [TelemetrySync].
+ *
+ * It runs only while the app is still in the recent apps list. Swiping the app away stops the service and
+ * removes the notification (android:stopWithTask in the manifest); opening the app starts it again.
  */
 class LiveSyncService : Service() {
 
@@ -33,7 +36,9 @@ class LiveSyncService : Service() {
             return START_NOT_STICKY
         }
         (application as FcApplication).telemetry.acquire(HOLDER)
-        return START_STICKY
+        // Not sticky: once the app is swiped away from the recent apps list (stopWithTask in the manifest stops
+        // this service), Android must not bring it back, or the notification would reappear on its own.
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
