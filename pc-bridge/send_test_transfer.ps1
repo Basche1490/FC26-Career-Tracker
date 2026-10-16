@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Continue"
+﻿$ErrorActionPreference = "Continue"
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host "  EA FC Mobile Sync - Test Transfer Transmitter" -ForegroundColor Yellow
 Write-Host "========================================================" -ForegroundColor Cyan
