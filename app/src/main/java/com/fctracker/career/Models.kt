@@ -257,7 +257,9 @@ data class HistoricalSeason(
     val draws: Int = 0,
     val losses: Int = 0,
     val goalsFor: Int = 0,
-    val goalsAgainst: Int = 0
+    val goalsAgainst: Int = 0,
+    /** The season's objectives as they stood when the season ended. Read-only once archived. */
+    val objectives: List<Objective> = emptyList()
 )
 
 data class LeagueTable(

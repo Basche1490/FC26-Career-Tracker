@@ -505,38 +505,55 @@ fun TopProspectsWidget(state: AppState) {
     }
 }
 
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun ObjectivesWidget(state: AppState, viewModel: MainViewModel) {
-    var showAddObjective by remember { androidx.compose.runtime.mutableStateOf(false) }
+    var showAddObjective by remember { mutableStateOf(false) }
+    var objectiveBeingEdited by remember { mutableStateOf<Objective?>(null) }
+
+    // An archived season shows the objectives it ended with and cannot be changed.
+    val isArchived = state.viewingSeasonYear != null
+    val objectives = if (isArchived) {
+        state.historicalSeasons.find { it.year == state.viewingSeasonYear }?.objectives ?: emptyList()
+    } else {
+        state.objectives
+    }
 
     DarkCard(modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Season Objectives", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-            androidx.compose.material3.IconButton(onClick = { showAddObjective = true }, modifier = Modifier.size(24.dp)) {
-                androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Default.Add, contentDescription = "Add Objective", tint = MaterialTheme.colorScheme.primary)
+            if (isArchived) {
+                Text("Archived (read-only)", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                IconButton(onClick = { showAddObjective = true }, modifier = Modifier.size(24.dp)) {
+                    Icon(Icons.Default.Add, contentDescription = "Add Objective", tint = MaterialTheme.colorScheme.primary)
+                }
             }
         }
         Spacer(Modifier.height(12.dp))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (state.objectives.isEmpty()) {
-                Text("No objectives set.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+            if (objectives.isEmpty()) {
+                Text(
+                    if (isArchived) "No objectives were recorded for this season." else "No objectives set.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp
+                )
             } else {
-                state.objectives.forEach { obj ->
+                objectives.forEach { obj ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
                             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                            .then(if (isArchived) Modifier else Modifier.clickable { objectiveBeingEdited = obj })
                             .padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val statusColor = when(obj.status) {
+                        val statusColor = when (obj.status) {
                             "Completed" -> WinColor
                             "Failed" -> LossColor
                             else -> DrawColor
                         }
-                        val priorityColor = when(obj.priority) {
+                        val priorityColor = when (obj.priority) {
                             "Critical" -> Color.Red
                             "High" -> Color(0xFFFFA500)
                             "Medium" -> Color.Yellow
@@ -547,10 +564,19 @@ fun ObjectivesWidget(state: AppState, viewModel: MainViewModel) {
                         Spacer(Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(obj.description, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
-                            Text(obj.category, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("${obj.category} • ${obj.status}", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Box(modifier = Modifier.background(priorityColor.copy(alpha = 0.2f), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) {
                             Text(obj.priority, fontSize = 8.sp, color = priorityColor)
+                        }
+                        if (!isArchived) {
+                            Spacer(Modifier.width(8.dp))
+                            Icon(
+                                Icons.Default.Edit,
+                                contentDescription = "Edit objective",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(14.dp)
+                            )
                         }
                     }
                 }
@@ -558,131 +584,189 @@ fun ObjectivesWidget(state: AppState, viewModel: MainViewModel) {
         }
     }
 
-    if (showAddObjective) {
-        var objTitle by remember { mutableStateOf("") }
-        var objPriority by remember { mutableStateOf("Medium") }
-        var objCategory by remember { mutableStateOf("Domestic Success") }
-        var objStatus by remember { mutableStateOf("In Progress") }
-        
-        var priorityExpanded by remember { mutableStateOf(false) }
-        val priorities = listOf("Critical", "High", "Medium", "Low", "Very Low")
-        
-        var categoryExpanded by remember { mutableStateOf(false) }
-        val categories = listOf("Domestic Success", "Continental Success", "Brand Exposure", "Financial", "Youth Development")
-        
-        var statusExpanded by remember { mutableStateOf(false) }
-        val statuses = listOf("In Progress", "Completed", "Failed")
+    if (showAddObjective && !isArchived) {
+        ObjectiveDialog(
+            initial = null,
+            onDismiss = { showAddObjective = false },
+            onSave = { viewModel.addObjective(it); showAddObjective = false },
+            onDelete = null
+        )
+    }
 
-        androidx.compose.ui.window.Dialog(onDismissRequest = { showAddObjective = false }) {
-            DarkCard(modifier = Modifier.fillMaxWidth()) {
-                Text("Add Objective", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                Spacer(Modifier.height(8.dp))
-                
-                androidx.compose.material3.ExposedDropdownMenuBox(
+    objectiveBeingEdited?.let { current ->
+        ObjectiveDialog(
+            initial = current,
+            onDismiss = { objectiveBeingEdited = null },
+            onSave = { viewModel.updateObjective(it); objectiveBeingEdited = null },
+            onDelete = { viewModel.deleteObjective(current.id); objectiveBeingEdited = null }
+        )
+    }
+}
+
+/** Add (initial == null) or edit an objective. Delete is offered only when editing, and asks first. */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun ObjectiveDialog(
+    initial: Objective?,
+    onDismiss: () -> Unit,
+    onSave: (Objective) -> Unit,
+    onDelete: (() -> Unit)?
+) {
+    var objTitle by remember { mutableStateOf(initial?.description ?: "") }
+    var objPriority by remember { mutableStateOf(initial?.priority ?: "Medium") }
+    var objCategory by remember { mutableStateOf(initial?.category ?: "Domestic Success") }
+    var objStatus by remember { mutableStateOf(initial?.status ?: "In Progress") }
+    var confirmDelete by remember { mutableStateOf(false) }
+
+    var priorityExpanded by remember { mutableStateOf(false) }
+    val priorities = listOf("Critical", "High", "Medium", "Low", "Very Low")
+
+    var categoryExpanded by remember { mutableStateOf(false) }
+    val categories = listOf("Domestic Success", "Continental Success", "Brand Exposure", "Financial", "Youth Development")
+
+    var statusExpanded by remember { mutableStateOf(false) }
+    val statuses = listOf("In Progress", "Completed", "Failed")
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete objective?") },
+            text = { Text("\"${initial?.description.orEmpty()}\" will be removed from this season.") },
+            confirmButton = {
+                Button(
+                    onClick = { confirmDelete = false; onDelete?.invoke() },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } }
+        )
+    }
+
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        DarkCard(modifier = Modifier.fillMaxWidth()) {
+            Text(if (initial == null) "Add Objective" else "Edit Objective", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Spacer(Modifier.height(8.dp))
+
+            ExposedDropdownMenuBox(
+                expanded = categoryExpanded,
+                onExpandedChange = { categoryExpanded = !categoryExpanded }
+            ) {
+                OutlinedTextField(
+                    value = objCategory,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Category") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = categoryExpanded) },
+                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
+                )
+                ExposedDropdownMenu(
                     expanded = categoryExpanded,
-                    onExpandedChange = { categoryExpanded = !categoryExpanded }
+                    onDismissRequest = { categoryExpanded = false }
                 ) {
-                    androidx.compose.material3.OutlinedTextField(
-                        value = objCategory,
+                    categories.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option) },
+                            onClick = {
+                                objCategory = option
+                                categoryExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = objTitle,
+                onValueChange = { objTitle = it },
+                label = { Text("Objective Description") },
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ExposedDropdownMenuBox(
+                    expanded = priorityExpanded,
+                    onExpandedChange = { priorityExpanded = !priorityExpanded },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    OutlinedTextField(
+                        value = objPriority,
                         onValueChange = {},
                         readOnly = true,
-                        label = { Text("Category") },
-                        trailingIcon = { androidx.compose.material3.ExposedDropdownMenuDefaults.TrailingIcon(expanded = categoryExpanded) },
-                        modifier = Modifier.menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
+                        label = { Text("Priority") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = priorityExpanded) },
+                        modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
                     )
                     ExposedDropdownMenu(
-                        expanded = categoryExpanded,
-                        onDismissRequest = { categoryExpanded = false }
+                        expanded = priorityExpanded,
+                        onDismissRequest = { priorityExpanded = false }
                     ) {
-                        categories.forEach { selectionOption ->
-                            androidx.compose.material3.DropdownMenuItem(
-                                text = { Text(selectionOption) },
+                        priorities.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option) },
                                 onClick = {
-                                    objCategory = selectionOption
-                                    categoryExpanded = false
+                                    objPriority = option
+                                    priorityExpanded = false
                                 }
                             )
                         }
                     }
                 }
-                Spacer(Modifier.height(8.dp))
-                
-                androidx.compose.material3.OutlinedTextField(
-                    value = objTitle,
-                    onValueChange = { objTitle = it },
-                    label = { Text("Objective Description") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                
-                Spacer(Modifier.height(8.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    androidx.compose.material3.ExposedDropdownMenuBox(
-                        expanded = priorityExpanded,
-                        onExpandedChange = { priorityExpanded = !priorityExpanded },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        androidx.compose.material3.OutlinedTextField(
-                            value = objPriority,
-                            onValueChange = {},
-                            readOnly = true,
-                            label = { Text("Priority") },
-                            trailingIcon = { androidx.compose.material3.ExposedDropdownMenuDefaults.TrailingIcon(expanded = priorityExpanded) },
-                            modifier = Modifier.menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
-                        )
-                        ExposedDropdownMenu(
-                            expanded = priorityExpanded,
-                            onDismissRequest = { priorityExpanded = false }
-                        ) {
-                            priorities.forEach { selectionOption ->
-                                androidx.compose.material3.DropdownMenuItem(
-                                    text = { Text(selectionOption) },
-                                    onClick = {
-                                        objPriority = selectionOption
-                                        priorityExpanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
 
-                    androidx.compose.material3.ExposedDropdownMenuBox(
+                ExposedDropdownMenuBox(
+                    expanded = statusExpanded,
+                    onExpandedChange = { statusExpanded = !statusExpanded },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    OutlinedTextField(
+                        value = objStatus,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Status") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = statusExpanded) },
+                        modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(
                         expanded = statusExpanded,
-                        onExpandedChange = { statusExpanded = !statusExpanded },
-                        modifier = Modifier.weight(1f)
+                        onDismissRequest = { statusExpanded = false }
                     ) {
-                        androidx.compose.material3.OutlinedTextField(
-                            value = objStatus,
-                            onValueChange = {},
-                            readOnly = true,
-                            label = { Text("Status") },
-                            trailingIcon = { androidx.compose.material3.ExposedDropdownMenuDefaults.TrailingIcon(expanded = statusExpanded) },
-                            modifier = Modifier.menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
-                        )
-                        ExposedDropdownMenu(
-                            expanded = statusExpanded,
-                            onDismissRequest = { statusExpanded = false }
-                        ) {
-                            statuses.forEach { selectionOption ->
-                                androidx.compose.material3.DropdownMenuItem(
-                                    text = { Text(selectionOption) },
-                                    onClick = {
-                                        objStatus = selectionOption
-                                        statusExpanded = false
-                                    }
-                                )
-                            }
+                        statuses.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option) },
+                                onClick = {
+                                    objStatus = option
+                                    statusExpanded = false
+                                }
+                            )
                         }
                     }
                 }
+            }
 
-                Spacer(Modifier.height(16.dp))
-                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                    androidx.compose.material3.TextButton(onClick = { showAddObjective = false }) { Text("Cancel") }
-                    androidx.compose.material3.Button(onClick = {
-                        viewModel.addObjective(Objective(category = objCategory, priority = objPriority, description = objTitle, status = objStatus))
-                        showAddObjective = false
-                    }) { Text("Add") }
+            Spacer(Modifier.height(16.dp))
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                if (onDelete != null) {
+                    TextButton(onClick = { confirmDelete = true }) {
+                        Text("Delete", color = MaterialTheme.colorScheme.error)
+                    }
                 }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                Button(
+                    enabled = objTitle.isNotBlank(),
+                    onClick = {
+                        onSave(
+                            Objective(
+                                id = initial?.id ?: java.util.UUID.randomUUID().toString(),
+                                category = objCategory,
+                                priority = objPriority,
+                                description = objTitle.trim(),
+                                status = objStatus
+                            )
+                        )
+                    }
+                ) { Text(if (initial == null) "Add" else "Save") }
             }
         }
     }

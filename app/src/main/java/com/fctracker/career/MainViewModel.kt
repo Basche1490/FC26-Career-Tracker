@@ -759,7 +759,8 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
                 finalPosition = finalPosition,
                 matches = state.recentMatches,
                 players = state.players,
-                transfers = state.transfers
+                transfers = state.transfers,
+                objectives = state.objectives
             )
             
             // Reset for new season

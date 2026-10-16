@@ -43,4 +43,18 @@ class ModelsJsonTest {
         assertFalse(state.recentMatches.single().statsEstimated) // new field defaults to "not estimated"
         assertEquals("", state.aiModel)
     }
+
+    @Test
+    fun anArchivedSeasonKeepsItsObjectivesAndOldOnesLoadWithNone() {
+        val season = HistoricalSeason(
+            year = 2025, leagueName = "League One",
+            objectives = listOf(Objective(id = "o1", category = "Financial", priority = "High", description = "Profit", status = "Completed"))
+        )
+        val back = gson.fromJson(gson.toJson(AppState(historicalSeasons = listOf(season))), AppState::class.java)
+        assertEquals(season, back.historicalSeasons.single())
+
+        // A season archived by the earlier app has no "objectives" field: it must load as an empty list, not null.
+        val old = gson.fromJson("""{"historicalSeasons":[{"year":2024,"leagueName":"League Two"}]}""", AppState::class.java)
+        assertTrue(old.historicalSeasons.single().objectives.isEmpty())
+    }
 }
