@@ -81,3 +81,15 @@ jobs:
             --title "Latest build" \
             --notes "Automatic build of commit ${GITHUB_SHA::7} (build #${GITHUB_RUN_NUMBER}). Install over the previous version; your data is kept." \
             --prerelease --target "$GITHUB_SHA"
+
+  # The Live Editor scripts cannot be run without the game, but their logic is checked here against a pretend
+  # database. This job is separate so a problem in it never stops the APK from being built and published.
+  lua-scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.3
+      - name: Live Editor script checks
+        run: lua5.3 tests/lua/test_transfer_logic.lua

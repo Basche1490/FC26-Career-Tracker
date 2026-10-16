@@ -928,9 +928,14 @@ function run_telemetry_sync(isAuto)
     for _, lo in ipairs(safe_get_rows("playerloans")) do
         local lpid = tonumber(val(lo, "playerid", 0)) or 0
         local lfrom = tonumber(val(lo, "teamidloanedfrom", 0)) or 0
-        local lto = tonumber(val(lo, "teamidloanedto", 0)) or 0
         if lpid > 0 then
-            if lto == userTeamId then loansIn[lpid] = lfrom elseif lfrom == userTeamId then loansOut[lpid] = lto end
+            -- FC 26 has no "loaned to" column in playerloans: a loaned-out player is simply linked to his loan club now
+            if lfrom == userTeamId then
+                local lto = playerToTeamMap[lpid] or 0
+                loansOut[lpid] = (lto ~= userTeamId) and lto or 0
+            elseif lfrom > 0 and currentSquad[lpid] then
+                loansIn[lpid] = lfrom
+            end
         end
     end
 
@@ -1009,6 +1014,8 @@ function run_telemetry_sync(isAuto)
             local newTid = loansOut[pId] or playerToTeamMap[pId]
             if newTid and newTid > 0 and newTid ~= userTeamId then
                 toClub = get_team_name(newTid)
+            elseif loansOut[pId] then
+                toClub = "Unknown club" -- on loan, but the loan club could not be read
             else
                 toClub = "Free Agent / Released"
             end

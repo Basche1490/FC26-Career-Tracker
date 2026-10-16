@@ -32,6 +32,19 @@ Keep these two files together in the same Live Editor scripts folder:
 | `FC26_Auto_Capture.lua` | Sends everything to the phone. Run this one. |
 | `FC26_AutoCapture_v1.1.1.lua` | The Project Atlas exporter (passes, shots, tackles, xG, real ratings). `FC26_Auto_Capture.lua` starts it for you. |
 
+**Both files must sit in the same folder.** "Project Atlas" is only the name of that exporter; you do not need
+any Atlas desktop app, just the `.lua` file. If it is missing, the Live Editor console says
+`Project Atlas exporter: NOT running`. Matches and transfers are still sent, but no snapshots are written
+(`Documents\FC26 Export\Snapshots` stays empty) and player stats are estimated. Copy the file next to
+`FC26_Auto_Capture.lua` and run `FC26_Auto_Capture.lua` again.
+
+With the exporter running you get, under `Documents\FC26 Export`:
+
+- `Snapshots\ready\snapshot_<date>_<id>` - a snapshot of the whole career (squad, contracts, loans, fixtures,
+  competition progress, `manifest.json` and `export_log.txt`), taken when the script starts and after every match.
+  If the Atlas desktop app is installed it may move finished snapshots to `imported` or `failed`.
+- `MatchStats\ready\<folder>` - the detailed player statistics of each match.
+
 When a match ends, `FC26_Auto_Capture.lua` waits up to 45 seconds for the Atlas files so the detailed numbers
 are included. If none arrive, the match is sent from the game database and the app marks its player stats as
 *estimated*.
@@ -46,6 +59,7 @@ Other scripts:
 | --- | --- |
 | `telemetry_auto_loop.lua` | Starts `FC26_Auto_Capture.lua` for you. |
 | `telemetry_sync.lua` | The older all-in-one script. It stands down by itself while `FC26_Auto_Capture.lua` runs. |
+| `FC26_Probe.lua` | Read-only report of what the game stores about transfers, loans and finances (see step 5). |
 | `send_latest_match.lua` | Sends your latest match in one click. |
 | `telemetry_test_connection.lua` | Checks that the bridge is reachable and prints what is wrong if it is not. |
 | `telemetry_sender_v2.lua` | Small sender used by older setups. |
@@ -70,11 +84,26 @@ FC26_BeamTransfer(name, type, fee, club)   -- send any transfer by hand
 `pc-bridge/Send_Test_Match.bat` and `Send_Test_Transfer.bat` send a fake match or transfer so you can check the
 whole chain without opening the game.
 
+## 5. Checking what the game really stores (the probe)
+
+`live-editor-scripts/FC26_Probe.lua` only reads. Run it with a career loaded, wait for "Probe finished" in the
+console, then open `Documents\FC26 Export\FC26_probe_<date>_<time>.txt`. It lists what the game records about
+transfers, loans, joining dates, manager history and club finances. Live Editor prints many "no field" errors
+while it runs; that is expected, because the probe tries several possible column names.
+
+Use it when transfers, sales or fees do not show up as they should: the report shows the real column names, so
+the capture script can be fixed against the real data instead of guesses.
+
 ## If something does not arrive
 
+- The capture script sends to the **bridge**, and the app fetches from the bridge. The bridge must be running
+  (step 1) as well as the script and the app. Opening the app alone is not enough.
 - Delivery log: `Documents\FC26 Export\bridge_send_log.txt`. One line per attempt with the bridge's answer
   (200 = delivered). Anything undelivered is kept in `Documents\FC26 Export\outbox` and retried every 30 seconds,
   also after restarting Live Editor, so nothing is lost while the bridge is closed.
+- To send a season's transfers again from scratch (for example after a script fix), close the capture script,
+  delete the files in `Documents\FC26 Export\outbox` plus `beamed_transfers.txt` and `auto_capture_state.lua`
+  in `Documents\FC26 Export`, start the bridge, then run `FC26_Auto_Capture.lua` again.
 - Run `telemetry_test_connection.lua`.
 - The bridge window prints a line for every request, every duplicate it ignored and every payload it refused.
 

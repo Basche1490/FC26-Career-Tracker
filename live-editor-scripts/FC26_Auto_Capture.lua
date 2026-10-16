@@ -1562,17 +1562,24 @@ local function get_club_team_set()
     return set
 end
 
--- Returns: managed squad (pid -> true) and pid -> club team id for everyone
+-- Returns: managed squad (pid -> true), pid -> club team id for everyone, and pid -> list of every club
+-- team the player is linked to (a loaned player can be linked to both his parent club and the loan club).
 local function get_managed_squad_state(managed_tid)
     local squad = {}
     local all_links = {}
+    local club_links = {}
     local clubs = get_club_team_set()
     local have_clubs = next(clubs) ~= nil
 
     local function consider(pid, tid)
         if pid > 0 and tid > 0 then
             if tid == managed_tid then squad[pid] = true end
-            if (not have_clubs) or clubs[tid] then all_links[pid] = tid end
+            if (not have_clubs) or clubs[tid] then
+                all_links[pid] = tid
+                local list = club_links[pid]
+                if not list then list = {} club_links[pid] = list end
+                list[#list + 1] = tid
+            end
         end
     end
 
@@ -1604,52 +1611,75 @@ local function get_managed_squad_state(managed_tid)
         end)
     end
 
-    return squad, all_links
+    return squad, all_links, club_links
 end
 
-local function get_active_loans(managed_tid)
-    local loans_in = {}
-    local loans_out = {}
+-- BEGIN classify_loans (this exact block is also run by tests/lua/test_transfer_logic.lua)
+-- FC 26's "playerloans" table only says which club a player is loaned FROM (teamidloanedfrom). It has no
+-- "loaned to" column: asking for one makes Live Editor log "no field teamidloanedto" and gives nothing back.
+-- So the direction is worked out from the club links instead (FC26_Snapshot.lua does the same):
+--   * parent club is the managed club                          -> the player is loaned OUT; he is now linked to
+--                                                                 another club, and that is the destination
+--   * parent club is another club and the player is in our squad -> loaned IN from that club
+-- rows: list of { pid =, from = }; squad: pid -> true; club_links: pid -> list of club team ids.
+-- Returns loans_in[pid] = parent club id and loans_out[pid] = destination club id (0 when it cannot be read).
+local function classify_loans(rows, managed_tid, squad, club_links)
+    local loans_in, loans_out = {}, {}
+    for _, row in ipairs(rows) do
+        local pid, from_tid = row.pid or 0, row.from or 0
+        if pid > 0 then
+            if from_tid == managed_tid then
+                local destination = 0
+                for _, tid in ipairs((club_links or {})[pid] or {}) do
+                    if tid > 0 and tid ~= managed_tid then destination = tid break end
+                end
+                loans_out[pid] = destination
+            elseif from_tid > 0 and squad and squad[pid] then
+                loans_in[pid] = from_tid
+            end
+        end
+    end
+    return loans_in, loans_out
+end
+-- END classify_loans
+
+local function read_loan_rows()
+    local rows = {}
     pcall(function()
         if LE and LE.db then
             local pl = LE.db:GetTable("playerloans")
             if pl then
                 local r = pl:GetFirstRecord()
                 while r and r > 0 do
-                    local pid = tonumber(pl:GetRecordFieldValue(r, "playerid")) or 0
-                    local from_tid = tonumber(pl:GetRecordFieldValue(r, "teamidloanedfrom")) or 0
-                    local to_tid = tonumber(pl:GetRecordFieldValue(r, "teamidloanedto")) or 0
-                    if pid > 0 then
-                        if to_tid == managed_tid then
-                            loans_in[pid] = from_tid
-                        elseif from_tid == managed_tid then
-                            loans_out[pid] = to_tid
-                        end
-                    end
+                    rows[#rows + 1] = {
+                        pid = tonumber(pl:GetRecordFieldValue(r, "playerid")) or 0,
+                        from = tonumber(pl:GetRecordFieldValue(r, "teamidloanedfrom")) or 0
+                    }
                     r = pl:GetNextValidRecord()
                 end
             end
         end
     end)
-    if next(loans_in) == nil and next(loans_out) == nil then
+    if #rows == 0 then
         pcall(function()
             if type(GetDBTableRows) == "function" then
-                local rows = GetDBTableRows("playerloans")
-                if type(rows) == "table" then
-                    for _, r in ipairs(rows) do
-                        local pid = tonumber(r.playerid and r.playerid.value or r.playerid) or 0
-                        local from_tid = tonumber(r.teamidloanedfrom and r.teamidloanedfrom.value or r.teamidloanedfrom) or 0
-                        local to_tid = tonumber(r.teamidloanedto and r.teamidloanedto.value or r.teamidloanedto) or 0
-                        if pid > 0 then
-                            if to_tid == managed_tid then loans_in[pid] = from_tid
-                            elseif from_tid == managed_tid then loans_out[pid] = to_tid end
-                        end
+                local raw = GetDBTableRows("playerloans")
+                if type(raw) == "table" then
+                    for _, r in ipairs(raw) do
+                        rows[#rows + 1] = {
+                            pid = tonumber(r.playerid and r.playerid.value or r.playerid) or 0,
+                            from = tonumber(r.teamidloanedfrom and r.teamidloanedfrom.value or r.teamidloanedfrom) or 0
+                        }
                     end
                 end
             end
         end)
     end
-    return loans_in, loans_out
+    return rows
+end
+
+local function get_active_loans(managed_tid, squad, club_links)
+    return classify_loans(read_loan_rows(), managed_tid, squad, club_links)
 end
 
 -- Single-pass player info loader (OVR, join date, academy status) for just the players asked for.
@@ -1896,12 +1926,12 @@ local function sync_season_transfers(managed_tid, force_sync)
     log_monitor(string.format("Scanning transfers for %s (ID: %d) | Date: %s | Season Start: %s",
         managed_club, managed_tid, todayDateStr, seasonStartDateStr))
 
-    local current_squad, all_teams = get_managed_squad_state(managed_tid)
+    local current_squad, all_teams, club_links = get_managed_squad_state(managed_tid)
     if next(current_squad) == nil then
         log_monitor("Transfer scan skipped: could not read the squad (is a career loaded?)")
         return 0
     end
-    local loans_in, loans_out = get_active_loans(managed_tid)
+    local loans_in, loans_out = get_active_loans(managed_tid, current_squad, club_links)
     local transfer_history = get_career_transfer_history(managed_tid)
 
     local wanted = {}
@@ -1964,11 +1994,14 @@ local function sync_season_transfers(managed_tid, force_sync)
 
     for pid, to_tid in pairs(loans_out) do
         local pName = safe_player_name(pid)
-        local toClub = safe_team_name(to_tid)
+        -- to_tid is 0 when the loan club cannot be read; say so instead of sending an empty club name
+        local toClub = (to_tid > 0) and safe_team_name(to_tid) or "Unknown club"
+        local loanMessage = (to_tid > 0) and string.format("%s loaned out to %s.", pName, toClub)
+            or string.format("%s loaned out.", pName)
         if emit_transfer(string.format("LOAN_OUT_%d_%d", pid, to_tid), {
             playerName = pName, type = "Out (Loan)", feeM = 0.0, fromToClub = toClub, date = todayDateStr,
             clubName = managed_club,
-            message = string.format("%s loaned out to %s.", pName, toClub)
+            message = loanMessage
         }, force_sync) then
             synced_count = synced_count + 1
         end
@@ -2076,7 +2109,7 @@ local transfer_scan_busy = false
 local function scan_squad_changes()
     local managed_tid = state.managed_team_id
     local managed_club = state.managed_team_name or safe_team_name(managed_tid)
-    local current_squad, current_all_teams = get_managed_squad_state(managed_tid)
+    local current_squad, current_all_teams, current_links = get_managed_squad_state(managed_tid)
 
     -- A failed read must never look like "every player left".
     if next(current_squad) == nil then return end
@@ -2114,7 +2147,7 @@ local function scan_squad_changes()
     state.suspect_reads = 0
 
     local todayDateStr = get_current_career_date()
-    local loans_in, loans_out = get_active_loans(managed_tid)
+    local loans_in, loans_out = get_active_loans(managed_tid, current_squad, current_links)
     local transfer_history = get_career_transfer_history(managed_tid)
     local wanted = {}
     for _, pid in ipairs(arrivals) do wanted[pid] = true end
@@ -2169,7 +2202,11 @@ local function scan_squad_changes()
 
         if loans_out[pid] then
             tType = "Out (Loan)"
-            toClub = safe_team_name(loans_out[pid])
+            if loans_out[pid] > 0 then
+                toClub = safe_team_name(loans_out[pid])
+            elseif toClub == "Free Agent / Released" then
+                toClub = "Unknown club" -- a loan is never a release
+            end
         else
             local th = latest_history_row(transfer_history, pid, "fromteamid", managed_tid)
             if th then
@@ -2305,8 +2342,10 @@ local function start_atlas_exporter()
             end
         end
     end
-    log_monitor("Project Atlas exporter (" .. ATLAS_EXPORTER_FILES[1] .. ") not found next to this script. " ..
-        "Matches are still sent, but without the detailed player statistics.")
+    log_monitor("Project Atlas exporter NOT started: " .. ATLAS_EXPORTER_FILES[1] .. " was not found in the same folder as this script ("
+        .. (SCRIPT_DIR ~= "" and SCRIPT_DIR or "the Live Editor scripts folder") .. "). "
+        .. "Matches are still sent, but without detailed player statistics, and NO snapshots are written "
+        .. "(Documents\\FC26 Export\\Snapshots stays empty). Copy that file next to this script and run this script again.")
     return false
 end
 
@@ -2563,7 +2602,9 @@ print(" Real Data Capture: Match Telemetry & Instant Real-Time Transfer Tracking
 if atlas_started then
     print(" Project Atlas exporter: running (detailed player stats). Matches wait up to " .. ATLAS_WAIT_SECONDS_EXPORTER .. "s for its export.")
 else
-    print(" Project Atlas exporter: NOT running - put FC26_AutoCapture_v1.1.1.lua next to this script for detailed player stats.")
+    print(" Project Atlas exporter: NOT running. FC26_AutoCapture_v1.1.1.lua is missing from the folder of this script.")
+    print("   Without it there are no snapshots (Documents\\FC26 Export\\Snapshots stays empty) and player stats are estimated.")
+    print("   Copy FC26_AutoCapture_v1.1.1.lua next to FC26_Auto_Capture.lua and run FC26_Auto_Capture.lua again.")
 end
 print(" Delivery log: Documents\\FC26 Export\\bridge_send_log.txt (undelivered items are retried).")
 print(" Background timer active (2s loop). Event listeners hooked.")
