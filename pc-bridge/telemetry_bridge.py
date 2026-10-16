@@ -1,0 +1,866 @@
+import http.server
+import socketserver
+import json
+import time
+import os
+import socket
+import re
+import html
+import ipaddress
+import threading
+import csv
+from urllib.parse import urlsplit
+
+LOCAL_PORT = 5050
+EVENTS_FILE = os.path.join(os.path.dirname(__file__), "telemetry_events.json")
+MAX_BODY_BYTES = 5 * 1024 * 1024  # largest POST body the bridge will accept (5 MiB)
+
+# ---------------------------------------------------------------------------
+# Access control
+#
+# The phone only ever READS (GET /events). Everything that writes - the Lua
+# scripts, the test buttons and /clear - runs on this same PC. So reads are open
+# to the local network, but writes are only accepted from the PC itself.
+# Host / Origin checks keep web pages open in a browser from reaching the bridge.
+# ---------------------------------------------------------------------------
+PC_NAME = socket.gethostname().lower()
+
+
+def _strip_mapped(addr):
+    addr = (addr or "").strip()
+    if addr.lower().startswith("::ffff:"):
+        return addr[7:]
+    return addr
+
+
+def is_local_client(client_ip, server_ip):
+    """True when the request comes from this PC (loopback, or the PC's own LAN address)."""
+    client_ip = _strip_mapped(client_ip)
+    server_ip = _strip_mapped(server_ip)
+    try:
+        if ipaddress.ip_address(client_ip).is_loopback:
+            return True
+    except ValueError:
+        return False
+    return client_ip == server_ip
+
+
+def _host_only(host_header):
+    h = (host_header or "").strip()
+    if h.startswith("["):                  # [::1]:5050
+        end = h.find("]")
+        return h[1:end] if end != -1 else h
+    if h.count(":") == 1:                  # name:port or 1.2.3.4:port
+        return h.split(":")[0]
+    return h
+
+
+def host_header_ok(host_header):
+    """Allow IP addresses, localhost and this PC's name. Other hostnames are refused
+    so a malicious web page cannot reach the bridge through DNS rebinding."""
+    host = _host_only(host_header).lower()
+    if not host:
+        return True                        # HTTP/1.0 client without a Host header - not a browser
+    if host in ("localhost", PC_NAME, PC_NAME + ".local"):
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def origin_ok(origin, host_header, sec_fetch_site=None):
+    """Writes may come from command-line tools (no Origin header) or from this
+    bridge's own dashboard page. A page on any other site is refused."""
+    if not origin:
+        return (sec_fetch_site or "none").lower() in ("none", "same-origin")
+    try:
+        netloc = urlsplit(origin).netloc.lower()
+    except ValueError:
+        return False
+    return bool(netloc) and netloc == (host_header or "").strip().lower()
+
+def sanitize_penalty_text(text):
+    if not text:
+        return text
+    s = str(text)
+    s = re.sub(r'\s*\(Pens:\s*255-\d+\)', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s*\(Pens:\s*\d+-255\)', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s*\(Pens:\s*0-0\)', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\b255\s*penalties\b', '0 penalties', s, flags=re.IGNORECASE)
+    return s
+
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+# Load or init events
+events_lock = threading.RLock()
+events = []
+if os.path.exists(EVENTS_FILE):
+    try:
+        with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+            raw_evs = json.load(f)
+            for ev in raw_evs:
+                if isinstance(ev, dict):
+                    if "message" in ev and isinstance(ev["message"], str):
+                        ev["message"] = sanitize_penalty_text(ev["message"])
+                        if ev["message"].lstrip().startswith("{"):
+                            try:
+                                json.loads(ev["message"])
+                            except ValueError:
+                                continue      # an old malformed event: drop it so it cannot stall the phone app
+                    events.append(ev)
+    except Exception:
+        events = []
+
+def save_events():
+    try:
+        with events_lock:
+            with open(EVENTS_FILE, "w", encoding="utf-8") as f:
+                json.dump(events, f)
+    except Exception as e:
+        print(f"[bridge] could not save {EVENTS_FILE}: {e}")
+
+_event_seq = 0
+
+def add_event(title, msg, raw_payload=None):
+    global _event_seq
+    ts = int(time.time())
+    with events_lock:
+        _event_seq += 1
+        seq = _event_seq
+    ev = {
+        "event": "message",
+        "id": f"ev-{ts}-{seq}",
+        "time": ts,
+        "title": title,
+        "message": raw_payload if raw_payload else msg
+    }
+    with events_lock:
+        events.append(ev)
+        if len(events) > 100:
+            events.pop(0)
+        save_events()
+    print(f"[{time.strftime('%H:%M:%S')}] TELEMETRY SAVED: {title}")
+
+def create_sample_match():
+    today = time.strftime("%Y-%m-%d")
+    return {
+        "dataType": "match",
+        "title": "Live Match Final",
+        "message": "Full Time: vs 3 - 1 Arsenal (Premier League)",
+        "opponentName": "Arsenal",
+        "isHome": True,
+        "goalsFor": 3,
+        "goalsAgainst": 1,
+        "resultBadge": "W",
+        "date": today,
+        "competition": "Premier League",
+        "shotsFor": 12,
+        "shotsAgainst": 6,
+        "possession": 56,
+        "passingAccuracy": 88,
+        "expectedGoals": 2.8,
+        "expectedGoalsAgainst": 0.9,
+        "playerPerformances": [
+            {"playerName": "Bukayo Saka", "goals": 2, "assists": 1, "rating": 8.9, "yellowCard": False, "redCard": False},
+            {"playerName": "Declan Rice", "goals": 1, "assists": 0, "rating": 7.8, "yellowCard": True, "redCard": False},
+            {"playerName": "Martin Odegaard", "goals": 0, "assists": 2, "rating": 8.4, "yellowCard": False, "redCard": False}
+        ],
+        "goalDetails": [
+            {"playerName": "Bukayo Saka", "isOpponent": False},
+            {"playerName": "Declan Rice", "isOpponent": False},
+            {"playerName": "Bukayo Saka", "isOpponent": False},
+            {"playerName": "Kai Havertz (Opponent)", "isOpponent": True}
+        ]
+    }
+
+class TelemetryHandler(http.server.BaseHTTPRequestHandler):
+    timeout = 15  # drop clients that stall in the middle of a request
+
+    def end_headers(self):
+        # Deliberately no CORS headers: the phone app is not a browser and the
+        # dashboard page is served from this same origin.
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('Cache-Control', 'no-store')
+        super().end_headers()
+
+    def _reject(self, code, message):
+        body = json.dumps({"status": "error", "message": message}).encode()
+        self.send_response(code)
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _host_allowed(self):
+        if host_header_ok(self.headers.get('Host')):
+            return True
+        self._reject(403, "Unexpected Host header.")
+        return False
+
+    def _write_allowed(self):
+        """Gate for anything that changes state. Sends the error reply itself when refusing."""
+        if not self._host_allowed():
+            return False
+        server_ip = self.connection.getsockname()[0]
+        if not is_local_client(self.client_address[0], server_ip):
+            self._reject(403, "Writes are only accepted from the PC running the bridge.")
+            return False
+        if not origin_ok(self.headers.get('Origin'), self.headers.get('Host'), self.headers.get('Sec-Fetch-Site')):
+            self._reject(403, "Cross-site request blocked.")
+            return False
+        return True
+
+    def do_OPTIONS(self):
+        # No CORS preflight support - browsers on other sites must not be able to write.
+        self._reject(405, "Method not allowed.")
+
+    def do_POST(self):
+        if not self._write_allowed():
+            return
+        path = self.path.lower()
+        if path == "/test-match":
+            sample = create_sample_match()
+            add_event("Live Match Final", "Full Time: vs 3 - 1 Arsenal (Premier League)", json.dumps(sample))
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","message":"Test match sent successfully!"}')
+            return
+
+        if path == "/test-transfer":
+            sample = {
+                "dataType": "transfer",
+                "title": "Transfer Finalized",
+                "message": "Erling Haaland signed from Manchester City for €120.0M",
+                "playerName": "Erling Haaland",
+                "type": "Bought",
+                "feeM": 120.0,
+                "fromToClub": "Manchester City",
+                "date": time.strftime("%Y-%m-%d")
+            }
+            add_event("Transfer Finalized", sample["message"], json.dumps(sample))
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","message":"Test transfer sent successfully!"}')
+            return
+
+        if path == "/clear":
+            with events_lock:
+                events.clear()
+                save_events()
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"status":"cleared"}')
+            return
+
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+        except ValueError:
+            self._reject(400, "Bad Content-Length.")
+            return
+        if content_length < 0:
+            self._reject(400, "Bad Content-Length.")
+            return
+        if content_length > MAX_BODY_BYTES:
+            self._reject(413, "Payload too large.")
+            return
+        post_data = self.rfile.read(content_length).decode('utf-8', errors='replace')
+        text = post_data.strip().lstrip("\ufeff")
+        if not text:
+            self._reject(400, "Empty body.")
+            return
+
+        status, reply = 200, {"status": "ok"}
+        if text[0] in "{[":
+            # JSON payload from the Live Editor scripts. A malformed one is refused with HTTP 400 instead of being
+            # stored: a broken event that looks like JSON would stall the phone app for every event after it.
+            data = None
+            for strict in (True, False):          # strict=False tolerates raw control characters inside strings
+                try:
+                    data = json.loads(text, strict=strict)
+                    break
+                except ValueError:
+                    continue
+            if not isinstance(data, dict):
+                print(f"[{time.strftime('%H:%M:%S')}] REJECTED malformed JSON payload ({len(text)} bytes): {text[:120]!r}")
+                self._reject(400, "Payload is not a valid JSON object.")
+                return
+            title = str(data.get("title") or "Match Update")
+            msg = sanitize_penalty_text(str(data.get("message") or ""))
+            if data.get("dataType") == "match":
+                if not add_match_event(title, msg, data):
+                    reply = {"status": "duplicate"}
+            else:
+                add_event(title, msg, json.dumps(data, ensure_ascii=False))
+        else:
+            # plain text message (not JSON): shown in the feed as-is
+            add_event("Match Update", sanitize_penalty_text(text), None)
+
+        self.send_response(status)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(reply).encode())
+
+    def do_GET(self):
+        if not self._host_allowed():
+            return
+        path = self.path.lower()
+        if path in ("/test-match", "/test-transfer", "/clear"):
+            # These used to fire on a plain GET, which means a link or <img> tag on any
+            # web page could trigger them. They are POST-only now (use the dashboard buttons).
+            self.send_response(302)
+            self.send_header('Location', '/')
+            self.end_headers()
+            return
+
+        if path in ["/events", "/json", "/api/telemetry"]:
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            with events_lock:
+                body = json.dumps(events).encode()
+            self.wfile.write(body)
+            return
+
+        local_ip = get_local_ip()
+        page = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>EA FC Telemetry Bridge (Python)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 24px; margin: 0; }}
+        .card {{ background: #1e293b; border-radius: 14px; padding: 24px; max-width: 680px; margin: 0 auto; }}
+        h1 {{ color: #38bdf8; font-size: 22px; }}
+        .info {{ background: #0f172a; padding: 14px; border-radius: 8px; font-family: monospace; margin: 14px 0; border: 1px solid #334155; }}
+        button, a.btn {{ background: #10b981; color: white; border: none; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: bold; text-decoration: none; display: inline-block; margin-right: 8px; }}
+        button.blue {{ background: #0284c7; }}
+        button.red {{ background: #ef4444; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>⚽ EA Sports FC Telemetry Bridge (Python)</h1>
+        <div class="info">
+            <strong>📱 IP Address for Android App:</strong><br>
+            <span style="color:#10b981;font-size:16px;font-weight:bold;">http://{local_ip}:{LOCAL_PORT}</span>
+        </div>
+        <div style="margin: 16px 0;">
+            <button onclick="fetch('/test-match', {{method:'POST'}}).then(()=>location.reload())">⚡ Send Test Match (3 - 1 vs Arsenal)</button>
+            <button class="blue" onclick="fetch('/test-transfer', {{method:'POST'}}).then(()=>location.reload())">⚡ Send Test Transfer (€120M)</button>
+            <button class="red" onclick="fetch('/clear', {{method:'POST'}}).then(()=>location.reload())">🗑️ Clear</button>
+        </div>
+        <p style="font-size:12px;color:#94a3b8;"><a href="/events" target="_blank" style="color:#38bdf8;">[View JSON]</a></p>
+        <h3>Live Events ({len(events)} queued)</h3>
+        <pre style="background:#0f172a;padding:12px;border-radius:8px;max-height:260px;overflow:auto;font-size:12px;color:#cbd5e1;">{html.escape(json.dumps(events, indent=2))}</pre>
+    </div>
+</body>
+</html>"""
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+        self.end_headers()
+        self.wfile.write(page.encode('utf-8'))
+
+    def log_message(self, format, *args):
+        pass
+
+
+import traceback
+
+# ---------------------------------------------------------------------------
+# Number helpers: CSV exports contain decimals ("86.4", "90.0") and empty cells. int("86.4") raises,
+# which used to abort the whole import silently.
+# ---------------------------------------------------------------------------
+def _f(v, default=0.0):
+    try:
+        x = float(str(v).strip())
+        if x != x or x in (float("inf"), float("-inf")):
+            return default
+        return x
+    except (TypeError, ValueError):
+        return default
+
+def _i(v, default=0):
+    return int(round(_f(v, default)))
+
+def _pct(v):
+    x = _f(v, 0.0)
+    return x * 100.0 if 0 < x <= 1 else x
+
+# ---------------------------------------------------------------------------
+# Match de-duplication. The Lua script and the hot-folder importer can both report the same match;
+# the first one to arrive wins and the other is dropped.
+# ---------------------------------------------------------------------------
+DEDUPE_WINDOW_SECONDS = 600
+
+def _norm_team(name):
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower())
+
+def is_duplicate_match(data):
+    opp = _norm_team(data.get("opponentName"))
+    gf, ga = _i(data.get("goalsFor")), _i(data.get("goalsAgainst"))
+    key = str(data.get("fixtureKey") or "")
+    now = int(time.time())
+    with events_lock:
+        recent = list(events)
+    for ev in reversed(recent):                      # newest first
+        if now - _i(ev.get("time")) > DEDUPE_WINDOW_SECONDS:
+            break
+        msg = ev.get("message")
+        if not isinstance(msg, str) or not msg.startswith("{"):
+            continue
+        try:
+            other = json.loads(msg)
+        except ValueError:
+            continue
+        if not isinstance(other, dict) or other.get("dataType") != "match":
+            continue
+        if key and other.get("fixtureKey") == key:
+            return True
+        o_opp = _norm_team(other.get("opponentName"))
+        same_opponent = (o_opp == opp) or bool(opp and o_opp and (opp in o_opp or o_opp in opp))
+        if same_opponent and _i(other.get("goalsFor")) == gf and _i(other.get("goalsAgainst")) == ga:
+            return True
+    return False
+
+def add_match_event(title, msg, payload):
+    """Adds a match unless the same match was already reported moments ago. Returns True if added."""
+    if is_duplicate_match(payload):
+        print(f"  -> (duplicate match ignored: {msg})")
+        return False
+    add_event(title, msg, json.dumps(payload, ensure_ascii=False))
+    return True
+
+# ---------------------------------------------------------------------------
+# Project Atlas hot-folder importer
+# ---------------------------------------------------------------------------
+PROCESSED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed_atlas_folders.json")
+STALE_EXPORT_SECONDS = 600       # exports older than this at first start are never replayed
+MAX_ATLAS_ATTEMPTS = 3
+processed_atlas_folders = set()
+atlas_attempts = {}
+
+def _load_processed():
+    try:
+        with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
+            processed_atlas_folders.update(json.load(f))
+        return True
+    except Exception:
+        return False
+
+def _save_processed():
+    try:
+        with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(processed_atlas_folders)[-500:], f)
+    except Exception:
+        pass
+
+def import_atlas_folder(folder, folder_id, snapshots_ready):
+    part_csv = os.path.join(folder, "16_match_participants_wide.csv")
+    teams_csv = os.path.join(folder, "18_match_teams_wide.csv")
+    print(f"\n[PROJECT ATLAS] 🎯 New MatchStats export detected: {folder_id}")
+
+    opp_name = "Opponent"
+    managed_club_name = "My Club"
+    managed_team_id = 0
+    current_league_name = "League"
+    comp_name = "League Match"
+    is_home = True
+    managed_score = 0
+    opponent_score = 0
+    result_badge = "W"
+    match_date = time.strftime("%Y-%m-%d")
+    league_pos = None
+    completed_matches = []
+    managed_squad_player_ids = set()
+    latest = {}
+
+    if os.path.exists(snapshots_ready):
+        s_folders = [os.path.join(snapshots_ready, d) for d in os.listdir(snapshots_ready) if os.path.isdir(os.path.join(snapshots_ready, d))]
+        s_folders.sort(key=os.path.getmtime, reverse=True)
+        if s_folders:
+            latest_snap = s_folders[0]
+            s_matches_csv = os.path.join(latest_snap, "managed_team_matches.csv")
+            s_leagues_csv = os.path.join(latest_snap, "team_leagues.csv")
+            s_meta_csv = os.path.join(latest_snap, "career_metadata.csv")
+            s_rosters_csv = os.path.join(latest_snap, "rosters.csv")
+
+            if os.path.exists(s_meta_csv):
+                with open(s_meta_csv, "r", encoding="utf-8-sig") as mf:
+                    for row in csv.DictReader(mf):
+                        if row.get("key") == "managed_team_id" and row.get("value"):
+                            try: managed_team_id = int(row["value"])
+                            except: pass
+                        if row.get("key") == "managed_team_name" and row.get("value"):
+                            managed_club_name = row["value"]
+
+            if os.path.exists(s_matches_csv):
+                with open(s_matches_csv, "r", encoding="utf-8-sig") as mf:
+                    m_rows = list(csv.DictReader(mf))
+                    completed_matches = [r for r in m_rows if str(r.get("is_completed", "")).strip() in ("1", 1)]
+                    if completed_matches:
+                        latest = completed_matches[-1]
+                        managed_club_name = latest.get("managed_team_name") or managed_club_name
+                        opp_name = latest.get("opponent_team_name") or opp_name
+                        is_home = (latest.get("side", "").upper() == "HOME" or latest.get("managed_team_side", "").upper() == "HOME")
+                        managed_score = _i(latest.get("managed_score"))
+                        opponent_score = _i(latest.get("opponent_score"))
+                        result_badge = latest.get("result") or latest.get("managed_team_result") or ("W" if managed_score > opponent_score else ("D" if managed_score == opponent_score else "L"))
+                        match_date = latest.get("date") or match_date
+                        if latest.get("managed_team_id"):
+                            try: managed_team_id = int(latest["managed_team_id"])
+                            except: pass
+
+            # Pick Primary League by max matches_played in team_leagues.csv
+            if os.path.exists(s_leagues_csv):
+                with open(s_leagues_csv, "r", encoding="utf-8-sig") as lf:
+                    best_pld = -1
+                    for tl in csv.DictReader(lf):
+                        tid = _i(tl.get("team_id"))
+                        tname = tl.get("team_name") or ""
+                        if tid == managed_team_id or (managed_club_name and managed_club_name.lower() in tname.lower()):
+                            pld = _i(tl.get("matches_played"))
+                            pos_val = _i(tl.get("current_table_position"))
+                            if pld > best_pld and pos_val > 0:
+                                best_pld = pld
+                                league_pos = pos_val
+                                if tl.get("league_name"): current_league_name = tl["league_name"]
+                            elif best_pld == -1 and pos_val > 0:
+                                league_pos = pos_val
+                                if tl.get("league_name"): current_league_name = tl["league_name"]
+
+            # Extract Managed Squad player IDs
+            if os.path.exists(s_rosters_csv):
+                with open(s_rosters_csv, "r", encoding="utf-8-sig") as rf:
+                    for r in csv.DictReader(rf):
+                        rtid = _i(r.get("team_id"))
+                        if rtid == managed_team_id and r.get("player_id"):
+                            try: managed_squad_player_ids.add(int(r["player_id"]))
+                            except: pass
+
+    # Determine Playoff vs Regular League vs Cup
+    raw_comp = latest.get("competition_name") or current_league_name
+    is_playoff = any(k in raw_comp.lower() for k in ["play-off", "playoff", "promotion"])
+    is_regular_league = (not is_playoff) and any(k in raw_comp.lower() for k in [current_league_name.lower(), "league", "championship", "division", "premier"]) and not any(k in raw_comp.lower() for k in ["cup", "fa", "carabao", "trophy"])
+
+    if is_playoff:
+        comp_name = current_league_name
+        playoff_matches = [m for m in completed_matches if any(k in (m.get("competition_name") or "").lower() for k in ["play-off", "playoff", "promotion"])]
+        p_count = max(1, len(playoff_matches))
+        if p_count >= 3: stage_val = "Play-off Final"
+        elif p_count == 2: stage_val = "Play-off Semi-Final (Leg 2)"
+        else: stage_val = "Play-off Semi-Final (Leg 1)"
+    elif is_regular_league:
+        comp_name = current_league_name
+        league_matches = [m for m in completed_matches if any(k in (m.get("competition_name") or "").lower() for k in [current_league_name.lower(), "league", "championship", "division", "premier"]) and not any(k in (m.get("competition_name") or "").lower() for k in ["play-off", "playoff", "cup", "fa", "carabao", "trophy"])]
+        stage_val = f"Matchday {max(1, len(league_matches))}"
+    else:
+        comp_name = raw_comp
+        cup_matches = [m for m in completed_matches if m.get("competition_name") == raw_comp]
+        c_count = max(1, len(cup_matches))
+        if "fa cup" in raw_comp.lower() or "emirates" in raw_comp.lower():
+            if c_count >= 6: stage_val = "Final"
+            elif c_count == 5: stage_val = "Semi-Final"
+            elif c_count == 4: stage_val = "Quarter-Final"
+            elif c_count == 3: stage_val = "Round 5"
+            elif c_count == 2: stage_val = "Round 4"
+            else: stage_val = "Round 3"
+        elif "carabao" in raw_comp.lower() or "efl cup" in raw_comp.lower():
+            if c_count >= 6: stage_val = "Final"
+            elif c_count == 5: stage_val = "Semi-Final"
+            elif c_count == 4: stage_val = "Quarter-Final"
+            else: stage_val = f"Round {c_count}"
+        else:
+            stage_val = f"Round {c_count}"
+
+    # Parse participants
+    participants = []
+    with open(part_csv, "r", encoding="utf-8-sig") as pf:
+        participants = list(csv.DictReader(pf))
+
+    count0 = 0
+    count1 = 0
+    max_minutes = 0
+    for p in participants:
+        pid = _i(p.get("player_id"))
+        p_team = _i(p.get("team_index"))
+        mins = _i(p.get("minutes_played"))
+        if mins > max_minutes: max_minutes = mins
+        if pid in managed_squad_player_ids:
+            if p_team == 0: count0 += 1
+            else: count1 += 1
+
+    if count0 > count1:
+        managed_team_idx = 0
+        opp_team_idx = 1
+    elif count1 > count0:
+        managed_team_idx = 1
+        opp_team_idx = 0
+    else:
+        managed_team_idx = 0 if is_home else 1
+        opp_team_idx = 1 if managed_team_idx == 0 else 0
+
+    # Parse team stats from 18_match_teams_wide.csv
+    team_rows = []
+    with open(teams_csv, "r", encoding="utf-8-sig") as tf:
+        team_rows = list(csv.DictReader(tf))
+
+    m_team = team_rows[managed_team_idx] if len(team_rows) > managed_team_idx else (team_rows[0] if team_rows else {})
+    o_team = team_rows[opp_team_idx] if len(team_rows) > opp_team_idx else (team_rows[1] if len(team_rows) > 1 else {})
+
+    # Real Extra Time & Penalties extraction
+    is_playoff_leg1 = is_playoff and ("leg 1" in stage_val.lower())
+    if is_regular_league or is_playoff_leg1:
+        is_extra_time = False
+        home_pen = 0
+        away_pen = 0
+    else:
+        m_shootout = _i(m_team.get("shootout_goals"))
+        o_shootout = _i(o_team.get("shootout_goals"))
+        if m_shootout >= 255 or m_shootout < 0: m_shootout = 0
+        if o_shootout >= 255 or o_shootout < 0: o_shootout = 0
+        is_extra_time = (max_minutes >= 115) or (m_shootout > 0 or o_shootout > 0)
+        home_pen = m_shootout if is_home else o_shootout
+        away_pen = o_shootout if is_home else m_shootout
+
+    if home_pen >= 255 or home_pen < 0: home_pen = 0
+    if away_pen >= 255 or away_pen < 0: away_pen = 0
+
+    # Man of the Match directly from the game's man_of_the_match column
+    top_player = ""
+    highest_rating = -1.0
+    for p in participants:
+        r = _f(p.get("game_rating"), 6.0)
+        is_motm = (str(p.get("man_of_the_match") or "").lower() in ("true", "1"))
+        if is_motm and p.get("player_name"):
+            top_player = p.get("player_name", "")
+            break
+        if r > highest_rating and p.get("player_name"):
+            highest_rating = r
+            top_player = p.get("player_name", "")
+
+    shots_for = _i(m_team.get("shots") or m_team.get("shots_on_target"))
+    shots_against = _i(o_team.get("shots") or o_team.get("shots_on_target"))
+    xg_f = _f(m_team.get("npk_expected_goals"))
+    xg_a = _f(o_team.get("npk_expected_goals"))
+    passes_f = _i(m_team.get("passes"))
+    passes_a = _i(o_team.get("passes"))
+    pass_acc = _i(_pct(m_team.get("pass_accuracy_pct_derived")))
+    poss = _i(_pct(m_team.get("possession") or m_team.get("possession_pct")))
+    if poss <= 0 and (passes_f + passes_a) > 0:
+        poss = int((passes_f / (passes_f + passes_a)) * 100)
+    if poss <= 0: poss = 52
+
+    # Parse real player performances from 16_match_participants_wide.csv
+    player_perfs = []
+    goal_details = []
+
+    goal_players = []
+    for p in participants:
+        p_team = _i(p.get("team_index"))
+        p_minutes = _f(p.get("minutes_played"), -1.0)
+        played = not (max_minutes > 0 and 0 <= p_minutes <= 0)   # export lists the whole matchday squad
+        if p_team == managed_team_idx and played:
+            p_name = p.get("player_name") or "Player"
+            p_id = p.get("player_id", "")
+            p_goals = _i(p.get("goals_derived") or p.get("npk_goals"))
+            p_assists = _i(p.get("assists"))
+            p_rating = _f(p.get("game_rating"), 6.5)
+            p_passes = _i(p.get("passes"))
+            p_pacc = _i(_pct(p.get("pass_accuracy_pct_derived")))
+            p_shots = _i(p.get("shots") or p_goals)
+            p_sacc = min(100, int((_i(p.get("shots_on_target")) / max(1, p_shots)) * 100)) if p_shots > 0 else 0
+            p_tackles = _i(p.get("tackles"))
+            if _f(p.get("stand_tackle_success_pct_derived"), -1) >= 0:
+                p_tpct = _i(_pct(p.get("stand_tackle_success_pct_derived")))
+            else:
+                # blank for a player with no stand tackles (slide tackles only): use all tackles won / attempted
+                if p.get("stand_tackles") is not None or p.get("slide_tackles") is not None:
+                    t_att = _f(p.get("stand_tackles")) + _f(p.get("slide_tackles"))
+                    t_won = _f(p.get("stand_tackles_won")) + _f(p.get("slide_tackles_won"))
+                else:
+                    t_att = float(p_tackles)
+                    t_won = _f(p.get("tackles_completed"), p_tackles)
+                p_tpct = min(100, int(t_won / t_att * 100)) if t_att > 0 else 0
+            is_motm = (p_name == top_player or str(p.get("man_of_the_match") or "").lower() in ("true", "1"))
+
+            player_perfs.append({
+                "playerId": str(p_id),
+                "playerName": p_name,
+                "rating": round(p_rating, 1),
+                "goals": p_goals,
+                "assists": p_assists,
+                "passes": p_passes,
+                "passAccuracy": p_pacc,
+                "shots": p_shots,
+                "shotAccuracy": p_sacc,
+                "tackles": p_tackles,
+                "tacklePercentage": p_tpct,
+                "interceptions": _i(p.get("interceptions")),
+                "cleanSheet": (opponent_score == 0),
+                "yellowCard": _i(p.get("yellow_card_events")) > 0,
+                "redCard": _i(p.get("red_dismissals")) > 0,
+                "isMotm": is_motm
+            })
+
+            for _g in range(p_goals):
+                goal_players.append(p_name)
+
+    # The export has no goal minutes: spread them evenly over the match and flag them as estimated.
+    for k, scorer in enumerate(goal_players, start=1):
+        goal_details.append({
+            "playerName": scorer,
+            "minute": max(1, min(90, int(90 * k / (len(goal_players) + 1)))),
+            "isOpponent": False,
+            "minuteEstimated": True
+        })
+    for og in range(1, opponent_score + 1):
+        goal_details.append({
+            "playerName": f"{opp_name} Goal",
+            "minute": max(1, min(90, int(90 * og / (opponent_score + 1)))),
+            "isOpponent": True,
+            "minuteEstimated": True
+        })
+
+    loc_symbol = "vs" if is_home else "@"
+    et_str = f" (Pens: {home_pen}-{away_pen})" if (home_pen > 0 or away_pen > 0) else (" (A.E.T.)" if is_extra_time else "")
+    msg = f"Full Time: {managed_club_name} {loc_symbol} {managed_score} - {opponent_score} {opp_name} ({comp_name} - {stage_val}){et_str}"
+    match_payload = {
+        "dataType": "match",
+        "title": "Live Match Final",
+        "message": msg,
+        "opponentName": opp_name,
+        "isHome": is_home,
+        "goalsFor": managed_score,
+        "goalsAgainst": opponent_score,
+        "resultBadge": result_badge,
+        "date": match_date,
+        "competition": comp_name,
+        "stage": stage_val,
+        "isExtraTime": is_extra_time,
+        "homePenalties": home_pen,
+        "awayPenalties": away_pen,
+        "shotsFor": shots_for,
+        "shotsAgainst": shots_against,
+        "possession": poss,
+        "passingAccuracy": pass_acc,
+        "expectedGoals": round(xg_f, 2),
+        "expectedGoalsAgainst": round(xg_a, 2),
+        "motmName": top_player,
+        "leaguePosition": league_pos if (league_pos and league_pos > 0) else None,
+        "detailSource": "atlas",
+        "playerPerformances": player_perfs,
+        "goalDetails": goal_details
+    }
+
+    add_match_event("Live Match Final", msg, match_payload)
+    print(f"  -> ⚽ Imported Match: {msg}")
+    print(f"     xG: {round(xg_f, 2)} - {round(xg_a, 2)} | MOTM: {top_player} | Lineup: {len(player_perfs)} players")
+
+def atlas_roots():
+    """Folders the Lua scripts / Atlas exporters write to. They use %USERPROFILE%\\Documents\\FC26 Export, but Windows can
+    redirect Documents to OneDrive, so that location is watched as well."""
+    home = os.path.expanduser("~")
+    cands = [os.path.join(home, "Documents", "FC26 Export")]
+    for od in (os.environ.get("OneDrive"), os.environ.get("OneDriveConsumer"), os.path.join(home, "OneDrive")):
+        if od:
+            cands.append(os.path.join(od, "Documents", "FC26 Export"))
+    roots = []
+    for c in cands:
+        if c not in roots and os.path.isdir(c):
+            roots.append(c)
+    return roots
+
+def watch_atlas_exports():
+    have_state = _load_processed()
+    first_scan = True
+    while True:
+        try:
+            for docs in atlas_roots():
+                match_stats_ready = os.path.join(docs, "MatchStats", "ready")
+                snapshots_ready = os.path.join(docs, "Snapshots", "ready")
+                if not os.path.exists(match_stats_ready):
+                    continue
+
+                folders = [os.path.join(match_stats_ready, d) for d in os.listdir(match_stats_ready)
+                           if os.path.isdir(os.path.join(match_stats_ready, d))]
+                folders.sort(key=os.path.getmtime, reverse=True)
+
+                if first_scan and not have_state:
+                    # First start: exports from earlier matches must not be replayed into the app.
+                    cutoff = time.time() - STALE_EXPORT_SECONDS
+                    for f in folders:
+                        if os.path.getmtime(f) < cutoff:
+                            processed_atlas_folders.add(os.path.basename(f))
+                    _save_processed()
+
+                for folder in folders:
+                    folder_id = os.path.basename(folder)
+                    if folder_id in processed_atlas_folders:
+                        continue
+
+                    ready_file = os.path.join(folder, "MATCH_READY")
+                    alt_ready = os.path.join(folder, "READY_FOR_MANUAL_ZIP_AND_UPLOAD.txt")
+                    part_csv = os.path.join(folder, "16_match_participants_wide.csv")
+                    teams_csv = os.path.join(folder, "18_match_teams_wide.csv")
+
+                    if (os.path.exists(ready_file) or os.path.exists(alt_ready)) and os.path.exists(part_csv) and os.path.exists(teams_csv):
+                        try:
+                            import_atlas_folder(folder, folder_id, snapshots_ready)
+                            processed_atlas_folders.add(folder_id)
+                            _save_processed()
+                        except Exception:
+                            n = atlas_attempts.get(folder_id, 0) + 1
+                            atlas_attempts[folder_id] = n
+                            print(f"[PROJECT ATLAS] ⚠️ Could not import {folder_id} (attempt {n}/{MAX_ATLAS_ATTEMPTS}):")
+                            traceback.print_exc()
+                            if n >= MAX_ATLAS_ATTEMPTS:
+                                print(f"[PROJECT ATLAS] Giving up on {folder_id}; the Lua script still sends the match directly.")
+                                processed_atlas_folders.add(folder_id)
+                                _save_processed()
+            first_scan = False
+        except Exception:
+            print("[PROJECT ATLAS] watcher error:")
+            traceback.print_exc()
+        time.sleep(2)
+
+if __name__ == "__main__":
+    local_ip = get_local_ip()
+    port = LOCAL_PORT
+    print("===================================================")
+    print(f" EA SPORTS FC TELEMETRY BRIDGE (Python)")
+    print(f" ⭐ ENTER IN YOUR ANDROID APP:")
+    print(f"    http://{local_ip}:{port}")
+    print(f" Web Dashboard: http://localhost:{port}")
+    print(" Phone access is read-only; writes are accepted from this PC only.")
+    print(" Keep this window open while playing!")
+    print("===================================================")
+
+    class ReusableServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+        
+    try:
+        threading.Thread(target=watch_atlas_exports, daemon=True).start()
+        print("🟢 Project Atlas hot-folder auto-importer active (Documents\\FC26 Export)")
+        with ReusableServer(("", port), TelemetryHandler) as httpd:
+            print(f"🟢 Python Bridge actively listening on Port {port}")
+            httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down bridge...")
+    except Exception as e:
+        print(f"⚠️ Port {port} listener error: {e}")
