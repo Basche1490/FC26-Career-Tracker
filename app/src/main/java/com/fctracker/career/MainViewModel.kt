@@ -431,6 +431,16 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         PlayerDatabase.toPlayer(eafcPlayer, _state.value.startYear)
 
     fun addTransferLog(log: TransferLog) {
+        recordTransfer(log)
+        ensureSwapCounterpart(log)
+    }
+
+    /** Records the other move of a swap deal as an entry of its own, once (see [swapCounterpart]). */
+    private fun ensureSwapCounterpart(log: TransferLog) {
+        log.swapCounterpart(_state.value.transfers)?.let { recordTransfer(it) }
+    }
+
+    private fun recordTransfer(log: TransferLog) {
         _state.update { state ->
             val existingPlayer = state.players.find { it.name == log.playerName || it.displayName == log.playerName }
             val newPlayers = state.players.toMutableList()
@@ -484,6 +494,7 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
             _state.update { state ->
                 state.copy(transfers = state.transfers.map { if (it.id == old.id) updated else it })
             }
+            ensureSwapCounterpart(updated)
         } else {
             deleteTransferLog(old.id)
             addTransferLog(updated)

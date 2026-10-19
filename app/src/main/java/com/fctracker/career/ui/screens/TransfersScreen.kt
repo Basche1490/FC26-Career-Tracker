@@ -338,7 +338,8 @@ private fun TransferLogRow(
             val subtitle = if (isRetirement) {
                 "Retired from professional football"
             } else {
-                "${log.type} ${if (isIncoming) "from" else "to"} ${log.fromToClub}"
+                "${log.type} ${if (isIncoming) "from" else "to"} ${log.fromToClub}" +
+                    (log.swapPlayerName?.takeIf { it.isNotBlank() }?.let { " · swap with $it" } ?: "")
             }
             Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -460,7 +461,7 @@ fun TransferFormModal(
     
     var includeSwap by remember(logToEdit) { mutableStateOf(logToEdit?.includeSwap ?: false) }
     var isRegen by remember(logToEdit) { mutableStateOf(logToEdit?.isRegen ?: false) }
-    var swapPlayerQuery by remember { mutableStateOf("") }
+    var swapPlayerQuery by remember(logToEdit) { mutableStateOf(logToEdit?.swapPlayerName ?: "") }
     var swapSearchResults by remember { mutableStateOf(emptyList<com.fctracker.career.EafcPlayer>()) }
     var swapSearchExpanded by remember { mutableStateOf(false) }
     
@@ -908,9 +909,12 @@ fun TransferFormModal(
                                         fromToClub = if (transferType == "Retirement") "Retired" else teamQuery,
                                         date = transferDate,
                                         includeSwap = if (transferType == "Retirement") false else includeSwap,
+                                        swapPlayerName = swapPlayerQuery.trim()
+                                            .takeIf { includeSwap && transferType != "Retirement" && it.isNotEmpty() },
                                         isRegen = if (transferType == "Retirement") false else isRegen,
                                         headshotUrl = logToEdit?.headshotUrl ?: "",
-                                        position = logToEdit?.position ?: "CM"
+                                        // blank for a new deal: the player database then supplies his real position
+                                        position = logToEdit?.position ?: ""
                                     )
                                     if (logToEdit != null) {
                                         viewModel.updateTransferLog(logToEdit, savedLog)

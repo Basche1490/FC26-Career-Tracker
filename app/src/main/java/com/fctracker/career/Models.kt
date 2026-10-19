@@ -322,7 +322,12 @@ data class TransferLog(
     val headshotUrl: String = "",
     val position: String = "CM",
     /** The game does not store most transfer fees: true when the fee is not known (shown as "Fee ?" until edited). */
-    val feeUnknown: Boolean = false
+    val feeUnknown: Boolean = false,
+    /**
+     * The other player of a player swap: the one who went the other way in the same deal. Null for deals without a
+     * swap (and for everything saved by older versions).
+     */
+    val swapPlayerName: String? = null
 )
 
 /**
@@ -334,9 +339,37 @@ fun TransferLog.isIncomingDeal(): Boolean {
     return t.startsWith("in") || t == "bought" || t == "free agent sign" || t.startsWith("promoted") || t == "loaned in"
 }
 
-/** "€26.0M", "Free", or "Fee ?" when the game did not store the fee and nobody has entered it yet. */
+/**
+ * A deal that includes a player swap is two moves: the player in the deal and the player who went the other way.
+ * This is the other move, as an entry of its own (the way the PC import records such deals): the swap player leaves
+ * when the deal is an incoming one, and arrives when it is an outgoing one. Null when the deal has no swap, or when
+ * [existing] already holds that move (so saving the same deal twice adds nothing).
+ */
+fun TransferLog.swapCounterpart(existing: List<TransferLog>): TransferLog? {
+    val swap = swapPlayerName?.trim().orEmpty()
+    if (!includeSwap || swap.isEmpty() || type == "Retirement") return null
+    if (swap.equals(playerName.trim(), ignoreCase = true)) return null
+    val incoming = isIncomingDeal()
+    val alreadyThere = existing.any {
+        it.playerName.trim().equals(swap, ignoreCase = true) && it.date == date &&
+            it.isIncomingDeal() != incoming && it.fromToClub.trim().equals(fromToClub.trim(), ignoreCase = true)
+    }
+    if (alreadyThere) return null
+    return TransferLog(
+        playerName = swap,
+        type = if (incoming) "Out (Permanent)" else "In (Permanent)",
+        feeM = 0.0,
+        fromToClub = fromToClub,
+        date = date,
+        position = "", // a blank position lets the player database supply the real one
+        swapPlayerName = playerName
+    )
+}
+
+/** "€26.0M", "Swap" (a player went the other way and no cash), "Free", or "Fee ?" when the fee is not known yet. */
 fun TransferLog.feeLabel(currencySymbol: String): String = when {
     feeM > 0 -> "$currencySymbol${feeM}M"
+    !swapPlayerName.isNullOrBlank() -> "Swap"
     feeUnknown -> "Fee ?"
     else -> "Free"
 }
