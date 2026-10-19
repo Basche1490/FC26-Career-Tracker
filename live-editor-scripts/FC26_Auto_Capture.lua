@@ -1,4 +1,4 @@
--- FC26 AutoCapture v2.6.1 (Precision Live Telemetry & Atlas Tracker)
+-- FC26 AutoCapture v2.7.0 (Precision Live Telemetry & Atlas Tracker)
 -- Complete support for EFL Championship, Premier League, FA Cup, Carabao Cup, Play-offs.
 -- Gathers REAL in-game data: Real League Position, Real Lineups, Real Goal Scorers, Real MOTM.
 -- Strict League Rules: League matches NEVER have extra time or penalty shootouts.
@@ -6,6 +6,8 @@
 -- Safe session lifecycle: No phantom beaming on startup; immediate beam on actual match completion.
 -- v2.6: complete match log (substitutions, loan players, saves, opposing man of the match, league position from
 -- the real results, positions, the other side's scorers); no flashing command windows.
+-- v2.7: no command windows at start-up or after a match (all folders in one command, spare folders for the exporter),
+-- other side's scorers named from the players' goal tallies, loan-outs noticed while the game runs.
 
 local MEMORY = require "imports/core/memory"
 require "imports/other/helpers"
@@ -14,7 +16,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "2.6.1"
+local VERSION = "2.7.0"
 local SCRIPT_INSTANCE = "FC26_AUTOCAP_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
 _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] = SCRIPT_INSTANCE
 
@@ -89,7 +91,8 @@ local get_current_career_date -- defined further down; the match code above it n
 -- This block keeps that to the minimum: folders that already exist are never "created" again, folder contents are read
 -- through Live Editor's own functions when it has them, and the few programs that still have to run are started
 -- hidden when Live Editor allows it (shellExecute with SW_HIDE). It also covers the Project Atlas exporter, which makes
--- folders with os.execute: its calls are answered here without starting anything when the folder is already there.
+-- folders with os.execute: its calls are answered here without starting anything when the folder is already there, and
+-- a new folder is made by renaming one of a stock of spare folders (created together, in a single program start).
 local QUIET = { hidden = nil, dir_api = false, file_api = false, started = 0, windows = 0, notes = {} }
 QUIET.real_execute = rawget(_G, "FC26_REAL_OS_EXECUTE") or os.execute
 rawset(_G, "FC26_REAL_OS_EXECUTE", QUIET.real_execute)
@@ -164,15 +167,134 @@ function QUIET.run_and_wait(inner, max_ms)
     return ok
 end
 
--- Creates a folder (and its parents). Nothing is started when it already exists.
-function QUIET.make_dir(path)
-    if QUIET.dir_exists(path) then return true end
-    local win = win_path(path)
-    if QUIET.hidden ~= false and QUIET.hidden_run(QUIET.comspec(), '/c mkdir "' .. win .. '"') then
-        if QUIET.wait_until(function() return QUIET.dir_exists(path) end, 2500) then return true end
+-- Spare folders: empty folders made ahead of time in ONE program start. A folder that is needed later (the Atlas
+-- exporter makes a new one for every export) is simply renamed into place, which starts no program and shows no window.
+QUIET.pool_root = nil -- set by the script: the folder that holds the spare folders (nil = no spare folders)
+QUIET.pool_size = 60
+QUIET.pool_low = 20   -- topped up at script start when fewer than this are left
+QUIET.moved = 0       -- folders that were created by moving a spare into place
+QUIET.batches = 0     -- program starts used to create several folders at once
+
+function QUIET.parent_of(path)
+    path = tostring(path or ""):gsub("[/\\]+$", "")
+    return path:match("^(.*)[/\\][^/\\]+$")
+end
+
+function QUIET.spare_path(index)
+    return string.format("%s/s%03d", QUIET.pool_root, index)
+end
+
+-- The spare folders that exist right now (list of paths) and the paths of the ones that are missing.
+function QUIET.scan_pool()
+    local ready, missing = {}, {}
+    if not QUIET.pool_root then return ready, missing end
+    for i = 1, QUIET.pool_size do
+        local spare = QUIET.spare_path(i)
+        if QUIET.dir_exists(spare) then ready[#ready + 1] = spare else missing[#missing + 1] = spare end
     end
-    QUIET.windows = QUIET.windows + 1
-    pcall(QUIET.real_execute, 'if not exist "' .. win .. '" mkdir "' .. win .. '"')
+    return ready, missing
+end
+
+-- Moves a spare folder to [path] (its parent folder must exist). false when there is none or it did not work.
+function QUIET.take_spare(path)
+    if not QUIET.pool_root then return false end
+    if QUIET.spares == nil then QUIET.spares = QUIET.scan_pool() end
+    local misses = 0
+    while #QUIET.spares > 0 and misses < 3 do
+        local spare = QUIET.spares[#QUIET.spares]
+        table.remove(QUIET.spares)
+        local ok = os.rename(spare, path)
+        if ok then
+            QUIET.moved = QUIET.moved + 1
+            return true
+        end
+        if QUIET.dir_exists(spare) then
+            -- the spare is fine, so it is the target that cannot be used: keep the spare for the next folder
+            QUIET.spares[#QUIET.spares + 1] = spare
+            return false
+        end
+        misses = misses + 1 -- the spare itself is gone: try the next one
+    end
+    QUIET.spares = nil -- the list was out of date (folders removed by hand): look again next time
+    return false
+end
+
+-- Creates several folders with ONE program start: hidden when Live Editor allows it, otherwise one visible window
+-- for all of them. Returns true when every folder exists afterwards.
+function QUIET.batch_mkdir(paths)
+    local missing = {}
+    for _, p in ipairs(paths) do
+        if not QUIET.dir_exists(p) then missing[#missing + 1] = p end
+    end
+    local all_ok = true
+    local first = 1
+    while first <= #missing do
+        local parts, len, last = {}, 0, first
+        while last <= #missing and (len < 6000 or last == first) do
+            local quoted = '"' .. win_path(missing[last]) .. '"'
+            parts[#parts + 1] = quoted
+            len = len + #quoted + 1
+            last = last + 1
+        end
+        local chunk_first, chunk_last = first, last - 1
+        local function all_there()
+            for k = chunk_first, chunk_last do
+                if not QUIET.dir_exists(missing[k]) then return false end
+            end
+            return true
+        end
+        local command = "mkdir " .. table.concat(parts, " ")
+        QUIET.batches = QUIET.batches + 1
+        local done = false
+        if QUIET.hidden ~= false and QUIET.hidden_run(QUIET.comspec(), "/c " .. command) then
+            done = QUIET.wait_until(all_there, 4000)
+        end
+        if not done then
+            QUIET.windows = QUIET.windows + 1
+            pcall(QUIET.real_execute, command)
+            done = all_there()
+        end
+        all_ok = all_ok and done
+        first = last
+    end
+    return all_ok
+end
+
+-- First run on a PC: every folder the scripts need plus the spare folders, in ONE program start (nothing is started
+-- when they all exist).
+function QUIET.prepare(folders)
+    local wanted = {}
+    for _, p in ipairs(folders) do
+        if not QUIET.dir_exists(p) then wanted[#wanted + 1] = p end
+    end
+    if QUIET.pool_root then
+        local ready, missing = QUIET.scan_pool()
+        if #ready < QUIET.pool_low then
+            for _, p in ipairs(missing) do wanted[#wanted + 1] = p end
+        end
+    end
+    QUIET.spares = nil
+    if #wanted == 0 then return true end
+    return QUIET.batch_mkdir(wanted)
+end
+
+-- Creates a folder (and its parents). Nothing is started when it already exists, and no window opens while a spare
+-- folder is left to move into place.
+function QUIET.make_dir(path, depth)
+    if QUIET.dir_exists(path) then return true end
+    depth = depth or 0
+    local batch = { path }
+    if QUIET.pool_root then
+        local parent = QUIET.parent_of(path)
+        local parent_ok = parent == nil or not parent:find("[/\\]") -- a drive root is always there
+            or QUIET.dir_exists(parent) or (depth < 8 and QUIET.make_dir(parent, depth + 1))
+        if parent_ok and QUIET.take_spare(path) then return true end
+        -- none left: make this folder and new spare folders together, in one go
+        local _, missing = QUIET.scan_pool()
+        for _, p in ipairs(missing) do batch[#batch + 1] = p end
+        QUIET.spares = nil
+    end
+    QUIET.batch_mkdir(batch)
     return QUIET.dir_exists(path)
 end
 
@@ -285,10 +407,12 @@ function QUIET.probe(folder)
 end
 
 function QUIET.describe()
-    return string.format("hidden program start: %s | folder listing: %s / %s | visible windows opened so far: %d",
+    if QUIET.pool_root and QUIET.spares == nil then QUIET.spares = QUIET.scan_pool() end
+    return string.format("hidden program start: %s | folder listing: %s / %s | spare folders: %d ready, %d used | visible windows opened so far: %d",
         QUIET.hidden and "yes" or "no (Live Editor has no working shellExecute)",
         QUIET.dir_api and "Live Editor function" or "dir command",
-        QUIET.file_api and "Live Editor function" or "dir command", QUIET.windows)
+        QUIET.file_api and "Live Editor function" or "dir command",
+        #(QUIET.spares or {}), QUIET.moved, QUIET.windows)
 end
 
 -- Answer the Atlas exporter's "create this folder" commands here (nothing is started when the folder exists).
@@ -307,10 +431,13 @@ end
 -- END quiet_exec
 
 -- Folders are only created when they are really missing (the first run on a PC); see the quiet_exec block above.
+-- The folders this script needs are made in ONE go, together with a stock of spare folders: the folders the Atlas
+-- exporter makes later (a new one for every export, plus its own "incoming" / "ready" folders on the first run) are
+-- moved into place from that stock, so no command window opens for them. (The exporter's own folders are NOT made
+-- here: the script reads "MatchStats/ready exists" as "an export has been made on this PC before".)
 pcall(function()
-    QUIET.make_dir(OUTBOX_DIR)
-    QUIET.make_dir(EXPORT_ROOT)
-    QUIET.make_dir(MATCH_STATS_ROOT)
+    QUIET.pool_root = COMMUNITY_ROOT .. "/spare_folders"
+    QUIET.prepare({ COMMUNITY_ROOT, OUTBOX_DIR, EXPORT_ROOT, MATCH_STATS_ROOT })
     QUIET.probe(COMMUNITY_ROOT)
 end)
 
@@ -864,6 +991,25 @@ local function get_current_squad_details(managed_team_id)
     end)
 
     return all_players, starters, substitutes
+end
+
+-- The ids of everybody linked to a club (used to find the other side's scorers in the season statistics).
+local function get_team_player_ids(team_id)
+    local ids = {}
+    if not team_id or team_id <= 0 then return ids end
+    pcall(function()
+        local tpl = LE.db:GetTable("teamplayerlinks")
+        if not tpl then return end
+        local r = tpl:GetFirstRecord()
+        while r and r > 0 do
+            if (tonumber(tpl:GetRecordFieldValue(r, "teamid")) or 0) == team_id then
+                local pid = tonumber(tpl:GetRecordFieldValue(r, "playerid")) or 0
+                if pid > 0 then ids[pid] = true end
+            end
+            r = tpl:GetNextValidRecord()
+        end
+    end)
+    return ids
 end
 
 -- Read cumulative player info to detect delta goals/assists/cards
@@ -1541,6 +1687,42 @@ local function lineup_matches_export(history, exported_ids)
     return hit / played >= 0.7 and hit / exported >= 0.7
 end
 
+-- "Player" and "Player 123456" are what safe_player_name answers when the game gives no name.
+local function is_unnamed_player(name)
+    if name == nil then return true end
+    local n = tostring(name):gsub("^%s+", ""):gsub("%s+$", "")
+    return n == "" or n:lower() == "player" or n:match("^[Pp]layer %d+$") ~= nil or n:match("^%d+$") ~= nil
+end
+
+-- The players of the other side who scored, worked out from the season statistics the game keeps for everybody
+-- (career_playerinfo, read before and after the match). That record also holds anything else the club's opponent
+-- played in between, so it is only believed when it adds up to exactly the goals the club conceded.
+-- pre/post: pid -> { goals = n }; opponent_pids: set of the other club's player ids.
+-- Returns a list of { name =, goals = } or nil.
+local function opponent_scorers_from_deltas(pre, post, opponent_pids, goals_conceded, name_for)
+    if not pre or not post or not opponent_pids or (goals_conceded or 0) <= 0 then return nil end
+    local found, total = {}, 0
+    for pid in pairs(opponent_pids) do
+        local before, after = pre[pid], post[pid]
+        if before and after then
+            local scored = (after.goals or 0) - (before.goals or 0)
+            if scored > 0 then
+                found[#found + 1] = { pid = pid, goals = scored }
+                total = total + scored
+            end
+        end
+    end
+    if total ~= goals_conceded then return nil end
+    table.sort(found, function(a, b) return a.pid < b.pid end)
+    local list = {}
+    for _, f in ipairs(found) do
+        local name = name_for and name_for(f.pid) or ""
+        if is_unnamed_player(name) then return nil end
+        list[#list + 1] = { name = name, goals = f.goals }
+    end
+    return list
+end
+
 local function team_row_for(teams, idx)
     for _, t in ipairs(teams) do
         if t.team_index ~= nil and tonumber(t.team_index) == idx then return t end
@@ -1612,12 +1794,18 @@ local function analyse_atlas_export(participants, teams, ctx)
         end
     end
 
-    -- Who scored for the other side (the export lists every player of both teams).
+    -- Who scored for the other side (the export lists every player of both teams). The export leaves most names
+    -- blank and often has no usable id for the other side's players: a name that could not be found stays "" (the
+    -- goal then reads "<club> Goal"), it is never a made-up "Player".
     local opp_scorers = {}
     for _, p in ipairs(participants) do
         if (tonumber(p.team_index) or 0) == opp_idx then
             local g = to_int(tonumber(p.goals_derived) or tonumber(p.npk_goals) or 0)
-            if g > 0 then opp_scorers[#opp_scorers + 1] = { name = name_of(p), goals = g } end
+            if g > 0 then
+                local shown = name_of(p)
+                if is_unnamed_player(shown) then shown = "" end
+                opp_scorers[#opp_scorers + 1] = { name = shown, goals = g }
+            end
         end
     end
 
@@ -2155,16 +2343,37 @@ local function beam_match_to_bridge(latest_match, managed_team_id, pre_match_cpi
             motmIsOpponent = atlasStats.motm_is_opponent
             possessionEstimated = atlasStats.possession_estimated
 
-            -- the export names the other side's scorers; any goal it cannot name (an own goal, say) stays "<club> Goal"
+            -- the export names the other side's scorers when it can; a goal it cannot name stays "<club> Goal"
             local opp_names = {}
+            local named = 0
             for _, sc in ipairs(atlasStats.opp_scorers or {}) do
-                for _ = 1, sc.goals do opp_names[#opp_names + 1] = sc.name end
+                for _ = 1, sc.goals do
+                    opp_names[#opp_names + 1] = sc.name
+                    if sc.name ~= "" then named = named + 1 end
+                end
+            end
+            if ga > 0 and named < ga then
+                -- not named by the export: the game's own season statistics know who scored
+                local from_stats = opponent_scorers_from_deltas(
+                    pre_match_cpi, get_player_info_snapshot(managed_team_id),
+                    get_team_player_ids(latest_match.opponent_id), ga, safe_player_name)
+                if from_stats then
+                    opp_names = {}
+                    for _, sc in ipairs(from_stats) do
+                        for _ = 1, sc.goals do opp_names[#opp_names + 1] = sc.name end
+                    end
+                    log_monitor("The other side's scorers come from the game's season statistics")
+                else
+                    log_monitor("The other side's scorers could not be named: their goals are sent as \"" .. oppName .. " Goal\"")
+                end
             end
             for j = 1, ga do
                 local minute = math.max(1, math.min(90, math.floor(90 * j / (ga + 1))))
+                local scorer = opp_names[j]
+                if scorer == nil or scorer == "" then scorer = oppName .. " Goal" end
                 goalDetails[#goalDetails + 1] = string.format(
                     '{"playerName": "%s", "minute": %d, "isOpponent": true, "minuteEstimated": true}',
-                    jstr(opp_names[j] or (oppName .. " Goal")), minute)
+                    jstr(scorer), minute)
             end
         else
             -- Database fallback: real goal/assist/card changes from career_playerinfo between the
@@ -2533,6 +2742,18 @@ local function classify_loans(rows, managed_tid, squad, club_links)
         end
     end
     return loans_in, loans_out
+end
+
+-- A loaned-out player can stay linked to the club, so he never leaves the squad list and a loan can only be seen
+-- through playerloans. These are the loans out that were not there at the last look (sorted, so deals and log lines
+-- come in a stable order). A player who is signed and loaned out a week later is a second deal of his own.
+local function new_loans_out(loans_out, known)
+    local fresh = {}
+    for pid in pairs(loans_out or {}) do
+        if not (known or {})[pid] then fresh[#fresh + 1] = pid end
+    end
+    table.sort(fresh)
+    return fresh
 end
 -- END classify_loans
 
@@ -3260,7 +3481,15 @@ local function scan_squad_changes()
         if next(youth_now) ~= nil then state.youth = youth_now end
     end
 
-    if #arrivals == 0 and #departures == 0 and #returned == 0 then
+    -- Loans out leave no gap in the squad list (the player can stay linked to us): spot them through playerloans.
+    local leaving_now = {}
+    for _, pid in ipairs(departures) do leaving_now[pid] = true end
+    local fresh_loans = {}
+    for _, pid in ipairs(new_loans_out(loans_out, was_on_loan)) do
+        if not leaving_now[pid] then fresh_loans[#fresh_loans + 1] = pid end
+    end
+
+    if #arrivals == 0 and #departures == 0 and #returned == 0 and #fresh_loans == 0 then
         state.suspect_reads = 0
         remember_state()
         return
@@ -3281,6 +3510,7 @@ local function scan_squad_changes()
     local wanted = {}
     for _, pid in ipairs(arrivals) do wanted[pid] = true end
     for _, pid in ipairs(departures) do wanted[pid] = true end
+    for _, pid in ipairs(fresh_loans) do wanted[pid] = true end
     local ctx = make_transfer_context(managed_tid, todayDateStr, seasonYear, seasonStart, {
         loans_in = loans_in, loans_out = loans_out, all_links = current_all_teams,
         previous_teams = state.all_player_teams, youth_before = state.youth, info = get_player_join_info(wanted)
@@ -3292,6 +3522,7 @@ local function scan_squad_changes()
     end
     for _, pid in ipairs(arrivals) do emit_described(describe_arrival(pid, ctx), managed_club, false) end
     for _, pid in ipairs(departures) do emit_described(describe_departure(pid, ctx), managed_club, false) end
+    for _, pid in ipairs(fresh_loans) do emit_described(describe_departure(pid, ctx), managed_club, false) end
 
     remember_state()
     save_auto_capture_state(current_squad, current_all_teams, state.youth, loans_out)

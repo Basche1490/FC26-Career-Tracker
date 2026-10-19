@@ -160,8 +160,9 @@ class TelemetryProcessorTest {
         assertEquals(0, loanee.passAccuracy)
         assertEquals(4, match.playerPerformances.size) // nobody is invented around the real line-up
 
-        assertTrue(match.possessionEstimated)
-        assertEquals(38, match.possession)
+        // possession worked out from pass counts is not the game's number: it is left out (0 = unknown), never shown
+        assertFalse(match.possessionEstimated)
+        assertEquals(0, match.possession)
     }
 
     @Test
@@ -190,6 +191,108 @@ class TelemetryProcessorTest {
         assertEquals(listOf("Cole Palmer", null), theirs.map { it.scorerName })      // "<club> Goal" is a stand-in, not a name
 
         assertEquals(listOf("GK", "ST", "CB"), match.playerPerformances.map { it.position })
+    }
+
+    @Test
+    fun opposingScorersTheGameDidNotNameStayUnnamed() {
+        val payload = """
+            {"dataType":"match","detailSource":"atlas","opponentName":"Chelsea","isHome":true,"goalsFor":0,"goalsAgainst":3,
+             "date":"2026-02-08","competition":"Premier League","stage":"Matchday 7",
+             "playerPerformances":[{"playerId":"p1","playerName":"Player 1","position":"GK","rating":5.0}],
+             "goalDetails":[
+               {"playerName":"Player","minute":10,"isOpponent":true},
+               {"playerName":"Player 463320","minute":50,"isOpponent":true},
+               {"playerName":"Cole Palmer","minute":80,"isOpponent":true}]}
+        """
+        val match = run(AppState(leagueName = "Premier League", players = squad(14)), event(payload)).state.recentMatches.single()
+        assertEquals(listOf(null, null, "Cole Palmer"), match.goalDetails.map { it.scorerName })
+    }
+
+    @Test
+    fun ourOwnPlayersKeepTheirNamesEvenWhenTheyLookLikeAPlaceholder() {
+        // the squad in these tests is called "Player 6" and so on: a real squad member is never blanked out
+        val payload = """
+            {"dataType":"match","detailSource":"atlas","opponentName":"Chelsea","isHome":true,"goalsFor":1,"goalsAgainst":0,
+             "date":"2026-02-08","competition":"Premier League","stage":"Matchday 7",
+             "playerPerformances":[{"playerId":"p6","playerName":"Player 6","position":"ST","rating":7.4,"goals":1}],
+             "goalDetails":[{"playerName":"Player 6","minute":30,"isOpponent":false}]}
+        """
+        val match = run(AppState(leagueName = "Premier League", players = squad(14)), event(payload)).state.recentMatches.single()
+        assertEquals("Player 6", match.goalDetails.single().scorerName)
+        assertEquals("p6", match.goalDetails.single().scorerId)
+    }
+
+    @Test
+    fun possessionIsOnlyKeptWhenTheGameGaveARealFigure() {
+        fun possessionOf(extra: String): Int {
+            val payload = """{"dataType":"match","opponentName":"Fulham","isHome":true,"goalsFor":1,"goalsAgainst":0,
+                "date":"2026-01-10","competition":"Premier League","stage":"Matchday 2"$extra}"""
+            return run(AppState(players = squad(11)), event(payload)).state.recentMatches.single().possession
+        }
+        assertEquals(0, possessionOf(""))
+        assertEquals(0, possessionOf(""","possession":61,"possessionEstimated":true"""))
+        assertEquals(61, possessionOf(""","possession":61"""))
+    }
+
+    @Test
+    fun aCupMatchHasNoLeaguePositionButALeagueMatchDoes() {
+        fun positionOf(competition: String, stage: String): Int {
+            val payload = """{"dataType":"match","opponentName":"Fulham","isHome":true,"goalsFor":1,"goalsAgainst":0,
+                "date":"2026-01-10","competition":"$competition","stage":"$stage","leaguePosition":7}"""
+            return run(AppState(leagueName = "EFL Championship", players = squad(11)), event(payload))
+                .state.recentMatches.single().leaguePosition
+        }
+        assertEquals(7, positionOf("EFL Championship", "Matchday 20"))
+        assertEquals(0, positionOf("Carabao Cup", "Round 3"))
+        assertEquals(0, positionOf("FA Cup", "Round 4"))
+        assertEquals(0, positionOf("UEFA Champions League", "Group Stage"))
+    }
+
+    @Test
+    fun onlyTheClubsOwnLeagueCountsAsALeague() {
+        listOf("Premier League", "EFL Championship", "League One", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "Eredivisie Division")
+            .forEach { assertTrue(it, TelemetryProcessor.isLeagueCompetition(it)) }
+        listOf("Carabao Cup", "FA Cup", "EFL Trophy", "UEFA Champions League", "Europa League", "Conference League",
+            "Community Shield", "Copa del Rey", "Friendlies")
+            .forEach { assertFalse(it, TelemetryProcessor.isLeagueCompetition(it)) }
+    }
+
+    // ---- phone alerts ------------------------------------------------------------------------------
+
+    @Test
+    fun aFreshMatchAndAFreshTransferEachRaiseAnAlert() {
+        val state = AppState(players = squad(11))
+        val match = TelemetryProcessor.apply(state, listOf(event(matchBase, time = 10_000)), true, nowSeconds = 10_060, today = "2026-01-10")
+        assertEquals(1, match.notices.size)
+        assertEquals("matches", match.notices.single().route)
+        assertFalse(match.notices.single().isTransfer)
+
+        val deal = TelemetryProcessor.apply(
+            state, listOf(event(transfer("Star Striker", "In (Permanent)", fee = 5.0), time = 10_000)), true,
+            nowSeconds = 10_060, today = "2026-01-10"
+        )
+        assertEquals(1, deal.notices.size)
+        assertTrue(deal.notices.single().isTransfer)
+    }
+
+    @Test
+    fun oldEventsAreStoredQuietlyAndNeverRaiseAnAlert() {
+        val longAgo = 10_000L
+        val now = longAgo + TelemetryProcessor.ALERT_WINDOW_SECONDS + 60
+        val result = TelemetryProcessor.apply(
+            AppState(players = squad(11)), listOf(event(matchBase, time = longAgo)), true, nowSeconds = now, today = "2026-01-10"
+        )
+        assertEquals(1, result.state.recentMatches.size) // still saved
+        assertTrue(result.notices.isEmpty())
+    }
+
+    @Test
+    fun nothingIsAnnouncedWhenAlertsAreOff() {
+        val result = TelemetryProcessor.apply(
+            AppState(players = squad(11)), listOf(event(matchBase, time = 10_000)), false, nowSeconds = 10_060, today = "2026-01-10"
+        )
+        assertEquals(1, result.state.recentMatches.size)
+        assertTrue(result.notices.isEmpty())
     }
 
     @Test

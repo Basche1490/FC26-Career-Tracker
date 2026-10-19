@@ -1091,7 +1091,14 @@ function Import-AtlasFolder {
         $played = -not ($maxMinutes -gt 0 -and $pMinutes -ge 0 -and $pMinutes -le 0)
         if ($pTeam -ne $managedTeamIndex) {
             $theirGoals = ConvertTo-Int (Get-FirstValue $p.goals_derived $p.npk_goals)
-            for ($g = 0; $g -lt $theirGoals; $g++) { $opponentGoalPlayers += (Get-ParticipantName $p) }
+            # "" when the export does not name him: the goal then stays "<club> Goal", never a made-up "Player"
+            $theirScorerName = ""
+            if ($p.player_name) { $theirScorerName = [string]$p.player_name }
+            else {
+                $theirKey = [string](ConvertTo-Int $p.player_id)
+                if ($historyNames.ContainsKey($theirKey)) { $theirScorerName = $historyNames[$theirKey] }
+            }
+            for ($g = 0; $g -lt $theirGoals; $g++) { $opponentGoalPlayers += $theirScorerName }
             continue
         }
         if (-not $played) { continue }
@@ -1188,7 +1195,7 @@ function Import-AtlasFolder {
     for ($og = 1; $og -le $opponentScore; $og++) {
         # the export names the other side's scorers; a goal it cannot name (an own goal, say) stays "<club> Goal"
         $theirScorer = "$oppName Goal"
-        if ($og -le $opponentGoalPlayers.Count) { $theirScorer = $opponentGoalPlayers[$og - 1] }
+        if ($og -le $opponentGoalPlayers.Count -and $opponentGoalPlayers[$og - 1]) { $theirScorer = $opponentGoalPlayers[$og - 1] }
         $goalDetails += [PSCustomObject]@{
             playerName = $theirScorer
             minute = [Math]::Max(1, [Math]::Min(90, [int][Math]::Floor(90 * $og / ($opponentScore + 1))))

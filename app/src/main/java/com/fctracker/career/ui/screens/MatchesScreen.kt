@@ -33,6 +33,7 @@ import com.fctracker.career.AppState
 import com.fctracker.career.MainViewModel
 import com.fctracker.career.MatchResult
 import com.fctracker.career.PlayerPerformance
+import com.fctracker.career.isPlaceholderPlayerName
 import com.fctracker.career.ui.theme.DrawColor
 import com.fctracker.career.ui.theme.LossColor
 import com.fctracker.career.ui.theme.WinColor
@@ -323,14 +324,7 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
         Column {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    CompetitionLogoImage(
-                        competition = match.competition,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color.White)
-                            .padding(3.dp)
-                    )
+                    CompetitionLogoImage(competition = match.competition)
                     Spacer(Modifier.width(10.dp))
                     TeamCrestImage(teamName = match.opponentName, modifier = Modifier.size(36.dp).clip(CircleShape))
                     Spacer(Modifier.width(12.dp))
@@ -338,7 +332,17 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
                         val homeAwayStr = if (match.isHome) "(H)" else "(A)"
                         Text("$homeAwayStr vs ${match.opponentName}", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 16.sp)
                         val stagePart = if (match.stage.isNotBlank()) " • ${match.stage}" else ""
-                        Text("${match.competition}$stagePart • ${match.matchDate}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            androidx.compose.ui.text.buildAnnotatedString {
+                                // the league or cup itself stands out from the round and the date
+                                pushStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold, color = Color.White))
+                                append(match.competition)
+                                pop()
+                                append("$stagePart • ${match.matchDate}")
+                            },
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -389,11 +393,11 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
 
                 // Match stats chips
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        if (match.possessionEstimated) "Poss: ~${match.possession}%" else "Poss: ${match.possession}%",
-                        fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text("•", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    // Possession is only shown when it is a real figure: the game's export has none, and a guess is wrong.
+                    if (match.possession > 0 && !match.possessionEstimated && !match.statsEstimated) {
+                        Text("Poss: ${match.possession}%", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("•", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     Text("Shots: ${match.shotsFor}-${match.shotsAgainst}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (match.expectedGoals > 0.0 || match.expectedGoalsAgainst > 0.0) {
                         Text("•", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -450,21 +454,41 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
 
 /** The scorer's name for the match list: the squad's current name, else the name the game gave, never a raw id. */
 internal fun goalScorerLabel(g: com.fctracker.career.GoalDetail, match: MatchResult, state: AppState?): String {
-    if (g.scorerId == null) {   // a goal for the other side
-        return g.scorerName?.takeIf { it.isNotBlank() }
+    if (g.scorerId == null) {   // a goal for the other side; "Player" and "<club> Goal" are no names
+        return g.scorerName?.takeIf { !isPlaceholderPlayerName(it) && !it.endsWith(" Goal") }
             ?.let { "$it (${match.opponentName})" } ?: match.opponentName
     }
     state?.players?.find { it.id == g.scorerId }?.displayName?.takeIf { it.isNotBlank() }?.let { return it }
-    g.scorerName?.takeIf { it.isNotBlank() }?.let { return it }
-    match.playerPerformances.find { it.playerId == g.scorerId }?.playerName?.takeIf { it.isNotBlank() }?.let { return it }
-    return if (looksLikeId(g.scorerId)) "Unknown scorer" else g.scorerId
+    g.scorerName?.takeIf { !isPlaceholderPlayerName(it) }?.let { return it }
+    match.playerPerformances.find { it.playerId == g.scorerId }?.playerName?.takeIf { !isPlaceholderPlayerName(it) }?.let { return it }
+    return if (looksLikeId(g.scorerId) || isPlaceholderPlayerName(g.scorerId)) "Unknown scorer" else g.scorerId
 }
 
 internal fun goalAssisterLabel(g: com.fctracker.career.GoalDetail, state: AppState?): String? {
     val id = g.assisterId?.takeIf { it.isNotBlank() } ?: return null
     state?.players?.find { it.id == id }?.displayName?.takeIf { it.isNotBlank() }?.let { return it }
-    g.assisterName?.takeIf { it.isNotBlank() }?.let { return it }
-    return if (looksLikeId(id)) null else id
+    g.assisterName?.takeIf { !isPlaceholderPlayerName(it) }?.let { return it }
+    return if (looksLikeId(id) || isPlaceholderPlayerName(id)) null else id
+}
+
+/**
+ * The name for a line-up row: the squad's current name, else the name the game gave, else the name the match itself
+ * mentions for him (as a scorer, assister or substitute). A raw game id is never shown.
+ */
+internal fun lineupNameOf(perf: PlayerPerformance, players: List<com.fctracker.career.Player>, match: MatchResult?): String {
+    players.firstOrNull { it.id == perf.playerId }?.displayName?.takeIf { it.isNotBlank() }?.let { return it }
+    perf.playerName?.takeIf { !isPlaceholderPlayerName(it) }?.let { return it }
+    if (match != null) {
+        match.goalDetails.firstOrNull { it.scorerId == perf.playerId }?.scorerName
+            ?.takeIf { !isPlaceholderPlayerName(it) }?.let { return it }
+        match.goalDetails.firstOrNull { it.assisterId == perf.playerId }?.assisterName
+            ?.takeIf { !isPlaceholderPlayerName(it) }?.let { return it }
+        for (sub in match.substitutions) {
+            if (sub.playerInId == perf.playerId) sub.playerInName?.takeIf { !isPlaceholderPlayerName(it) }?.let { return it }
+            if (sub.playerOutId == perf.playerId) sub.playerOutName?.takeIf { !isPlaceholderPlayerName(it) }?.let { return it }
+        }
+    }
+    return if (isPlaceholderPlayerName(perf.playerId)) "Unknown player" else perf.playerId
 }
 
 /** " 23'" for a real minute; nothing for a minute the script only guessed. */
@@ -497,12 +521,11 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
     var stage by remember { mutableStateOf(initialMatch?.stage ?: "") }
     
     // Auto-increment stage
-    val isLeague = competition.contains("League", ignoreCase = true) || competition.contains("Division", ignoreCase = true) || competition.contains("Championship", ignoreCase = true) || competition == "Serie A" || competition == "La Liga" || competition == "Bundesliga" || competition == "Ligue 1"
+    val isLeague = com.fctracker.career.telemetry.TelemetryProcessor.isLeagueCompetition(competition)
     LaunchedEffect(competition) {
         if (initialMatch == null && isLeague) {
-            val lastLeagueMatch = state.recentMatches.reversed().find { 
-                val c = it.competition
-                c.contains("League", true) || c.contains("Division", true) || c.contains("Championship", true) || c == "Serie A" || c == "La Liga" || c == "Bundesliga" || c == "Ligue 1"
+            val lastLeagueMatch = state.recentMatches.reversed().find {
+                com.fctracker.career.telemetry.TelemetryProcessor.isLeagueCompetition(it.competition)
             }
             if (lastLeagueMatch != null) {
                 val lastStage = lastLeagueMatch.stage
@@ -526,13 +549,23 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
     var homePenalties by remember { mutableStateOf(initialMatch?.homePenalties?.toString() ?: "0") }
     var awayPenalties by remember { mutableStateOf(initialMatch?.awayPenalties?.toString() ?: "0") }
 
-    var possession by remember { mutableStateOf(initialMatch?.possession?.toString() ?: "50") }
+    // Possession is optional: empty means unknown (an estimated figure from an import is not shown for editing)
+    var possession by remember {
+        mutableStateOf(
+            if (initialMatch != null && initialMatch.possession > 0 && !initialMatch.possessionEstimated && !initialMatch.statsEstimated)
+                initialMatch.possession.toString() else ""
+        )
+    }
     var passingAccuracy by remember { mutableStateOf(initialMatch?.passingAccuracy?.toString() ?: "80") }
     var shotsFor by remember { mutableStateOf(initialMatch?.shotsFor?.toString() ?: "0") }
     var shotsAgainst by remember { mutableStateOf(initialMatch?.shotsAgainst?.toString() ?: "0") }
     var xGFor by remember { mutableStateOf(initialMatch?.expectedGoals?.toString() ?: "0.0") }
     var xGAgainst by remember { mutableStateOf(initialMatch?.expectedGoalsAgainst?.toString() ?: "0.0") }
-    var leaguePosition by remember { mutableStateOf(initialMatch?.leaguePosition?.toString() ?: "1") }
+    var leaguePosition by remember {
+        mutableStateOf(
+            if (initialMatch == null) "1" else initialMatch.leaguePosition.takeIf { it > 0 }?.toString() ?: ""
+        )
+    }
 
     val performances = remember { 
         androidx.compose.runtime.mutableStateMapOf<String, PlayerPerformance>().apply {
@@ -789,7 +822,7 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                         Text("Detailed Statistics (Optional)", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.height(8.dp))
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(value = possession, onValueChange = { possession = it }, label = { Text("Possession %") }, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                            OutlinedTextField(value = possession, onValueChange = { possession = it }, label = { Text("Possession % (optional)") }, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
                             OutlinedTextField(value = passingAccuracy, onValueChange = { passingAccuracy = it }, label = { Text("Pass Acc %") }, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
                         }
                         Spacer(Modifier.height(8.dp))
@@ -802,8 +835,11 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                             OutlinedTextField(value = xGFor, onValueChange = { xGFor = it }, label = { Text("xG For") }, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
                             OutlinedTextField(value = xGAgainst, onValueChange = { xGAgainst = it }, label = { Text("xG Against") }, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
                         }
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(value = leaguePosition, onValueChange = { leaguePosition = it }, label = { Text("League Position") }, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                        // A league position belongs to league matches only; a cup match has none
+                        if (isLeague) {
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(value = leaguePosition, onValueChange = { leaguePosition = it }, label = { Text("League Position") }, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                        }
                     }
                     
                     item {
@@ -864,9 +900,7 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                     item {
                         // The match log: everybody who played (a loan signing included, even when he is not in the squad
                         // list), strikers first and the goalkeeper last, a substitute right under the player he replaced.
-                        fun nameOf(perf: PlayerPerformance): String =
-                            state.players.firstOrNull { it.id == perf.playerId }?.displayName
-                                ?: perf.playerName?.takeIf { it.isNotBlank() } ?: perf.playerId
+                        fun nameOf(perf: PlayerPerformance): String = lineupNameOf(perf, state.players, initialMatch)
                         fun positionOf(perf: PlayerPerformance): String? =
                             perf.position?.takeIf { it.isNotBlank() } ?: state.players.firstOrNull { it.id == perf.playerId }?.primaryPosition
                         val ordered = LineupOrder.order(
@@ -906,7 +940,10 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                                                     if (isMotm) Icon(Icons.Default.Star, "Man of the match", tint = Color(0xFFFFD700), modifier = Modifier.size(16.dp))
                                                     repeat(perf.goals) { Icon(Icons.Default.SportsSoccer, "Goal", tint = Color.White, modifier = Modifier.size(16.dp)) }
                                                     repeat(totalAssists) { Icon(SoccerBootIcon, "Assist", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(17.dp)) }
-                                                    if (perf.saves > 0) Text("\uD83E\uDDE4${perf.saves}", fontSize = 12.sp, color = Color(0xFF00E676))
+                                                    // The glove marks a clean sheet only, so it is never shown when the other side scored
+                                                    val isKeeper = positionOf(perf)?.equals("GK", ignoreCase = true) == true
+                                                    if (isKeeper && (goalsAgainst.toIntOrNull() ?: 0) == 0) Text("\uD83E\uDDE4", fontSize = 13.sp)
+                                                    if (isKeeper && perf.saves > 0) Text("${perf.saves} saves", fontSize = 11.sp, color = Color(0xFF00E676))
                                                     if (perf.yellowCard) Box(modifier = Modifier.size(10.dp, 14.dp).background(Color.Yellow))
                                                     if (perf.redCard) Box(modifier = Modifier.size(10.dp, 14.dp).background(Color.Red))
                                                     if (perf.subInMinute != null) {
@@ -956,8 +993,7 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                 Button(
                     onClick = {
                         val finalPerformances = performances.values.map { 
-                            val shownName = state.players.find { p -> p.id == it.playerId }?.displayName
-                                ?: it.playerName?.takeIf { n -> n.isNotBlank() } ?: it.playerId
+                            val shownName = lineupNameOf(it, state.players, initialMatch)
                             val isThisPlayerMotm = motmSearchQuery.isNotBlank() && shownName.equals(motmSearchQuery, ignoreCase = true)
                             it.copy(isMotm = isThisPlayerMotm) 
                         }
@@ -975,18 +1011,17 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                             isExtraTime = isExtraTime,
                             homePenalties = homePenalties.toIntOrNull() ?: 0,
                             awayPenalties = awayPenalties.toIntOrNull() ?: 0,
-                            possession = possession.toIntOrNull() ?: 50,
+                            possession = possession.toIntOrNull()?.coerceIn(0, 100) ?: 0,
                             passingAccuracy = passingAccuracy.toIntOrNull() ?: 80,
                             shotsFor = shotsFor.toIntOrNull() ?: 0,
                             shotsAgainst = shotsAgainst.toIntOrNull() ?: 0,
                             expectedGoals = xGFor.toDoubleOrNull() ?: 0.0,
                             expectedGoalsAgainst = xGAgainst.toDoubleOrNull() ?: 0.0,
-                            leaguePosition = leaguePosition.toIntOrNull() ?: 1,
+                            leaguePosition = if (isLeague) (leaguePosition.toIntOrNull() ?: 1) else 0,
                             motmName = motmSearchQuery,
                             motmIsOpponent = initialMatch != null && initialMatch.motmIsOpponent &&
                                 motmSearchQuery == initialMatch.motmName,
-                            possessionEstimated = initialMatch != null && initialMatch.possessionEstimated &&
-                                possession == initialMatch.possession.toString(),
+                            possessionEstimated = false,
                             playerPerformances = finalPerformances,
                             // Editing a match must not throw away what the game recorded: scorers and substitutions
                             goalDetails = initialMatch?.goalDetails ?: emptyList(),
@@ -1099,6 +1134,16 @@ fun PlayerPerformanceEditor(
     val isMidFwd = positions.any { it in listOf("CM", "CAM", "LM", "RM", "LW", "RW", "ST", "CF") } || positions.isEmpty()
 
     Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (player == null) {
+            // a loan signing or an older match whose player the game did not name: the name can be typed in here
+            OutlinedTextField(
+                value = perf.playerName?.takeIf { !isPlaceholderPlayerName(it) } ?: "",
+                onValueChange = { onUpdate(perf.copy(playerName = it.ifBlank { null })) },
+                label = { Text("Player name (not in the squad list)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Rating: ${String.format("%.1f", perf.rating)}", color = Color.White, modifier = Modifier.width(100.dp))
             Slider(
@@ -1717,94 +1762,5 @@ fun TeamCrestImage(teamName: String, modifier: Modifier = Modifier) {
         )
     } else {
         fallbackBox()
-    }
-}
-
-private const val W = "https://upload.wikimedia.org/wikipedia/"
-
-/**
- * Where to look for a competition's logo, best first: a picture from Wikipedia, then the favicon of the
- * competition's official site (a reliable fallback when a picture link is wrong or not reachable). The first one
- * that loads is used. Empty for a competition that has none (friendlies).
- *
- * The EFL and cup names are checked before "champions": "EFL Championship" contains "champions" and used to get the
- * UEFA Champions League logo.
- */
-fun competitionLogoCandidates(competition: String): List<String> {
-    val c = competition.lowercase()
-    fun favicon(domain: String) =
-        "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://$domain&size=256"
-    fun both(wiki: String, domain: String) = listOf(W + wiki, favicon(domain))
-
-    val isEfl = c.contains("efl") || c.contains("carabao") || c.contains("championship") ||
-        c.contains("league one") || c.contains("league two") || c.contains("play-off") || c.contains("playoff")
-    return when {
-        c.contains("premier") -> both("en/thumb/f/f2/Premier_League_Logo.svg/512px-Premier_League_Logo.svg.png", "premierleague.com")
-        isEfl -> both("en/thumb/5/5e/EFL_logo.svg/512px-EFL_logo.svg.png", "efl.com")
-        c.contains("fa cup") || c.contains("community shield") ->
-            both("en/thumb/b/be/Emirates_FA_Cup_logo.svg/512px-Emirates_FA_Cup_logo.svg.png", "thefa.com")
-        c.contains("la liga") || c.contains("laliga") || c.contains("segunda") ->
-            both("commons/thumb/0/0f/LaLiga_logo_2023.svg/512px-LaLiga_logo_2023.svg.png", "laliga.com")
-        c.contains("bundesliga") -> both("en/thumb/d/df/Bundesliga_logo_%282017%29.svg/512px-Bundesliga_logo_%282017%29.svg.png", "bundesliga.com")
-        c.contains("serie a") -> both("commons/thumb/e/e9/Serie_A_logo_2019.svg/512px-Serie_A_logo_2019.svg.png", "legaseriea.it")
-        c.contains("serie b") -> listOf(favicon("legab.it"))
-        c.contains("ligue 1") || c.contains("ligue 2") -> both("commons/thumb/5/5e/Ligue1.svg/512px-Ligue1.svg.png", "ligue1.com")
-        c.contains("mls") -> both("commons/thumb/7/76/MLS_crest_logo_RGB_gradient.svg/512px-MLS_crest_logo_RGB_gradient.svg.png", "mlssoccer.com")
-        c.contains("champions league") || (c.contains("champions") && !c.contains("championship")) ->
-            both("en/thumb/b/bf/UEFA_Champions_League_logo_2.svg/512px-UEFA_Champions_League_logo_2.svg.png", "uefa.com")
-        c.contains("europa") -> both("en/thumb/0/03/UEFA_Europa_League_logo_%282021%29.svg/512px-UEFA_Europa_League_logo_%282021%29.svg.png", "uefa.com")
-        c.contains("conference") -> both("en/thumb/5/54/UEFA_Europa_Conference_League_logo.svg/512px-UEFA_Europa_Conference_League_logo.svg.png", "uefa.com")
-        c.contains("copa del rey") -> both("en/thumb/c/c9/Copa_del_Rey_2021_logo.svg/512px-Copa_del_Rey_2021_logo.svg.png", "rfef.es")
-        c.contains("dfb") -> both("en/thumb/0/07/DFB-Pokal_logo.svg/512px-DFB-Pokal_logo.svg.png", "dfb.de")
-        c.contains("coppa italia") -> both("en/thumb/2/23/Coppa_Italia_logo_%282021%29.svg/512px-Coppa_Italia_logo_%282021%29.svg.png", "legaseriea.it")
-        c.contains("coupe de france") -> listOf(favicon("fff.fr"))
-        c.contains("saudi") || c.contains("roshn") -> listOf(favicon("spl.com.sa"))
-        c.contains("eredivisie") -> listOf(favicon("eredivisie.eu"))
-        c.contains("portugal") || c.contains("liga nos") -> listOf(favicon("ligaportugal.pt"))
-        c.contains("world cup") -> listOf(favicon("fifa.com"))
-        c.contains("usl") -> listOf(favicon("uslchampionship.com"))
-        else -> emptyList()
-    }
-}
-
-/** The first place to look for the logo (kept for callers that want a single address). */
-fun getCompetitionLogoUrl(competition: String): String = competitionLogoCandidates(competition).firstOrNull() ?: ""
-
-// Which candidate worked (or that none did) for each competition, so a list does not retry broken links on every scroll.
-private val competitionLogoChoice = java.util.concurrent.ConcurrentHashMap<String, Int>()
-
-/**
- * The competition's logo. While it loads the tile stays empty; only when no source has a picture are the initials
- * shown, so a slow connection never flashes a circle with letters.
- */
-@Composable
-fun CompetitionLogoImage(competition: String, modifier: Modifier = Modifier) {
-    val urls = remember(competition) { competitionLogoCandidates(competition) }
-    var index by remember(competition) { mutableStateOf(competitionLogoChoice[competition] ?: 0) }
-
-    if (index < urls.size) {
-        coil.compose.SubcomposeAsyncImage(
-            model = coil.request.ImageRequest.Builder(androidx.compose.ui.platform.LocalContext.current)
-                .data(urls[index])
-                .crossfade(true)
-                .build(),
-            contentDescription = "$competition Logo",
-            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-            modifier = modifier,
-            loading = { Box(modifier = Modifier.fillMaxSize()) },
-            onSuccess = { competitionLogoChoice[competition] = index },
-            onError = {
-                index += 1
-                competitionLogoChoice[competition] = index
-            }
-        )
-    } else {
-        val initials = competition.split(" ").filter { it.isNotBlank() }.take(2).joinToString("") { it.take(1) }.uppercase()
-        Box(
-            modifier = modifier.clip(RoundedCornerShape(8.dp)).background(Color(0xFFECEFF1)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(initials.ifEmpty { "?" }, color = Color(0xFF37474F), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-        }
     }
 }

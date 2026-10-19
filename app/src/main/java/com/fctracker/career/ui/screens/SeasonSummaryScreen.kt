@@ -505,9 +505,9 @@ fun OverviewStatsCard(state: AppState) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             com.fctracker.career.ui.screens.CompetitionLogoImage(
                 competition = activeLeagueName,
-                modifier = Modifier
-                    .height(48.dp)
-                    .widthIn(min = 40.dp, max = 80.dp)
+                height = 48.dp,
+                maxWidth = 80.dp,
+                tile = false
             )
             Spacer(Modifier.width(16.dp))
             Column {

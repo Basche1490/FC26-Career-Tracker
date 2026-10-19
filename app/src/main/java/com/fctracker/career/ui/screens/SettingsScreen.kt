@@ -565,6 +565,48 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                         Switch(checked = backgroundSync, onCheckedChange = { viewModel.setBackgroundSync(it) })
                     }
                     Spacer(modifier = Modifier.height(10.dp))
+                    val alertContext = androidx.compose.ui.platform.LocalContext.current
+                    var alertsAllowed by remember { mutableStateOf(true) }
+                    var alertTestMsg by remember { mutableStateOf<String?>(null) }
+                    // Re-checked while this screen is open, so coming back from Android's settings page updates it.
+                    LaunchedEffect(Unit) {
+                        while (true) {
+                            alertsAllowed = com.fctracker.career.telemetry.NotificationHelper.alertsAllowed(alertContext)
+                            kotlinx.coroutines.delay(1500)
+                        }
+                    }
+                    Text("Match & transfer alerts", fontSize = 13.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                    Text(
+                        if (alertsAllowed) "On: this phone shows an alert for each new match and transfer."
+                        else "Blocked: Android is hiding this app's alerts. Open the notification settings and allow notifications for this app.",
+                        fontSize = 11.sp,
+                        color = if (alertsAllowed) Color(0xFF10B981) else Color(0xFFEF4444)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = {
+                                val shown = com.fctracker.career.telemetry.NotificationHelper.showTest(alertContext)
+                                alertTestMsg = if (shown) "Test alert sent. If you cannot see it, check the notification settings."
+                                else "Android blocked the test alert. Open the notification settings and allow notifications."
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Send test alert", fontSize = 11.sp) }
+                        OutlinedButton(
+                            onClick = {
+                                try {
+                                    alertContext.startActivity(com.fctracker.career.telemetry.NotificationHelper.settingsIntent(alertContext))
+                                } catch (e: Exception) {
+                                    alertTestMsg = "Could not open the settings page. Open Android Settings > Apps > this app > Notifications."
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Notification settings", fontSize = 11.sp) }
+                    }
+                    if (alertTestMsg != null) {
+                        Text(alertTestMsg!!, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
                     var bridgeInput by remember(state.telemetryServerUrl) { mutableStateOf(state.telemetryServerUrl) }
                     var testStatusMsg by remember { mutableStateOf<String?>(null) }
                     var isTesting by remember { mutableStateOf(false) }

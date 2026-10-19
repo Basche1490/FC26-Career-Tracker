@@ -181,7 +181,7 @@ class TelemetrySync(
             notices = result.notices
             result.state
         }
-        notices.forEach { NotificationHelper.show(context, it) }
+        NotificationHelper.showAll(context, notices)
     }
 
     companion object {

@@ -67,7 +67,7 @@ fun TransfersScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                 actions = {
                     IconButton(
                         onClick = {
-                            viewModel.fetchLiveTelemetry(silent = false)
+                            viewModel.fetchLiveTelemetry()
                         }
                     ) {
                         Icon(

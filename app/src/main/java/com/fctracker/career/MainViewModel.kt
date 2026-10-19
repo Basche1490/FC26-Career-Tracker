@@ -126,9 +126,12 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         sync.apply(listOf(dummyWrapper), notify = true)
     }
 
-    /** Pulls the bridge's events now. With silent = true, what is new also raises phone notifications. */
-    fun fetchLiveTelemetry(silent: Boolean = false) {
-        viewModelScope.launch(Dispatchers.IO) { sync.poll(notify = silent) }
+    /**
+     * Pulls the bridge's events now. Whatever is new raises its phone alert here too: the refresh button and the
+     * dashboard's own refresh can fetch a match before the background loop does, and that must not swallow the alert.
+     */
+    fun fetchLiveTelemetry() {
+        viewModelScope.launch(Dispatchers.IO) { sync.poll(notify = true) }
     }
 
     fun injectTestTransferEvent() {

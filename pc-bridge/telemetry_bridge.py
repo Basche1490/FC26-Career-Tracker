@@ -929,8 +929,10 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
         p_minutes = _f(p.get("minutes_played"), -1.0)
         played = not (max_minutes > 0 and 0 <= p_minutes <= 0)   # export lists the whole matchday squad
         if p_team != managed_team_idx:
+            # "" when the export does not name him: the goal then stays "<club> Goal", never a made-up "Player"
+            opp_scorer = p.get("player_name") or history_names.get(_i(p.get("player_id"))) or ""
             for _g in range(_i(p.get("goals_derived") or p.get("npk_goals"))):
-                opponent_goal_players.append(_name_of(p))
+                opponent_goal_players.append(opp_scorer)
         if p_team == managed_team_idx and played:
             p_name = _name_of(p)
             p_id = p.get("player_id", "")
@@ -1006,7 +1008,7 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
     for og in range(1, opponent_score + 1):
         # the export names the other side's scorers; a goal it cannot name (an own goal, say) stays "<club> Goal"
         goal_details.append({
-            "playerName": opponent_goal_players[og - 1] if og <= len(opponent_goal_players) else f"{opp_name} Goal",
+            "playerName": (opponent_goal_players[og - 1] if og <= len(opponent_goal_players) else "") or f"{opp_name} Goal",
             "minute": max(1, min(90, int(90 * og / (opponent_score + 1)))),
             "isOpponent": True,
             "minuteEstimated": True

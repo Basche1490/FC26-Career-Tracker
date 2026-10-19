@@ -124,13 +124,15 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                         value = name,
                         onValueChange = { 
                             name = it
-                            nameExpanded = true
+                            // A regen has a name of his own that is not in the player database; the regen search
+                            // below lends the picture, so this field must not offer to overwrite the card.
+                            nameExpanded = !isRegen
                         },
                         label = { Text("Full Name (Required)") },
                         modifier = Modifier.menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryEditable, true).fillMaxWidth(),
                         singleLine = true
                     )
-                    if (name.isNotEmpty() && name.length >= 1) {
+                    if (!isRegen && name.isNotEmpty() && name.length >= 1) {
                         val filtered = searchEafcPlayers(name, allEafcPlayers)
                         if (filtered.isNotEmpty()) {
                             ExposedDropdownMenu(expanded = nameExpanded, onDismissRequest = { nameExpanded = false }) {
@@ -203,6 +205,13 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                     }
                 }
                 OutlinedTextField(value = nickname, onValueChange = { nickname = it }, label = { Text("Nickname (Optional)") }, modifier = Modifier.fillMaxWidth())
+                if (nickname.isNotBlank()) {
+                    Text(
+                        "The app shows the nickname instead of the Full Name. Clear it to show the Full Name.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 
                 DropdownField("Position (Required)", primaryPosition, positions.filter { it.isNotEmpty() }) { primaryPosition = it }
                 DropdownField("Secondary Position", secondaryPosition, positions) { secondaryPosition = it }
@@ -426,9 +435,20 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                         val startingEdited = player != null && startingOverall != player.startingOverall.toString()
                         val keptOverall = if (player == null || startingEdited) startingOverall.toIntOrNull() ?: 60 else player.overall
                         val keptPotential = if (player == null) overall.toIntOrNull() ?: 60 else maxOf(player.potential, keptOverall)
+                        // Older versions copied the regen template's common name into the nickname, and the app shows
+                        // the nickname before the Full Name. When the name is corrected on such a regen, that leftover
+                        // nickname is dropped so the corrected name is the one that shows.
+                        val leftoverTemplateNickname = player != null && player.isRegen && name.trim() != player.name.trim() &&
+                            nickname.isNotBlank() && nickname == player.nickname &&
+                            allEafcPlayers.any { it.commonName.equals(nickname, ignoreCase = true) && !it.name.equals(name.trim(), ignoreCase = true) }
+                        val savedNickname = if (leftoverTemplateNickname) null else nickname.takeIf { it.isNotBlank() }
                         val newPlayer = player?.copy(
-                            name = name,
-                            nickname = nickname.takeIf { it.isNotBlank() },
+                            name = name.trim(),
+                            nickname = savedNickname,
+                            // A display name carried over from an old backup beats both name fields; once either was
+                            // edited here it must not keep hiding the edit.
+                            customDisplayName = if (name.trim() != player.name.trim() || savedNickname != player.nickname) null
+                            else player.customDisplayName,
                             primaryPosition = primaryPosition,
                             secondaryPosition = secondaryPosition.takeIf { it.isNotBlank() },
                             tertiaryPosition = tertiaryPosition.takeIf { it.isNotBlank() },

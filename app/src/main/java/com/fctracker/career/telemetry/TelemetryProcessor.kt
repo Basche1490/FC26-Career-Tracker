@@ -8,6 +8,7 @@ import com.fctracker.career.Player
 import com.fctracker.career.PlayerPerformance
 import com.fctracker.career.Substitution
 import com.fctracker.career.TransferLog
+import com.fctracker.career.isPlaceholderPlayerName
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -37,6 +38,12 @@ object TelemetryProcessor {
 
     /** Most live-event rows kept in a save. The bridge only ever holds the latest 100. */
     const val MAX_LIVE_EVENTS = 300
+
+    /**
+     * Only events younger than this raise a phone alert. The bridge keeps its latest 100 events for a while, so a
+     * fresh install or a restored backup would otherwise light up with alerts about matches played days ago.
+     */
+    const val ALERT_WINDOW_SECONDS = 24L * 60 * 60
 
     private val LEAGUE_NAMES = setOf("Serie A", "La Liga", "Bundesliga", "Ligue 1")
     private val DEFENCE = listOf("CB", "LB", "RB", "LWB", "RWB")
@@ -71,6 +78,8 @@ object TelemetryProcessor {
             val rawMessage = json.optString("message", "")
             val rawTitle = json.optString("title", "Career Update")
             val trimmedMessage = rawMessage.trim()
+            // Alerts are for what just happened: an old event is stored quietly (see ALERT_WINDOW_SECONDS).
+            val alert = notify && nowSeconds - timestamp <= ALERT_WINDOW_SECONDS
 
             if (trimmedMessage.startsWith("{") && trimmedMessage.endsWith("}")) {
                 // A malformed event is skipped; it must never stop the events after it.
@@ -110,7 +119,7 @@ object TelemetryProcessor {
                                 )
                             )
                             squad = applyTransferToSquad(squad, name, type, feeM, signedPlayer)
-                            if (notify) notices.add(TelemetryNotice(evTitle, evMessage, "transfers", true))
+                            if (alert) notices.add(TelemetryNotice(evTitle, evMessage, "transfers", true))
                         }
                     }
 
@@ -121,7 +130,7 @@ object TelemetryProcessor {
                         if (outcome != null) {
                             squad = outcome.squad
                             hasNew = true
-                            if (notify) notices.add(TelemetryNotice(evTitle, outcome.message, "matches", false))
+                            if (alert) notices.add(TelemetryNotice(evTitle, outcome.message, "matches", false))
                         }
                     }
 
@@ -146,7 +155,7 @@ object TelemetryProcessor {
                                     injuryReturnDate = returnDate
                                 )
                             }
-                            if (notify) notices.add(TelemetryNotice(evTitle, evMessage, "squad", false))
+                            if (alert) notices.add(TelemetryNotice(evTitle, evMessage, "squad", false))
                         }
                     }
                     // Any other structured payload (for example a snapshot) is ignored, as before.
@@ -156,7 +165,7 @@ object TelemetryProcessor {
                 if (events.none { it.title == rawTitle && it.timestamp == timestamp }) {
                     events.add(LiveEvent(rawTitle, sanitized, timestamp))
                     hasNew = true
-                    if (notify) {
+                    if (alert) {
                         val isTransfer = rawTitle.contains("transfer", true) ||
                             sanitized.contains("transfer", true) ||
                             sanitized.contains("signed", true) ||
@@ -377,15 +386,17 @@ object TelemetryProcessor {
         val best = perfList.maxByOrNull {
             (it.goals * 3) + (it.assists * 2) + (if (it.cleanSheet) 1.5 else 0.0) + it.rating
         }
-        val rawMotm = data.optString("motmName").takeIf { it.isNotBlank() }
-        val motm = rawMotm ?: if (best != null) {
+        // The man of the match can play for the other team. When the game says he did but gave no name for him
+        // ("Player"), nobody is named: our own best player must not be shown in his place.
+        val declaredOpponent = data.optBoolean("motmIsOpponent", false)
+        val rawMotm = data.optString("motmName")
+            .takeIf { it.isNotBlank() && !(declaredOpponent && isPlaceholderPlayerName(it)) }
+        val motm = rawMotm ?: if (declaredOpponent) "" else if (best != null) {
             squadIn.find { it.id == best.playerId }?.displayName ?: best.playerId
         } else ""
 
-        // The man of the match can play for the other team, so our best player is only starred when the payload
-        // named nobody (or named one of ours that the squad list spells differently); an opposing player's name
-        // must never star one of our players.
-        val declaredOpponent = data.optBoolean("motmIsOpponent", false)
+        // Our best player is only starred when the payload named nobody (or named one of ours that the squad list
+        // spells differently); an opposing player's name must never star one of our players.
         val namedByPayload = rawMotm != null
         fun perfName(p: PlayerPerformance): String =
             squadIn.find { it.id == p.playerId }?.displayName ?: p.playerName ?: p.playerId
@@ -411,17 +422,25 @@ object TelemetryProcessor {
         // Team numbers the payload did not send are filled with typical values and tagged as estimated.
         fun has(key: String) = data.has(key) && !data.isNull(key)
         if (!(has("shotsFor") && has("shotsAgainst") && has("expectedGoals") && has("expectedGoalsAgainst") &&
-                has("possession") && has("passingAccuracy"))
+                has("passingAccuracy"))
         ) estimated = true
         val shotsFor = data.optInt("shotsFor", if (gf > 0) gf * 3 + 2 else 6)
         val shotsAgainst = data.optInt("shotsAgainst", if (ga > 0) ga * 3 + 1 else 4)
         val xG = data.optDouble("expectedGoals", if (gf > 0) Math.round((gf * 0.82 + 0.35) * 100.0) / 100.0 else 0.45)
         val xGA = data.optDouble("expectedGoalsAgainst", if (ga > 0) Math.round((ga * 0.78 + 0.28) * 100.0) / 100.0 else 0.32)
-        val possession = data.optInt("possession", if (gf >= ga) 54 else 46)
+        // Possession is only kept when the game gave a real figure. The export has none, and a share worked out
+        // from the pass counts is not the number the game shows, so it is left out (0 = unknown) instead of guessed.
+        val possession = if (has("possession") && !data.optBoolean("possessionEstimated", false)) {
+            data.optInt("possession").coerceIn(0, 100)
+        } else 0
         val passAcc = data.optInt("passingAccuracy", 86)
-        val leaguePos = if (data.has("leaguePosition") && data.optInt("leaguePosition") > 0) {
-            data.optInt("leaguePosition")
-        } else state.leagueTable.finalRank.toIntOrNull() ?: 1
+        // A league position belongs to league matches; a cup match has none (0 = blank). A promotion play-off still
+        // counts as the club's own league, as before.
+        val leaguePos = when {
+            !isLeagueComp && !isPlayoff -> 0
+            data.has("leaguePosition") && data.optInt("leaguePosition") > 0 -> data.optInt("leaguePosition")
+            else -> state.leagueTable.finalRank.toIntOrNull() ?: 1
+        }
 
         matches.add(
             0,
@@ -445,7 +464,7 @@ object TelemetryProcessor {
                 expectedGoalsAgainst = xGA,
                 motmName = motm,
                 motmIsOpponent = motmIsOpponent,
-                possessionEstimated = data.optBoolean("possessionEstimated", false),
+                possessionEstimated = false,
                 leaguePosition = leaguePos,
                 opponentCrestUrl = crestUrlFor(opponent),
                 playerPerformances = finalPerf,
@@ -480,9 +499,18 @@ object TelemetryProcessor {
         return MatchOutcome(updated, message)
     }
 
-    private fun isLeagueCompetition(comp: String): Boolean =
-        comp.contains("League", true) || comp.contains("Division", true) || comp.contains("Championship", true) ||
+    /** True for the club's own domestic league. Cups and the European competitions (the "Champions League" has "League" in its name) are not. */
+    fun isLeagueCompetition(comp: String): Boolean {
+        val c = comp.lowercase()
+        if (NOT_A_LEAGUE.any { c.contains(it) }) return false
+        return comp.contains("League", true) || comp.contains("Division", true) || comp.contains("Championship", true) ||
             comp.contains("Premier", true) || comp in LEAGUE_NAMES
+    }
+
+    private val NOT_A_LEAGUE = listOf(
+        "cup", "champions league", "europa league", "conference league", "trophy", "shield",
+        "supercup", "supercopa", "supercoppa", "friendl"
+    )
 
     /** A believable line for a player the payload said nothing about. Always flagged as estimated by the caller. */
     private fun typicalPerformance(p: Player, i: Int, gf: Int, ga: Int, ap: Int, shotsAgainst: Int): PlayerPerformance {
@@ -631,7 +659,8 @@ object TelemetryProcessor {
             } else null
             val isOpponent = p.optBoolean("isOpponent")
             // The scripts write "<club> Goal" when they do not know who scored for the other side: that is no name.
-            val unknownScorer = name.isBlank() || (isOpponent && name.endsWith(" Goal"))
+            val unknownScorer = name.isBlank() ||
+                (isOpponent && (name.endsWith(" Goal") || isPlaceholderPlayerName(name)))
             list.add(
                 GoalDetail(
                     scorerId = if (isOpponent) null else scorerId,

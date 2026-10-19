@@ -131,8 +131,10 @@ What the match log contains, and where it comes from:
   symbols (a green arrow and the minute for the player who came on, a red one for the player who went off), the
   substitute listed under the player he replaced. The pairing is worked out from the minutes played and the
   positions; if the game's record is not of this match, no substitutions are made up.
-- **Goals.** Our scorers and the other side's scorers are named (the exporter lists the players of both teams); a goal
-  it cannot name, such as an own goal, is shown as the club's. The exporter has no goal minutes, so the app shows none.
+- **Goals.** Our scorers and the other side's scorers are named. The exporter does not always know who the other
+  side's players are, so the script also compares every player's goal tally in the career database from before
+  and after the match: whoever's tally went up scored. A goal that still cannot be named, such as an own goal,
+  is shown as the club's, never as "Player". The exporter has no goal minutes, so the app shows none.
 - **Man of the match** is taken from either team. If the best player was on the other side, his name is shown
   with "(Opponent)" and none of your players gets the star.
 - **Goalkeeper saves** (and penalty saves) come from the exporter's player file. If the exporter reports none
@@ -142,9 +144,11 @@ What the match log contains, and where it comes from:
   up to and including the match day). The "current table position" field in the game's own data is not used:
   it is not kept up to date during a season. If other clubs' results of the same day are not stored yet, the
   script waits up to 20 seconds for them.
-- **Possession is an estimate.** The exporter does not store a possession figure. It is estimated from each
-  team's share of the passes and shown as "~NN%" in the app. The ball-win and ball-loss counts in the
-  export are event counts, not a percentage.
+- **Possession is left out.** The exporter does not store a possession figure, and a share worked out from the
+  pass counts is not the number the game shows. The app therefore shows no possession for a match unless the game
+  itself gave one. The ball-win and ball-loss counts in the export are event counts, not a percentage.
+- **Cup matches have no league position.** The position is only worked out and shown for league matches (and
+  promotion play-offs).
 
 If the Live Editor script is not running, the bridge reports the match itself from the same files. It waits 45
 seconds after an export appears before doing so, so that the script's own (richer) report normally arrives first;
@@ -175,10 +179,28 @@ window for a second each time. The script now:
   a sender, which is started hidden and sends everything waiting in one go.
 - checks folders from Lua instead of starting `cmd`, and starts the remaining helper programs without a window.
 
+- creates every folder it needs with one command, together with 60 empty spare folders in
+  `Documents\FC26 Export\spare_folders`. The Project Atlas exporter makes a new folder for every export; the
+  script answers that by renaming one of the spare folders into place, which needs no program and shows no window.
+  The stock is topped up when the script starts and fewer than 20 are left. So only the very first start on a PC
+  can flash one window (none if hidden start is available); later starts and the time after a match are silent.
+  The `spare_folders` folder is safe to delete: it is made again.
+
 On start the script logs a line such as `Quiet mode - ...` in `auto_capture_monitor.log` and the console. It says
-which of these methods this Live Editor build supports. If it says that hidden start is not available, a window
-can still flash when the exporter creates a new folder; the bridge being open is then what keeps everything else
-quiet.
+which of these methods this Live Editor build supports, how many spare folders are ready and how many windows were
+opened so far. If windows still appear, send that line.
+
+### Phone alerts
+
+The app shows an alert when a new match arrives in the match log and when a transfer is recorded (a single alert
+for each, or one summary when many arrive at once). Alerts only appear for events from the last 24 hours, so
+installing the app later does not announce old matches. They are raised when the app fetches from the bridge:
+about every 10 seconds while the app is open, and in the background while "Keep syncing in the background" in
+Settings is on (a small "Live sync" notice then stays in the notification area; swiping the app away from recent
+apps stops it). In **Settings** the app shows whether Android is allowing its alerts; **Send test alert** shows
+one at once, and **Notification settings** jumps to the page where they can be switched on. Android 13 and later ask for permission the first time the app
+opens. After updating the app the alert channel is replaced by a fresh one ("Match & transfer alerts"), so an
+earlier choice to silence or block the old channel does not carry over.
 
 ## 5. Checking what the game really stores (the probe)
 

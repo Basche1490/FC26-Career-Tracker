@@ -47,8 +47,8 @@ do
     local src = read_file(scripts .. "FC26_Auto_Capture.lua")
     local block = src:match("%-%- BEGIN classify_loans[^\n]*\n(.-)%-%- END classify_loans")
     check(block ~= nil, "classify_loans block found between the markers")
-    local chunk = assert(load(block .. "\nreturn classify_loans", "classify_loans"))
-    local classify = chunk()
+    local chunk = assert(load(block .. "\nreturn classify_loans, new_loans_out", "classify_loans"))
+    local classify, new_loans_out = chunk()
 
     local MANAGED = 115486
     local rows = {
@@ -81,6 +81,13 @@ do
 
     local no_links_in, no_links_out = classify({ { pid = 2, from = MANAGED } }, MANAGED, {}, nil)
     check(no_links_out[2] == 0 and next(no_links_in) == nil, "missing club links do not crash")
+
+    -- a loan out can leave the player linked to us, so it is spotted by comparing with the loans seen last time
+    local fresh = new_loans_out({ [30] = 900, [10] = 901, [20] = 0 }, { [20] = 0 })
+    check(#fresh == 2 and fresh[1] == 10 and fresh[2] == 30, "only the loans out that are new are returned, in order",
+        table.concat(fresh, ","))
+    check(#new_loans_out({ [5] = 1 }, nil) == 1, "with nothing known before, every loan out is new (the key stops a repeat)")
+    check(#new_loans_out(nil, nil) == 0 and #new_loans_out({}, { [1] = 1 }) == 0, "no loans out: nothing new")
 end
 
 -- ---------------------------------------------------------------------------------------------------------
@@ -178,13 +185,24 @@ do
         local real_calls, dirs, files = {}, {}, {}
         os.execute = function(cmd)
             real_calls[#real_calls + 1] = cmd
-            local made = cmd:match('mkdir "([^"]+)"')
-            if made then dirs[(made:gsub("\\", "/"))] = true end
+            if cmd:find("mkdir", 1, true) then
+                for made in cmd:gmatch('"([^"]+)"') do dirs[(made:gsub("\\", "/"))] = true end
+            end
             return true
         end
         os.rename = function(a, b)
-            if a == b and dirs[(a:gsub("\\", "/"))] then return true end
-            return nil, "No such file or directory", 2
+            a, b = a:gsub("\\", "/"), b:gsub("\\", "/")
+            if a == b then
+                if dirs[a] then return true end
+                return nil, "No such file or directory", 2
+            end
+            local parent = b:match("^(.*)/[^/]+$")
+            if dirs[a] and not dirs[b] and (parent == nil or dirs[parent]) and not (dirs.__locked and dirs.__locked[b]) then
+                dirs[a] = nil
+                dirs[b] = true
+                return true
+            end
+            return nil, "Permission denied", 13
         end
         os.getenv = function(k) if k == "TEMP" then return "/tmp" end return saved.getenv(k) end
         rawset(_G, "FC26_REAL_OS_EXECUTE", nil)
@@ -231,6 +249,66 @@ do
         local ok = execute('if not exist "' .. fresh .. '" mkdir "' .. fresh .. '"')
         check(ok == true and #real_calls == 0 and #created == 1 and created[1].show == 0 and Q.windows == 0,
             "with shellExecute a missing folder is created hidden (no window)", #real_calls .. "/" .. #created)
+    end)
+
+    -- spare folders: made together, moved into place one by one
+    with_quiet(function(Q, execute, real_calls, dirs)
+        local R = "C:/Users/Joel/Documents/FC26 Export"
+        dirs["C:/Users"], dirs["C:/Users/Joel"], dirs["C:/Users/Joel/Documents"], dirs[R] = true, true, true, true
+        Q.pool_root = R .. "/spare_folders"
+        Q.pool_size = 10
+        Q.pool_low = 4
+        check(Q.prepare({ R, R .. "/outbox", R .. "/Snapshots" }) == true and #real_calls == 1 and Q.windows == 1 and Q.batches == 1,
+            "start-up on a new PC: the folders and the spare folders come from ONE command", #real_calls .. "/" .. Q.windows .. "/" .. Q.batches)
+        local ready = Q.scan_pool()
+        check(#ready == 10 and dirs[R .. "/outbox"] and dirs[R .. "/Snapshots"], "10 spare folders and the base folders exist")
+        check(#real_calls[1] < 8000 and real_calls[1]:find('^mkdir "') ~= nil, "the command is a plain mkdir listing every folder", real_calls[1]:sub(1, 40))
+        check(Q.prepare({ R, R .. "/outbox", R .. "/Snapshots" }) == true and #real_calls == 1, "nothing is started when everything is there")
+
+        local new_dir = [[C:\Users\Joel\Documents\FC26 Export\Snapshots\incoming\x.partial]]
+        local parent = R .. "/Snapshots/incoming"
+        local ok = execute('if not exist "' .. new_dir .. '" mkdir "' .. new_dir .. '"')
+        check(ok == true and #real_calls == 1 and Q.windows == 1, "a folder inside a folder that is also missing: no new command", #real_calls)
+        check(dirs[parent] and dirs[parent .. "/x.partial"], "the missing parent and the folder were both moved into place from spares")
+        check(Q.moved == 2 and #Q.spares == 8, "two spare folders used, eight left", Q.moved .. "/" .. #Q.spares)
+
+        -- one cannot be moved (locked target): the spare is kept and the folder is made the old way
+        dirs.__locked = { [R .. "/Snapshots/ready"] = true }
+        local locked = [[C:\Users\Joel\Documents\FC26 Export\Snapshots\ready]]
+        ok = execute('if not exist "' .. locked .. '" mkdir "' .. locked .. '"')
+        check(ok == true and #real_calls == 2 and #(Q.scan_pool()) == 10, "a folder that cannot be renamed is created with mkdir (the same command also tops the stock up)", #real_calls .. "/" .. #(Q.scan_pool()))
+        dirs.__locked = nil
+        dirs[R .. "/MatchStats"] = true
+
+        -- running down to nothing: the next request makes the folder and the new stock in a single command
+        for _ = 1, 10 do
+            local f = R .. "/MatchStats/e" .. _
+            Q.make_dir(f)
+        end
+        check(#(Q.scan_pool()) == 0 and #real_calls == 2, "all spares used without any command", #(Q.scan_pool()) .. "/" .. #real_calls)
+        Q.make_dir(R .. "/MatchStats/last")
+        local ready_now = Q.scan_pool()
+        check(#real_calls == 3 and #ready_now == 10 and dirs[R .. "/MatchStats/last"], "then one command makes the folder and refills the stock", #real_calls .. "/" .. #ready_now)
+        check(Q.describe():find("spare folders: 10 ready", 1, true) ~= nil, "the log line says how many spare folders are ready: " .. Q.describe())
+    end)
+
+    -- with a working shellExecute even the one command is hidden
+    with_quiet(function(Q, execute, real_calls, dirs)
+        local R = "C:/Users/Joel/Documents/FC26 Export"
+        dirs["C:/Users"], dirs["C:/Users/Joel"], dirs["C:/Users/Joel/Documents"] = true, true, true
+        local started = {}
+        _G.shellExecute = function(program, params, folder, show)
+            started[#started + 1] = { params = params, show = show }
+            if params:find("mkdir", 1, true) then
+                for made in params:gmatch('"([^"]+)"') do dirs[(made:gsub("\\", "/"))] = true end
+            end
+        end
+        Q.pool_root = R .. "/spare_folders"
+        Q.pool_size = 10
+        Q.prepare({ R, R .. "/outbox" })
+        check(#started == 1 and started[1].show == 0 and #real_calls == 0 and Q.windows == 0,
+            "the start-up command runs hidden: no window at all", #started .. "/" .. #real_calls .. "/" .. Q.windows)
+        check(#(Q.scan_pool()) == 10 and dirs[R .. "/outbox"], "and still makes everything")
     end)
 
     with_quiet(function(Q)
@@ -658,7 +736,7 @@ local function run_capture_session(spec)
     io.open = function(path, mode)
         mode = mode or "r"
         local m = mode:sub(1, 1)
-        if path:sub(-12) == "/.fc26_probe" and not dir_known(path:sub(1, -13)) then return nil end -- no such folder
+        if path:sub(-12) == "/.fc26_probe" and not dir_known((path:sub(1, -13):gsub("\\", "/"))) then return nil end -- no such folder
         if m == "r" then
             if vfs[path] == nil then return nil end
             return reader(vfs[path])
@@ -674,13 +752,24 @@ local function run_capture_session(spec)
     io.popen = function() return { read = function() return "" end, close = function() end } end
     os.execute = function(cmd)
         if spec.executed then spec.executed[#spec.executed + 1] = cmd end -- what would have opened a command window
-        local made = cmd:match('mkdir "([^"]+)"')
-        if made then mark_dir(made) end
+        if cmd:find("mkdir", 1, true) then
+            for made in cmd:gmatch('"([^"]+)"') do mark_dir(made) end -- "mkdir" with one or several folders
+        end
         return true
     end
     os.rename = function(a, b)
         if a ~= b and vfs[a] ~= nil then vfs[b] = vfs[a] vfs[a] = nil return true end
         if a == b and vfs[a] ~= nil then return true end
+        a, b = a:gsub("\\", "/"), b:gsub("\\", "/") -- Windows takes either slash
+        if dirs[a] then -- a folder
+            if a == b then return true end
+            if dirs[b] then return nil, "File exists", 17 end
+            local parent = b:match("^(.*)/[^/]*$")
+            if parent and not dir_known(parent) then return nil, "No such file or directory", 2 end
+            dirs[a] = nil
+            mark_dir(b)
+            return true
+        end
         return nil, "No such file or directory", 2
     end
     rawset(_G, "FC26_REAL_OS_EXECUTE", nil)
@@ -1100,9 +1189,20 @@ do
         for _, c in ipairs(list) do if c:find(needle, 1, true) then n = n + 1 end end
         return n
     end
-    local function existing_dirs()
-        return { [ROOT] = true, [ROOT .. "/outbox"] = true, [ROOT .. "/Snapshots"] = true, [ROOT .. "/MatchStats"] = true,
-                 ["/home/test/tmp"] = true }
+    local BASE_FOLDERS = { "/outbox", "/Snapshots", "/Snapshots/incoming", "/Snapshots/ready", "/Snapshots/imported",
+                           "/Snapshots/failed", "/MatchStats", "/MatchStats/incoming", "/MatchStats/ready" }
+    local function spare(i) return string.format("%s/spare_folders/s%03d", ROOT, i) end
+    -- a PC where the script has run before: every folder is there and the stock of spare folders is full
+    local function existing_dirs(spares)
+        local dirs = { [ROOT] = true, ["/home/test/tmp"] = true }
+        for _, sub in ipairs(BASE_FOLDERS) do dirs[ROOT .. sub] = true end
+        for i = 1, (spares or 60) do dirs[spare(i)] = true end
+        return dirs
+    end
+    local function spare_count(dirs)
+        local n = 0
+        for i = 1, 60 do if dirs[spare(i)] then n = n + 1 end end
+        return n
     end
     local function start(spec_extra, vfs, clock_ref)
         local spec = { db = small_db(), vfs = vfs, clock = function() return clock_ref.t end, names = NAMES, teams = TEAMS,
@@ -1115,17 +1215,70 @@ do
         handler(nil, 1, nil)
     end
 
-    -- first start ever on a PC: the folders are created (one command each); later starts create nothing
+    -- first start ever on a PC: the folders and a stock of spare folders are created with ONE command; later starts
+    -- create nothing, and the folders the Atlas exporter asks for later are moved into place without any command
     do
         local vfs, executed, clk = {}, {}, { t = 1793900000 }
-        local ok, err, _, restore = start({ executed = executed, dirs = {} }, vfs, clk)
-        restore()
+        local fresh_dirs = {}
+        local ok, err, _, restore = start({ executed = executed, dirs = fresh_dirs }, vfs, clk)
         check(ok, "first start on a new PC works", err)
-        check(count(executed, "mkdir") >= 3 and count(executed, "mkdir") <= 5, "missing folders are created once", count(executed, "mkdir"))
+        check(count(executed, "mkdir") == 1, "all missing folders are created with one single command", count(executed, "mkdir"))
+        check(fresh_dirs[ROOT .. "/outbox"] and fresh_dirs[ROOT .. "/Snapshots"] and fresh_dirs[ROOT .. "/MatchStats"],
+            "that command made the folders the script uses")
+        check(not fresh_dirs[ROOT .. "/MatchStats/ready"], "but not the exporter's own folders (their existence means 'an export was made before')")
+        check(spare_count(fresh_dirs) == 60, "and 60 spare folders", spare_count(fresh_dirs))
+        local mk = ""
+        for _, c in ipairs(executed) do if c:find("mkdir", 1, true) then mk = c end end
+        check(#mk > 0 and #mk < 8000, "and it stays short enough for the command line (8191 characters)", #mk)
+
+        -- the exporter's first run asks for its folders: nothing is started, spare folders are moved into place
+        local before = #executed
+        local win = ROOT:gsub("/", "\\")
+        local asked = { win .. "\\Snapshots\\incoming", win .. "\\Snapshots\\ready", win .. "\\Snapshots\\imported",
+                        win .. "\\Snapshots\\failed", win .. "\\Snapshots\\incoming\\snapshot_20281001_120000_ab12cd34.partial",
+                        win .. "\\MatchStats\\incoming", win .. "\\MatchStats\\ready",
+                        win .. "\\MatchStats\\incoming\\FC26_MatchStats_pmc_20281001_120000_ab12.partial" }
+        local all_ok = true
+        for i, folder in ipairs(asked) do
+            local cmd = (i % 2 == 0) and ('cmd.exe /C if not exist "' .. folder .. '" mkdir "' .. folder .. '"')
+                or ('if not exist "' .. folder .. '" mkdir "' .. folder .. '"')
+            if os.execute(cmd) ~= true or not fresh_dirs[(folder:gsub("\\", "/"))] then all_ok = false end
+        end
+        check(all_ok, "the exporter's folder requests succeed and the folders exist")
+        check(#executed == before, "no program is started for them (no command window)", #executed - before)
+        check(spare_count(fresh_dirs) == 52, "eight spare folders were used up", spare_count(fresh_dirs))
+        restore()
+
         local again = {}
         ok, err, _, restore = start({ executed = again, dirs = existing_dirs() }, {}, { t = 1793900100 })
         restore()
-        check(count(again, "mkdir") == 0, "folders that exist are not created again", table.concat(again, " | "))
+        check(ok and count(again, "mkdir") == 0, "a start on a PC that is set up creates no folder", table.concat(again, " | "):sub(1, 120))
+    end
+
+    -- the stock runs low: it is topped up with one command at the next start, and a folder is never lost on the way
+    do
+        local executed, dirs = {}, existing_dirs(5)
+        local ok, err, _, restore = start({ executed = executed, dirs = dirs }, {}, { t = 1793950000 })
+        check(ok and count(executed, "mkdir") == 1, "a low stock is refilled with one command at start", count(executed, "mkdir"))
+        check(spare_count(dirs) == 60, "back to 60 spare folders", spare_count(dirs))
+        restore()
+
+        -- the spare folders vanish in the middle of a run (deleted by hand): the folder still gets made, and with the
+        -- same single command the stock is rebuilt
+        executed, dirs = {}, existing_dirs()
+        ok, err, _, restore = start({ executed = executed, dirs = dirs }, {}, { t = 1793970000 })
+        check(ok and count(executed, "mkdir") == 0, "full stock: nothing created at start", count(executed, "mkdir"))
+        for i = 1, 60 do dirs[spare(i)] = nil end
+        local folder = ROOT:gsub("/", "\\") .. "\\Snapshots\\incoming\\late.partial"
+        local r = os.execute('if not exist "' .. folder .. '" mkdir "' .. folder .. '"')
+        check(r == true and dirs[(folder:gsub("\\", "/"))], "a folder is still created when the stock vanished")
+        check(count(executed, "mkdir") == 1, "with a single command", count(executed, "mkdir"))
+        check(spare_count(dirs) == 60, "which also rebuilt the stock", spare_count(dirs))
+        local before = #executed
+        local next_folder = ROOT:gsub("/", "\\") .. "\\Snapshots\\incoming\\later.partial"
+        os.execute('if not exist "' .. next_folder .. '" mkdir "' .. next_folder .. '"')
+        check(#executed == before and dirs[(next_folder:gsub("\\", "/"))], "and the next folder needs no command again")
+        restore()
     end
 
     -- a) the bridge does not read the folder itself (older bridge): ONE sender for the whole burst
@@ -1354,7 +1507,8 @@ do
         logic .. league .. [[
         return { pair = pair_substitutions, lineup_matches = lineup_matches_export, analyse = analyse_atlas_export,
                  apply = apply_lineup, saves = estimate_keeper_saves, perf = format_performance,
-                 sub = format_substitution, table = build_league_table, comp = pick_league_comp } ]], "match_logic"))()
+                 sub = format_substitution, table = build_league_table, comp = pick_league_comp,
+                 opp_deltas = opponent_scorers_from_deltas, unnamed = is_unnamed_player } ]], "match_logic"))()
 end
 local M7 = match_env
 do
@@ -1492,6 +1646,34 @@ do
     local blank
     for _, r in ipairs(a.rows) do if r.id == "463320" then blank = r end end
     check(blank and blank.name == "Name of 463320", "a player the export has no name for is named from the game", blank and blank.name)
+
+    -- the other side's scorer has no name and no usable id in the export: no made-up "Player", the goal stays unnamed
+    local anon_participants, anon_teams = export_rows()
+    anon_participants[2].player_name, anon_participants[2].player_id = "", "0"
+    local anon = M7.analyse(anon_participants, anon_teams, { squad = squad, is_home = true, goals_against = 3,
+        player_name = function(id) return id > 0 and ("Name of " .. id) or "Player" end })
+    check(#anon.opp_scorers == 1 and anon.opp_scorers[1].name == "" and anon.opp_scorers[1].goals == 3,
+        "an unnamed scorer of the other side stays empty instead of 'Player'", anon.opp_scorers[1] and anon.opp_scorers[1].name)
+    check(M7.unnamed("Player") and M7.unnamed("Player 461607") and M7.unnamed("") and M7.unnamed(nil) and M7.unnamed("12345"),
+        "'Player', 'Player <id>', a bare id and nothing are all 'no name'")
+    check(not M7.unnamed("Bukayo Saka") and not M7.unnamed("Player One"), "a real name is a name")
+
+    -- the game's season statistics can name them when the export cannot
+    local pre = { [11] = { goals = 4 }, [12] = { goals = 0 }, [13] = { goals = 7 }, [99] = { goals = 1 } }
+    local post = { [11] = { goals = 5 }, [12] = { goals = 2 }, [13] = { goals = 7 }, [99] = { goals = 2 } }
+    local names = { [11] = "Kai Havertz", [12] = "Declan Smith" }
+    local opp_ids = { [11] = true, [12] = true, [13] = true }
+    local from_stats = M7.opp_deltas(pre, post, opp_ids, 3, function(id) return names[id] or "Player" end)
+    check(from_stats and #from_stats == 2 and from_stats[1].name == "Kai Havertz" and from_stats[1].goals == 1
+        and from_stats[2].name == "Declan Smith" and from_stats[2].goals == 2,
+        "the scorers are the other club's players whose season goals went up (a player of another club is ignored)")
+    check(M7.opp_deltas(pre, post, opp_ids, 2, function(id) return names[id] end) == nil,
+        "not believed when it does not add up to the goals conceded (the record also holds other matches)")
+    check(M7.opp_deltas(pre, post, opp_ids, 3, function(id) return "Player" end) == nil,
+        "not used when the players cannot be named either")
+    check(M7.opp_deltas(nil, post, opp_ids, 3, function(id) return "x" end) == nil and
+        M7.opp_deltas(pre, post, opp_ids, 0, function(id) return "x" end) == nil,
+        "nothing to work from, or no goals conceded: nil")
 
     -- our own man of the match, and a real possession column
     participants[2].man_of_the_match = "0"

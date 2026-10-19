@@ -164,6 +164,18 @@ data class PlayerPerformance(
     val position: String? = null
 )
 
+/**
+ * What the scripts write when the game gave no name ("Player", "Player 123456", "Unknown player", a bare id).
+ * It is never something to show as a person's name.
+ */
+fun isPlaceholderPlayerName(name: String?): Boolean {
+    val n = name?.trim().orEmpty()
+    if (n.isEmpty()) return true
+    return PLACEHOLDER_PLAYER_NAME.matches(n)
+}
+
+private val PLACEHOLDER_PLAYER_NAME = Regex("(?i)^((unknown )?player( ?#?\\d+)?|unknown|opponent( player)?|\\d+)$")
+
 data class GoalDetail(
     val minute: Int? = null,
     val scorerId: String? = null,
@@ -200,12 +212,14 @@ data class MatchResult(
     val isExtraTime: Boolean = false,
     val homePenalties: Int = 0,
     val awayPenalties: Int = 0,
-    val possession: Int = 50,
+    /** Possession in percent; 0 means the game gave none (a guess is never stored). Matches saved earlier may hold one. */
+    val possession: Int = 0,
     val passingAccuracy: Int = 80,
     val shotsFor: Int = 0,
     val shotsAgainst: Int = 0,
     val expectedGoals: Double = 0.0,
     val expectedGoalsAgainst: Double = 0.0,
+    /** The league table position after the match. 0 = none: a cup match has no league position. */
     val leaguePosition: Int = 1,
     val motmName: String = "",
     /** True when the man of the match played for the other team (his name is in [motmName]). */
