@@ -551,6 +551,14 @@ def lineup_matches_export(history, exported_ids):
     hit = sum(1 for h in played if str(h["id"]) in exported_ids)
     return hit / len(played) >= 0.7 and hit / len(exported_ids) >= 0.7
 
+# Position ids of the game's last-match record (EA's usual numbering) -> the short names the app sorts the line-up by.
+# Bench / reserve ids (28, 29) are not listed: no position is sent for them.
+POSITION_LABELS = {
+    0: "GK", 1: "SW", 2: "RWB", 3: "RB", 4: "RCB", 5: "CB", 6: "LCB", 7: "LB", 8: "LWB", 9: "RDM", 10: "CDM", 11: "LDM",
+    12: "RM", 13: "RCM", 14: "CM", 15: "LCM", 16: "LM", 17: "RAM", 18: "CAM", 19: "LAM", 20: "RF", 21: "CF", 22: "LF",
+    23: "RW", 24: "RS", 25: "ST", 26: "LS", 27: "LW",
+}
+
 def apply_lineup(player_perfs, history, goals_against=0):
     """Adds what the game's own record knows to the exported player lines (dicts, changed in place): players the export
     left out (a player on loan, say) and every substitution. Returns the list of substitutions for the payload."""
@@ -915,10 +923,14 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
     goal_details = []
 
     goal_players = []
+    opponent_goal_players = []   # who scored for the other side (the export lists every player of both teams)
     for p in participants:
         p_team = _i(p.get("team_index"))
         p_minutes = _f(p.get("minutes_played"), -1.0)
         played = not (max_minutes > 0 and 0 <= p_minutes <= 0)   # export lists the whole matchday squad
+        if p_team != managed_team_idx:
+            for _g in range(_i(p.get("goals_derived") or p.get("npk_goals"))):
+                opponent_goal_players.append(_name_of(p))
         if p_team == managed_team_idx and played:
             p_name = _name_of(p)
             p_id = p.get("player_id", "")
@@ -978,6 +990,9 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
     if estimate_keeper_saves(player_perfs, _i(o_team.get("shots_on_target")), opponent_score):
         print("  (the export has no saves: the goalkeeper's saves are worked out from shots on target)")
     for pp in player_perfs:
+        label = POSITION_LABELS.get(_i(pp["_pos"])) if pp.get("_pos") is not None else None
+        if label:
+            pp["position"] = label
         pp.pop("_pos", None)
 
     # The export has no goal minutes: spread them evenly over the match and flag them as estimated.
@@ -989,8 +1004,9 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
             "minuteEstimated": True
         })
     for og in range(1, opponent_score + 1):
+        # the export names the other side's scorers; a goal it cannot name (an own goal, say) stays "<club> Goal"
         goal_details.append({
-            "playerName": f"{opp_name} Goal",
+            "playerName": opponent_goal_players[og - 1] if og <= len(opponent_goal_players) else f"{opp_name} Goal",
             "minute": max(1, min(90, int(90 * og / (opponent_score + 1)))),
             "isOpponent": True,
             "minuteEstimated": True

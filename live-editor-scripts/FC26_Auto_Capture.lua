@@ -1,11 +1,11 @@
--- FC26 AutoCapture v2.6.0 (Precision Live Telemetry & Atlas Tracker)
+-- FC26 AutoCapture v2.6.1 (Precision Live Telemetry & Atlas Tracker)
 -- Complete support for EFL Championship, Premier League, FA Cup, Carabao Cup, Play-offs.
 -- Gathers REAL in-game data: Real League Position, Real Lineups, Real Goal Scorers, Real MOTM.
 -- Strict League Rules: League matches NEVER have extra time or penalty shootouts.
 -- Accurate Matchday XX calculation for all league matches; dedicated tournament rounds for cups.
 -- Safe session lifecycle: No phantom beaming on startup; immediate beam on actual match completion.
 -- v2.6: complete match log (substitutions, loan players, saves, opposing man of the match, league position from
--- the real results); no flashing command windows.
+-- the real results, positions, the other side's scorers); no flashing command windows.
 
 local MEMORY = require "imports/core/memory"
 require "imports/other/helpers"
@@ -14,7 +14,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "2.6.0"
+local VERSION = "2.6.1"
 local SCRIPT_INSTANCE = "FC26_AUTOCAP_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
 _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] = SCRIPT_INSTANCE
 
@@ -1612,6 +1612,15 @@ local function analyse_atlas_export(participants, teams, ctx)
         end
     end
 
+    -- Who scored for the other side (the export lists every player of both teams).
+    local opp_scorers = {}
+    for _, p in ipairs(participants) do
+        if (tonumber(p.team_index) or 0) == opp_idx then
+            local g = to_int(tonumber(p.goals_derived) or tonumber(p.npk_goals) or 0)
+            if g > 0 then opp_scorers[#opp_scorers + 1] = { name = name_of(p), goals = g } end
+        end
+    end
+
     local goals_against = ctx.goals_against or 0
     local rows = {}
     for _, p in ipairs(participants) do
@@ -1685,6 +1694,7 @@ local function analyse_atlas_export(participants, teams, ctx)
         possession_estimated = possession_estimated,
         passing_accuracy = to_int(percent_value(m_row.pass_accuracy_pct_derived)),
         goals_against = goals_against,
+        opp_scorers = opp_scorers,
         max_minutes = max_minutes,
         m_shootout = m_shootout,
         o_shootout = o_shootout
@@ -1772,10 +1782,21 @@ local function estimate_keeper_saves(analysis, goals_against)
     return true
 end
 
+-- The position ids of the game's last-match record (EA's usual numbering) and the short names the app sorts the
+-- line-up by (strikers first, goalkeeper last). Bench / reserve ids (28, 29) have no entry: no position is sent.
+local POSITION_LABELS = {
+    [0] = "GK", [1] = "SW", [2] = "RWB", [3] = "RB", [4] = "RCB", [5] = "CB", [6] = "LCB", [7] = "LB", [8] = "LWB",
+    [9] = "RDM", [10] = "CDM", [11] = "LDM", [12] = "RM", [13] = "RCM", [14] = "CM", [15] = "LCM", [16] = "LM",
+    [17] = "RAM", [18] = "CAM", [19] = "LAM", [20] = "RF", [21] = "CF", [22] = "LF", [23] = "RW", [24] = "RS",
+    [25] = "ST", [26] = "LS", [27] = "LW"
+}
+
 local function format_performance(r)
     local extra = ""
     if r.in_minute then extra = extra .. string.format(', "subInMinute": %d', r.in_minute) end
     if r.out_minute then extra = extra .. string.format(', "subOutMinute": %d', r.out_minute) end
+    local label = r.pos ~= nil and POSITION_LABELS[tonumber(r.pos)] or nil
+    if label then extra = extra .. string.format(', "position": "%s"', label) end
     return string.format(
         '{"playerId": "%s", "playerName": "%s", "rating": %.1f, "goals": %d, "assists": %d, "passes": %d, "passAccuracy": %d, "shots": %d, "shotAccuracy": %d, "saves": %d, "penaltySaves": %d, "tackles": %d, "tacklePercentage": %d, "interceptions": %d, "cleanSheet": %s, "yellowCard": %s, "redCard": %s, "isMotm": %s%s}',
         jstr(r.id), jstr(r.name), r.rating or 0, r.goals or 0, r.assists or 0, r.passes or 0, r.pass_acc or 0,
@@ -2001,6 +2022,7 @@ local function try_read_atlas_match_stats(managed_team_id, is_home, goals_agains
         passing_accuracy = analysis.passing_accuracy,
         player_performances = player_perfs,
         goal_details = goal_details,
+        opp_scorers = analysis.opp_scorers,
         substitutions = subs_json,
         max_minutes = analysis.max_minutes,
         m_shootout = analysis.m_shootout,
@@ -2133,11 +2155,16 @@ local function beam_match_to_bridge(latest_match, managed_team_id, pre_match_cpi
             motmIsOpponent = atlasStats.motm_is_opponent
             possessionEstimated = atlasStats.possession_estimated
 
+            -- the export names the other side's scorers; any goal it cannot name (an own goal, say) stays "<club> Goal"
+            local opp_names = {}
+            for _, sc in ipairs(atlasStats.opp_scorers or {}) do
+                for _ = 1, sc.goals do opp_names[#opp_names + 1] = sc.name end
+            end
             for j = 1, ga do
                 local minute = math.max(1, math.min(90, math.floor(90 * j / (ga + 1))))
                 goalDetails[#goalDetails + 1] = string.format(
                     '{"playerName": "%s", "minute": %d, "isOpponent": true, "minuteEstimated": true}',
-                    jstr(oppName .. " Goal"), minute)
+                    jstr(opp_names[j] or (oppName .. " Goal")), minute)
             end
         else
             -- Database fallback: real goal/assist/card changes from career_playerinfo between the

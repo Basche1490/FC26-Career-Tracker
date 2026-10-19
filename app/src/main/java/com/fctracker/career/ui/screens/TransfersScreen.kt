@@ -1,5 +1,6 @@
 package com.fctracker.career.ui.screens
 import com.fctracker.career.feeLabel
+import com.fctracker.career.isIncomingDeal
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
@@ -241,61 +242,18 @@ fun TransferMarketTab(
                         }
                     }
                 } else {
-                    items(filteredTransfers) { log ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(MaterialTheme.colorScheme.surface)
-                                .clickable { onEditTransfer(log) }
-                                .padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            val resolvedHeadshot = resolvePlayerHeadshotUrl(log.playerName, state, viewModel)
-                            TransferPlayerHeadshot(
-                                playerName = log.playerName,
-                                headshotUrl = resolvedHeadshot,
-                                modifier = Modifier.size(40.dp)
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            val isIncoming = log.type.contains("In", ignoreCase = true) || log.type.equals("Bought", ignoreCase = true)
-                            val isRetirement = log.type.equals("Retirement", ignoreCase = true) || log.type.equals("Retired", ignoreCase = true)
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(log.playerName + if(log.isRegen) " (Regen)" else "", fontWeight = FontWeight.Bold, color = Color.White)
-                                    if (isRetirement) {
-                                        Spacer(Modifier.width(6.dp))
-                                        Surface(
-                                            color = Color(0xFFF59E0B).copy(alpha = 0.2f),
-                                            shape = RoundedCornerShape(4.dp),
-                                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.6f))
-                                        ) {
-                                            Text(
-                                                text = "RETIRED",
-                                                color = Color(0xFFFBBF24),
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                                val subtitle = if (isRetirement) {
-                                    "Retired from professional football"
-                                } else {
-                                    "${log.type} ${if (isIncoming) "from" else "to"} ${log.fromToClub}"
-                                }
-                                Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Column(horizontalAlignment = Alignment.End) {
-                                if (isRetirement) {
-                                    Text("Retired", fontWeight = FontWeight.Bold, color = Color(0xFFF59E0B))
-                                } else {
-                                    Text(log.feeLabel(state.currencySymbol), fontWeight = FontWeight.Bold, color = if (!isIncoming) Color(0xFF4CAF50) else Color(0xFFF44336))
-                                }
-                                Text(log.date, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+                    val incomingDeals = filteredTransfers.filter { it.isIncomingDeal() }
+                    val outgoingDeals = filteredTransfers.filterNot { it.isIncomingDeal() }
+                    if (incomingDeals.isNotEmpty()) {
+                        item { TransferSectionHeader("Transfers In", incomingDeals.size, Color(0xFF42A5F5)) }
+                        items(incomingDeals) { log -> TransferLogRow(log, state, viewModel, onEditTransfer) }
+                    }
+                    if (outgoingDeals.isNotEmpty()) {
+                        item {
+                            if (incomingDeals.isNotEmpty()) Spacer(Modifier.height(8.dp))
+                            TransferSectionHeader("Transfers Out", outgoingDeals.size, Color(0xFF4CAF50))
                         }
+                        items(outgoingDeals) { log -> TransferLogRow(log, state, viewModel, onEditTransfer) }
                     }
                 }
                 item { Spacer(Modifier.height(80.dp)) }
@@ -311,18 +269,86 @@ fun TransferMarketTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             ExtendedFloatingActionButton(
-                onClick = onRecordRetirement,
-                icon = { Icon(Icons.AutoMirrored.Filled.ExitToApp, contentDescription = "Retire Player", tint = Color.Black) },
-                text = { Text("Retire Player", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp) },
-                containerColor = Color(0xFFFBBF24),
-                modifier = Modifier.height(40.dp)
-            )
-            ExtendedFloatingActionButton(
                 onClick = onLogTransfer,
                 icon = { Icon(Icons.Default.Add, contentDescription = "Log Transfer Deal") },
                 text = { Text("Log Deal", fontWeight = FontWeight.Bold) },
                 containerColor = MaterialTheme.colorScheme.primary
             )
+        }
+    }
+}
+
+/** "Transfers In (3)" style heading above a group of deals. */
+@Composable
+private fun TransferSectionHeader(title: String, count: Int, accent: Color) {
+    Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(modifier = Modifier.size(width = 4.dp, height = 16.dp).clip(RoundedCornerShape(2.dp)).background(accent))
+        Spacer(Modifier.width(8.dp))
+        Text(title, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        Spacer(Modifier.width(6.dp))
+        Text("($count)", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun TransferLogRow(
+    log: com.fctracker.career.TransferLog,
+    state: AppState,
+    viewModel: com.fctracker.career.MainViewModel,
+    onEditTransfer: (com.fctracker.career.TransferLog) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { onEditTransfer(log) }
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val resolvedHeadshot = resolvePlayerHeadshotUrl(log.playerName, state, viewModel)
+        TransferPlayerHeadshot(
+            playerName = log.playerName,
+            headshotUrl = resolvedHeadshot,
+            modifier = Modifier.size(40.dp)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        val isIncoming = log.isIncomingDeal()
+        val isRetirement = log.type.equals("Retirement", ignoreCase = true) || log.type.equals("Retired", ignoreCase = true)
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(log.playerName + if (log.isRegen) " (Regen)" else "", fontWeight = FontWeight.Bold, color = Color.White)
+                if (isRetirement) {
+                    Spacer(Modifier.width(6.dp))
+                    Surface(
+                        color = Color(0xFFF59E0B).copy(alpha = 0.2f),
+                        shape = RoundedCornerShape(4.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.6f))
+                    ) {
+                        Text(
+                            text = "RETIRED",
+                            color = Color(0xFFFBBF24),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                        )
+                    }
+                }
+            }
+            val subtitle = if (isRetirement) {
+                "Retired from professional football"
+            } else {
+                "${log.type} ${if (isIncoming) "from" else "to"} ${log.fromToClub}"
+            }
+            Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            if (isRetirement) {
+                Text("Retired", fontWeight = FontWeight.Bold, color = Color(0xFFF59E0B))
+            } else {
+                Text(log.feeLabel(state.currencySymbol), fontWeight = FontWeight.Bold, color = if (!isIncoming) Color(0xFF4CAF50) else Color(0xFFF44336))
+            }
+            Text(log.date, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

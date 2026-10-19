@@ -5,6 +5,7 @@ import com.fctracker.career.LiveEvent
 import com.fctracker.career.MatchResult
 import com.fctracker.career.Player
 import com.fctracker.career.feeLabel
+import com.fctracker.career.isIncomingDeal
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -161,6 +162,41 @@ class TelemetryProcessorTest {
 
         assertTrue(match.possessionEstimated)
         assertEquals(38, match.possession)
+    }
+
+    @Test
+    fun goalsKeepTheScorersNamesAndGuessedMinutesAreMarked() {
+        val payload = """
+            {"dataType":"match","detailSource":"atlas","opponentName":"Chelsea","isHome":true,"goalsFor":2,"goalsAgainst":2,
+             "date":"2026-02-08","competition":"Premier League","stage":"Matchday 7","possession":50,
+             "playerPerformances":[
+               {"playerId":"p1","playerName":"Player 1","position":"GK","rating":6.2},
+               {"playerId":"p6","playerName":"Player 6","position":"ST","rating":7.4,"goals":1},
+               {"playerId":"461607","playerName":"Fabian Bravo","position":"CB","rating":7.0,"goals":1}],
+             "goalDetails":[
+               {"playerName":"Player 6","minute":30,"isOpponent":false,"minuteEstimated":true},
+               {"playerName":"Fabian Bravo","minute":60,"isOpponent":false,"minuteEstimated":true},
+               {"playerName":"Cole Palmer","minute":20,"isOpponent":true,"minuteEstimated":true},
+               {"playerName":"Chelsea Goal","minute":70,"isOpponent":true,"minuteEstimated":true}]}
+        """
+        val match = run(AppState(leagueName = "Premier League", players = squad(14)), event(payload)).state.recentMatches.single()
+
+        val ours = match.goalDetails.filter { it.scorerId != null }
+        assertEquals(listOf("p6", "Fabian Bravo"), ours.map { it.scorerId })        // the second one is not in the squad
+        assertEquals(listOf("Player 6", "Fabian Bravo"), ours.map { it.scorerName })
+        assertTrue(match.goalDetails.all { it.minuteEstimated })
+
+        val theirs = match.goalDetails.filter { it.scorerId == null }
+        assertEquals(listOf("Cole Palmer", null), theirs.map { it.scorerName })      // "<club> Goal" is a stand-in, not a name
+
+        assertEquals(listOf("GK", "ST", "CB"), match.playerPerformances.map { it.position })
+    }
+
+    @Test
+    fun incomingAndOutgoingDealsAreTold() {
+        fun t(type: String) = com.fctracker.career.TransferLog(type = type).isIncomingDeal()
+        assertTrue(listOf("In (Permanent)", "In (Loan)", "Promoted In", "Free Agent Sign", "Bought").all { t(it) })
+        assertFalse(listOf("Out (Permanent)", "Out (Loan)", "Retirement", "Sold", "Loaned Out").any { t(it) })
     }
 
     @Test

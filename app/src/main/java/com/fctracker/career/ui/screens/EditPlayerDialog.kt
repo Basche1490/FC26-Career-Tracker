@@ -270,27 +270,31 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                                                 .fillMaxWidth()
                                                 .clickable {
                                                     regenSearchText = displayName
-                                                    if (name.isBlank() || name == player?.name) {
-                                                        name = p.name
+                                                    // Editing an existing player: the regen template only lends its picture.
+                                                    // Adding a new player: it fills in the whole card.
+                                                    if (player == null) {
+                                                        if (name.isBlank() || name == player?.name) {
+                                                            name = p.name
+                                                        }
+                                                        nickname = p.commonName
+                                                        nationality = p.nationality
+                                                        primaryPosition = p.position
+                                                        val alt = p.alternatePositions.split(",")
+                                                        secondaryPosition = alt.getOrNull(0)?.trim() ?: ""
+                                                        tertiaryPosition = alt.getOrNull(1)?.trim() ?: ""
+                                                        val birthYear = try { p.birthdate.split("/")[2].split(" ")[0].toInt() } catch(e:Exception) { 2000 }
+                                                        age = (startYear - birthYear).toString()
+                                                        try {
+                                                            val parts = p.birthdate.split(" ")[0].split("/")
+                                                            birthDate = "${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}"
+                                                        } catch(e: Exception) {}
+                                                        preferredFoot = p.preferredFoot
+                                                        weakFoot = p.weakFoot.toString()
+                                                        height = p.height.toString()
+                                                        weight = p.weight.toString()
+                                                        overall = p.rating.toString()
+                                                        startingOverall = p.rating.toString()
                                                     }
-                                                    nickname = p.commonName
-                                                    nationality = p.nationality
-                                                    primaryPosition = p.position
-                                                    val alt = p.alternatePositions.split(",")
-                                                    secondaryPosition = alt.getOrNull(0)?.trim() ?: ""
-                                                    tertiaryPosition = alt.getOrNull(1)?.trim() ?: ""
-                                                    val birthYear = try { p.birthdate.split("/")[2].split(" ")[0].toInt() } catch(e:Exception) { 2000 }
-                                                    age = (startYear - birthYear).toString()
-                                                    try {
-                                                        val parts = p.birthdate.split(" ")[0].split("/")
-                                                        birthDate = "${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}"
-                                                    } catch(e: Exception) {}
-                                                    preferredFoot = p.preferredFoot
-                                                    weakFoot = p.weakFoot.toString()
-                                                    height = p.height.toString()
-                                                    weight = p.weight.toString()
-                                                    overall = p.rating.toString()
-                                                    startingOverall = p.rating.toString()
                                                     headshotUrl = "https://cdn.futbin.com/content/fifa25/img/players/${p.id}.png"
                                                 }
                                                 .padding(horizontal = 8.dp, vertical = 6.dp),
@@ -417,6 +421,11 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                         }
 
                         val isRetired = status.equals("Retired", ignoreCase = true)
+                        // An existing player keeps his current rating and potential unless "Starting OVR" was edited
+                        // (that field is the only way to correct the rating here). Saving must not reset them.
+                        val startingEdited = player != null && startingOverall != player.startingOverall.toString()
+                        val keptOverall = if (player == null || startingEdited) startingOverall.toIntOrNull() ?: 60 else player.overall
+                        val keptPotential = if (player == null) overall.toIntOrNull() ?: 60 else maxOf(player.potential, keptOverall)
                         val newPlayer = player?.copy(
                             name = name,
                             nickname = nickname.takeIf { it.isNotBlank() },
@@ -425,8 +434,8 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                             tertiaryPosition = tertiaryPosition.takeIf { it.isNotBlank() },
                             age = age.toIntOrNull() ?: 21,
                             startingOverall = startingOverall.toIntOrNull() ?: 60,
-                            overall = startingOverall.toIntOrNull() ?: 60,
-                            potential = overall.toIntOrNull() ?: 60,
+                            overall = keptOverall,
+                            potential = keptPotential,
                             valueM = valueM.toDoubleOrNull() ?: 1.0,
                             wageK = wageK.toIntOrNull() ?: 5,
                             nationality = nationality,

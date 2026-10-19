@@ -693,6 +693,22 @@ function Test-LineupMatchesExport {
     return (($hit / $played.Count) -ge 0.7) -and (($hit / $ExportedIds.Count) -ge 0.7)
 }
 
+# Position ids of the game's last-match record (EA's usual numbering) -> the short names the app sorts the line-up by.
+# Bench / reserve ids (28, 29) have no name: no position is sent for them.
+function Get-PositionLabel {
+    param($Id)
+    $labels = @{
+        0 = "GK"; 1 = "SW"; 2 = "RWB"; 3 = "RB"; 4 = "RCB"; 5 = "CB"; 6 = "LCB"; 7 = "LB"; 8 = "LWB"; 9 = "RDM"; 10 = "CDM"
+        11 = "LDM"; 12 = "RM"; 13 = "RCM"; 14 = "CM"; 15 = "LCM"; 16 = "LM"; 17 = "RAM"; 18 = "CAM"; 19 = "LAM"; 20 = "RF"
+        21 = "CF"; 22 = "LF"; 23 = "RW"; 24 = "RS"; 25 = "ST"; 26 = "LS"; 27 = "LW"
+    }
+    if ($null -eq $Id) { return $null }
+    $n = 0
+    if (-not [int]::TryParse([string]$Id, [ref]$n)) { return $null }
+    if ($labels.ContainsKey($n)) { return $labels[$n] }
+    return $null
+}
+
 # Adds what the game's own record knows to the exported player lines (ordered hashtables): players the export left
 # out (a player on loan, say), who played which position and every substitution.
 # Returns Perfs (starters first, then the substitutes in the order they came on), Subs and PosById.
@@ -1068,11 +1084,17 @@ function Import-AtlasFolder {
     # Player performances - only players who actually played (the export lists the whole matchday squad)
     $playerPerfs = @()
     $goalPlayers = @()
+    $opponentGoalPlayers = @()   # who scored for the other side (the export lists every player of both teams)
     foreach ($p in $participants) {
         $pTeam = ConvertTo-Int $p.team_index
         $pMinutes = ConvertTo-Dbl $p.minutes_played -1.0
         $played = -not ($maxMinutes -gt 0 -and $pMinutes -ge 0 -and $pMinutes -le 0)
-        if ($pTeam -ne $managedTeamIndex -or -not $played) { continue }
+        if ($pTeam -ne $managedTeamIndex) {
+            $theirGoals = ConvertTo-Int (Get-FirstValue $p.goals_derived $p.npk_goals)
+            for ($g = 0; $g -lt $theirGoals; $g++) { $opponentGoalPlayers += (Get-ParticipantName $p) }
+            continue
+        }
+        if (-not $played) { continue }
 
         $pName = Get-ParticipantName $p
         $pGoals = ConvertTo-Int (Get-FirstValue $p.goals_derived $p.npk_goals)
@@ -1144,6 +1166,14 @@ function Import-AtlasFolder {
     if (Set-KeeperSaves $playerPerfs $posById (ConvertTo-Int $oTeam.shots_on_target) $opponentScore) {
         Write-Host "  (the export has no saves: the goalkeeper's saves are worked out from shots on target)" -ForegroundColor DarkYellow
     }
+    # the position each player played, so the app can line the team up from striker to goalkeeper
+    foreach ($pp in $playerPerfs) {
+        $posKey = [string]$pp.playerId
+        if ($posById.ContainsKey($posKey)) {
+            $posLabel = Get-PositionLabel $posById[$posKey]
+            if ($posLabel) { $pp.position = $posLabel }
+        }
+    }
 
     # The export has no goal minutes: spread them evenly over the match and flag them as estimated.
     $goalDetails = @()
@@ -1156,8 +1186,11 @@ function Import-AtlasFolder {
         }
     }
     for ($og = 1; $og -le $opponentScore; $og++) {
+        # the export names the other side's scorers; a goal it cannot name (an own goal, say) stays "<club> Goal"
+        $theirScorer = "$oppName Goal"
+        if ($og -le $opponentGoalPlayers.Count) { $theirScorer = $opponentGoalPlayers[$og - 1] }
         $goalDetails += [PSCustomObject]@{
-            playerName = "$oppName Goal"
+            playerName = $theirScorer
             minute = [Math]::Max(1, [Math]::Min(90, [int][Math]::Floor(90 * $og / ($opponentScore + 1))))
             isOpponent = $true
             minuteEstimated = $true

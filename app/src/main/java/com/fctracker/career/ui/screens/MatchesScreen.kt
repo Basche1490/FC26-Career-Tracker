@@ -310,7 +310,6 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
         "D" -> com.fctracker.career.ui.theme.DrawColor
         else -> com.fctracker.career.ui.theme.LossColor
     }
-    var expanded by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
@@ -325,12 +324,12 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                     CompetitionLogoImage(
-                        competition = match.competition, 
+                        competition = match.competition,
                         modifier = Modifier
                             .size(36.dp)
-                            .background(Color.White, CircleShape)
-                            .padding(2.dp)
-                            .clip(CircleShape)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color.White)
+                            .padding(3.dp)
                     )
                     Spacer(Modifier.width(10.dp))
                     TeamCrestImage(teamName = match.opponentName, modifier = Modifier.size(36.dp).clip(CircleShape))
@@ -412,163 +411,69 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
                 )
             }
 
-            // Goal Details (Scorers)
+            // Goals: one row per goal, the scorer by name, a boot and the assister when the game said who made it
             if (match.goalDetails.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
-                Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)).padding(horizontal = 10.dp, vertical = 6.dp)) {
-                    val ourGoals = match.goalDetails.filter { it.scorerId != null }
-                    val oppGoals = match.goalDetails.filter { it.scorerId == null }
-
-                    if (ourGoals.isNotEmpty()) {
-                        val scorersSummary = ourGoals.joinToString(", ") { g ->
-                            val pName = state?.players?.find { it.id == g.scorerId }?.displayName ?: g.scorerId ?: "Player"
-                            val minStr = if (g.minute != null) " ${g.minute}'" else ""
-                            val astStr = if (!g.assisterId.isNullOrBlank()) {
-                                val aName = state?.players?.find { it.id == g.assisterId }?.displayName ?: g.assisterId
-                                " (ast. $aName)"
-                            } else ""
-                            "$pName$minStr$astStr"
-                        }
-                        Text("⚽ $scorersSummary", fontSize = 11.sp, color = Color.White)
-                    }
-
-                    if (oppGoals.isNotEmpty()) {
-                        val oppScorers = oppGoals.joinToString(", ") { g ->
-                            val minStr = if (g.minute != null) " ${g.minute}'" else ""
-                            "${match.opponentName}$minStr"
-                        }
-                        Text("⚽ (Opponent) $oppScorers", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
-
-            // Expandable Lineup & Player Ratings Toggle
-            if (match.playerPerformances.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable { expanded = !expanded }
-                        .padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
-                    Text(
-                        if (expanded) "Hide Match Lineup & Stats" else "View Lineup & Player Stats (${match.playerPerformances.size})",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Icon(
-                        if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                        contentDescription = "Expand",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-
-                if (expanded) {
-                    Spacer(Modifier.height(6.dp))
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(MaterialTheme.colorScheme.background)
-                            .padding(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        match.playerPerformances.forEach { perf ->
-                            val player = state?.players?.find { it.id == perf.playerId || it.displayName == perf.playerId || it.name == perf.playerId }
-                            val pName = player?.displayName ?: perf.playerName?.takeIf { it.isNotBlank() } ?: perf.playerId
-                            val pPos = player?.primaryPosition ?: ""
-                            val ratingColor = when {
-                                perf.rating >= 8.0 -> Color(0xFF4CAF50)
-                                perf.rating >= 7.0 -> MaterialTheme.colorScheme.primary
-                                else -> MaterialTheme.colorScheme.onSurfaceVariant
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                    // Rating Badge
-                                    Box(
-                                        modifier = Modifier
-                                            .size(28.dp)
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(ratingColor.copy(alpha = 0.2f))
-                                            .border(1.dp, ratingColor, RoundedCornerShape(6.dp)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = if (perf.rating > 0) String.format(Locale.US, "%.1f", perf.rating) else "–",
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = ratingColor
-                                        )
-                                    }
-                                    Spacer(Modifier.width(8.dp))
-                                    Column {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(pName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                            if (perf.isMotm) {
-                                                Spacer(Modifier.width(4.dp))
-                                                Icon(Icons.Default.Star, "MOTM", tint = Color(0xFFFFD700), modifier = Modifier.size(12.dp))
-                                            }
-                                            if (pPos.isNotBlank()) {
-                                                Spacer(Modifier.width(4.dp))
-                                                Text(pPos, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            }
-                                        }
-
-                                        // Detailed Stats Row
-                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            if (perf.goals > 0) Text("⚽ ${perf.goals}", fontSize = 10.sp, color = Color(0xFF4CAF50), fontWeight = FontWeight.Bold)
-                                            if (perf.assists > 0) Text("🅰️ ${perf.assists}", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                                            if (perf.passes > 0) Text("${perf.passes} pass (${perf.passAccuracy}%)", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            if (perf.shots > 0) Text("${perf.shots} sh", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            if (perf.tackles > 0) Text("${perf.tackles} tkl", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            if (perf.saves > 0) Text("${perf.saves} saves", fontSize = 10.sp, color = Color(0xFF00E676))
-                                            if (perf.cleanSheet) Text("🧤 CS", fontSize = 10.sp, color = Color(0xFF00E676), fontWeight = FontWeight.Bold)
-                                            if (perf.yellowCard) Text("🟨", fontSize = 10.sp)
-                                            if (perf.redCard) Text("🟥", fontSize = 10.sp)
-                                        }
-                                    }
-                                }
-
-                                if (perf.subOutMinute != null) {
-                                    Text("🔻 ${perf.subOutMinute}'", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                } else if (perf.subInMinute != null) {
-                                    Text("🔺 ${perf.subInMinute}'", fontSize = 10.sp, color = Color(0xFF4CAF50))
-                                }
+                    match.goalDetails.filter { it.scorerId != null }.forEach { g ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.SportsSoccer, contentDescription = "Goal", tint = Color.White, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(goalScorerLabel(g, match, state) + goalMinuteLabel(g), fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                            val assister = goalAssisterLabel(g, state)
+                            if (assister != null) {
+                                Spacer(Modifier.width(10.dp))
+                                Icon(SoccerBootIcon, contentDescription = "Assist", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(assister, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
                             }
                         }
-
-                        // Substitutions if any
-                        if (match.substitutions.isNotEmpty()) {
-                            Spacer(Modifier.height(4.dp))
-                            Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), thickness = 0.5.dp)
-                            match.substitutions.forEach { sub ->
-                                val pOut = state?.players?.find { it.id == sub.playerOutId }?.displayName
-                                    ?: sub.playerOutName?.takeIf { it.isNotBlank() } ?: sub.playerOutId
-                                val pIn = state?.players?.find { it.id == sub.playerInId }?.displayName
-                                    ?: sub.playerInName?.takeIf { it.isNotBlank() } ?: sub.playerInId
-                                Text(
-                                    "🔄 ${sub.minute}': 🔺 $pIn for 🔻 $pOut",
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                    }
+                    match.goalDetails.filter { it.scorerId == null }.forEach { g ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.SportsSoccer, contentDescription = "Opponent goal", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(goalScorerLabel(g, match, state) + goalMinuteLabel(g), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
             }
+            // The line-up, substitutions and player ratings live in the match log: tap the match to open it.
         }
     }
 }
+
+/** The scorer's name for the match list: the squad's current name, else the name the game gave, never a raw id. */
+internal fun goalScorerLabel(g: com.fctracker.career.GoalDetail, match: MatchResult, state: AppState?): String {
+    if (g.scorerId == null) {   // a goal for the other side
+        return g.scorerName?.takeIf { it.isNotBlank() }
+            ?.let { "$it (${match.opponentName})" } ?: match.opponentName
+    }
+    state?.players?.find { it.id == g.scorerId }?.displayName?.takeIf { it.isNotBlank() }?.let { return it }
+    g.scorerName?.takeIf { it.isNotBlank() }?.let { return it }
+    match.playerPerformances.find { it.playerId == g.scorerId }?.playerName?.takeIf { it.isNotBlank() }?.let { return it }
+    return if (looksLikeId(g.scorerId)) "Unknown scorer" else g.scorerId
+}
+
+internal fun goalAssisterLabel(g: com.fctracker.career.GoalDetail, state: AppState?): String? {
+    val id = g.assisterId?.takeIf { it.isNotBlank() } ?: return null
+    state?.players?.find { it.id == id }?.displayName?.takeIf { it.isNotBlank() }?.let { return it }
+    g.assisterName?.takeIf { it.isNotBlank() }?.let { return it }
+    return if (looksLikeId(id)) null else id
+}
+
+/** " 23'" for a real minute; nothing for a minute the script only guessed. */
+internal fun goalMinuteLabel(g: com.fctracker.career.GoalDetail): String =
+    if (g.minute != null && !g.minuteEstimated) " ${g.minute}'" else ""
+
+/** Game ids are numbers and the app's own ids are UUIDs: neither is something to show as a name. */
+private fun looksLikeId(text: String): Boolean =
+    text.isNotEmpty() && (text.all { it.isDigit() } || Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").matches(text))
 
 fun getCompetitionsForCountry(country: String): List<String> {
     return when(country) {
@@ -957,52 +862,87 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                     }
                     
                     item {
-                        val validPerformances = performances.values.filter { perf -> state.players.any { it.id == perf.playerId } }
+                        // The match log: everybody who played (a loan signing included, even when he is not in the squad
+                        // list), strikers first and the goalkeeper last, a substitute right under the player he replaced.
+                        fun nameOf(perf: PlayerPerformance): String =
+                            state.players.firstOrNull { it.id == perf.playerId }?.displayName
+                                ?: perf.playerName?.takeIf { it.isNotBlank() } ?: perf.playerId
+                        fun positionOf(perf: PlayerPerformance): String? =
+                            perf.position?.takeIf { it.isNotBlank() } ?: state.players.firstOrNull { it.id == perf.playerId }?.primaryPosition
+                        val ordered = LineupOrder.order(
+                            performances = performances.values.toList(),
+                            substitutions = initialMatch?.substitutions ?: emptyList(),
+                            positionOf = { perf -> positionOf(perf) },
+                            nameOf = { perf -> nameOf(perf) }
+                        )
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            validPerformances.forEach { perf ->
-                                val player = state.players.firstOrNull { it.id == perf.playerId } ?: return@forEach
-                                var expanded by remember { mutableStateOf(false) }
-                                val isMotm = player.displayName == motmSearchQuery
-                                val calculatedAssists = performances.values.flatMap { it.goalAssisters }.count { it == perf.playerId }
-                                val totalAssists = perf.assists + calculatedAssists
-                                Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp)) {
-                                    Column {
-                                        Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
-                                            if (perf.subInMinute != null) {
-                                                Icon(Icons.Default.ArrowDropUp, "Subbed In", tint = Color.Green, modifier = Modifier.size(16.dp))
-                                                Spacer(Modifier.width(4.dp))
-                                            } else if (perf.subOutMinute != null) {
-                                                Icon(Icons.Default.ArrowDropDown, "Subbed Out", tint = Color.Red, modifier = Modifier.size(16.dp))
-                                                Spacer(Modifier.width(4.dp))
-                                            }
-                                            Text(player.displayName, color = Color.White, modifier = Modifier.weight(1f))
-                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                if (isMotm) Icon(Icons.Default.Star, "MOTM", tint = Color.Yellow, modifier = Modifier.size(16.dp))
-                                                repeat(perf.goals) { Icon(Icons.Default.SportsSoccer, "Goal", tint = Color.White, modifier = Modifier.size(16.dp)) }
-                                                repeat(totalAssists) { Icon(Icons.Default.Moving, "Assist", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp)) }
-                                                if (perf.yellowCard) Box(modifier = Modifier.size(12.dp, 16.dp).background(Color.Yellow))
-                                                if (perf.redCard) Box(modifier = Modifier.size(12.dp, 16.dp).background(Color.Red))
-                                            }
-                                            Spacer(Modifier.width(12.dp))
-                                            Text(String.format("%.1f", perf.rating), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                                        }
-                                        if (expanded) {
-                                            PlayerPerformanceEditor(
-                                                perf = perf,
-                                                roster = state.players, // Pass full roster for sub dropdowns
-                                                onUpdate = { newPerf -> performances[perf.playerId] = newPerf },
-                                                onSubstitute = { teammateId, minute, isOut ->
-                                                    if (isOut) {
-                                                        performances[perf.playerId] = perf.copy(subOutMinute = minute)
-                                                        val matePerf = performances[teammateId] ?: PlayerPerformance(playerId = teammateId)
-                                                        performances[teammateId] = matePerf.copy(subInMinute = minute)
-                                                    } else {
-                                                        performances[perf.playerId] = perf.copy(subInMinute = minute)
-                                                        val matePerf = performances[teammateId] ?: PlayerPerformance(playerId = teammateId)
-                                                        performances[teammateId] = matePerf.copy(subOutMinute = minute)
+                            ordered.forEach { perf ->
+                                key(perf.playerId) {
+                                    var expanded by remember { mutableStateOf(false) }
+                                    val shownName = nameOf(perf)
+                                    val isMotm = motmSearchQuery.isNotBlank() && shownName.equals(motmSearchQuery, ignoreCase = true)
+                                    val calculatedAssists = performances.values.flatMap { it.goalAssisters }.count { it == perf.playerId }
+                                    val totalAssists = perf.assists + calculatedAssists
+                                    val cameOn = perf.subInMinute != null
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(start = if (cameOn) 18.dp else 0.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                                            .padding(8.dp)
+                                    ) {
+                                        Column {
+                                            Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    positionOf(perf)?.uppercase() ?: "",
+                                                    fontSize = 10.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.width(30.dp)
+                                                )
+                                                Text(shownName, color = Color.White, modifier = Modifier.weight(1f))
+                                                // The symbols: man of the match, goals, assists (boot), saves, cards, substitutions
+                                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                    if (isMotm) Icon(Icons.Default.Star, "Man of the match", tint = Color(0xFFFFD700), modifier = Modifier.size(16.dp))
+                                                    repeat(perf.goals) { Icon(Icons.Default.SportsSoccer, "Goal", tint = Color.White, modifier = Modifier.size(16.dp)) }
+                                                    repeat(totalAssists) { Icon(SoccerBootIcon, "Assist", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(17.dp)) }
+                                                    if (perf.saves > 0) Text("\uD83E\uDDE4${perf.saves}", fontSize = 12.sp, color = Color(0xFF00E676))
+                                                    if (perf.yellowCard) Box(modifier = Modifier.size(10.dp, 14.dp).background(Color.Yellow))
+                                                    if (perf.redCard) Box(modifier = Modifier.size(10.dp, 14.dp).background(Color.Red))
+                                                    if (perf.subInMinute != null) {
+                                                        Icon(Icons.Default.ArrowDropUp, "Subbed on", tint = Color(0xFF4CAF50), modifier = Modifier.size(20.dp))
+                                                        Text("${perf.subInMinute}'", fontSize = 11.sp, color = Color(0xFF4CAF50))
+                                                    }
+                                                    if (perf.subOutMinute != null) {
+                                                        Icon(Icons.Default.ArrowDropDown, "Subbed off", tint = Color(0xFFF44336), modifier = Modifier.size(20.dp))
+                                                        Text("${perf.subOutMinute}'", fontSize = 11.sp, color = Color(0xFFF44336))
                                                     }
                                                 }
-                                            )
+                                                Spacer(Modifier.width(10.dp))
+                                                Text(
+                                                    if (perf.rating > 0) String.format(Locale.US, "%.1f", perf.rating) else "–",
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            if (expanded) {
+                                                PlayerPerformanceEditor(
+                                                    perf = perf,
+                                                    roster = state.players, // Pass full roster for sub dropdowns
+                                                    onUpdate = { newPerf -> performances[perf.playerId] = newPerf },
+                                                    onSubstitute = { teammateId, minute, isOut ->
+                                                        if (isOut) {
+                                                            performances[perf.playerId] = perf.copy(subOutMinute = minute)
+                                                            val matePerf = performances[teammateId] ?: PlayerPerformance(playerId = teammateId)
+                                                            performances[teammateId] = matePerf.copy(subInMinute = minute)
+                                                        } else {
+                                                            performances[perf.playerId] = perf.copy(subInMinute = minute)
+                                                            val matePerf = performances[teammateId] ?: PlayerPerformance(playerId = teammateId)
+                                                            performances[teammateId] = matePerf.copy(subOutMinute = minute)
+                                                        }
+                                                    }
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -1016,7 +956,9 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                 Button(
                     onClick = {
                         val finalPerformances = performances.values.map { 
-                            val isThisPlayerMotm = state.players.find { p -> p.id == it.playerId }?.displayName == motmSearchQuery
+                            val shownName = state.players.find { p -> p.id == it.playerId }?.displayName
+                                ?: it.playerName?.takeIf { n -> n.isNotBlank() } ?: it.playerId
+                            val isThisPlayerMotm = motmSearchQuery.isNotBlank() && shownName.equals(motmSearchQuery, ignoreCase = true)
                             it.copy(isMotm = isThisPlayerMotm) 
                         }
                         
@@ -1778,76 +1720,91 @@ fun TeamCrestImage(teamName: String, modifier: Modifier = Modifier) {
     }
 }
 
-@Composable
-fun getCompetitionLogoUrl(competition: String): String {
-    val c = competition.lowercase()
-    
-    if (c.contains("premier")) return "https://upload.wikimedia.org/wikipedia/en/thumb/f/f2/Premier_League_Logo.svg/512px-Premier_League_Logo.svg.png"
-    if (c.contains("la liga") || c.contains("laliga")) return "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/LaLiga_logo_2023.svg/512px-LaLiga_logo_2023.svg.png"
-    if (c.contains("segunda")) return "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/LaLiga_logo_2023.svg/512px-LaLiga_logo_2023.svg.png"
-    if (c.contains("bundesliga")) return "https://upload.wikimedia.org/wikipedia/en/thumb/d/df/Bundesliga_logo_%282017%29.svg/512px-Bundesliga_logo_%282017%29.svg.png"
-    if (c.contains("serie a")) return "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e9/Serie_A_logo_2019.svg/512px-Serie_A_logo_2019.svg.png"
-    if (c.contains("serie b")) return "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e9/Serie_A_logo_2019.svg/512px-Serie_A_logo_2019.svg.png"
-    if (c.contains("ligue 1")) return "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Ligue1.svg/512px-Ligue1.svg.png"
-    if (c.contains("ligue 2")) return "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Ligue1.svg/512px-Ligue1.svg.png"
-    if (c.contains("mls")) return "https://upload.wikimedia.org/wikipedia/commons/thumb/7/76/MLS_crest_logo_RGB_gradient.svg/512px-MLS_crest_logo_RGB_gradient.svg.png"
-    if (c.contains("champions")) return "https://upload.wikimedia.org/wikipedia/en/thumb/b/bf/UEFA_Champions_League_logo_2.svg/512px-UEFA_Champions_League_logo_2.svg.png"
-    if (c.contains("europa league") || c.contains("europa")) return "https://upload.wikimedia.org/wikipedia/en/thumb/0/03/UEFA_Europa_League_logo_%282021%29.svg/512px-UEFA_Europa_League_logo_%282021%29.svg.png"
-    if (c.contains("conference")) return "https://upload.wikimedia.org/wikipedia/en/thumb/5/54/UEFA_Europa_Conference_League_logo.svg/512px-UEFA_Europa_Conference_League_logo.svg.png"
-    if (c.contains("fa cup")) return "https://upload.wikimedia.org/wikipedia/en/thumb/b/be/Emirates_FA_Cup_logo.svg/512px-Emirates_FA_Cup_logo.svg.png"
-    if (c.contains("carabao") || c.contains("efl") || c.contains("championship") || c.contains("league one") || c.contains("league two")) {
-        return "https://upload.wikimedia.org/wikipedia/en/thumb/5/5e/EFL_logo.svg/512px-EFL_logo.svg.png"
-    }
-    if (c.contains("copa del rey")) return "https://upload.wikimedia.org/wikipedia/en/thumb/c/c9/Copa_del_Rey_2021_logo.svg/512px-Copa_del_Rey_2021_logo.svg.png"
-    if (c.contains("dfb")) return "https://upload.wikimedia.org/wikipedia/en/thumb/0/07/DFB-Pokal_logo.svg/512px-DFB-Pokal_logo.svg.png"
-    if (c.contains("coppa italia")) return "https://upload.wikimedia.org/wikipedia/en/thumb/2/23/Coppa_Italia_logo_%282021%29.svg/512px-Coppa_Italia_logo_%282021%29.svg.png"
+private const val W = "https://upload.wikimedia.org/wikipedia/"
 
-    val domain = when {
-        c.contains("saudi") || c.contains("roshn") -> "spl.com.sa"
-        c.contains("eredivisie") -> "eredivisie.eu"
-        c.contains("portugal") || c.contains("liga nos") -> "ligaportugal.pt"
-        c.contains("world cup") -> "fifa.com"
-        c.contains("usl") -> "uslchampionship.com"
-        else -> return ""
+/**
+ * Where to look for a competition's logo, best first: a picture from Wikipedia, then the favicon of the
+ * competition's official site (a reliable fallback when a picture link is wrong or not reachable). The first one
+ * that loads is used. Empty for a competition that has none (friendlies).
+ *
+ * The EFL and cup names are checked before "champions": "EFL Championship" contains "champions" and used to get the
+ * UEFA Champions League logo.
+ */
+fun competitionLogoCandidates(competition: String): List<String> {
+    val c = competition.lowercase()
+    fun favicon(domain: String) =
+        "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://$domain&size=256"
+    fun both(wiki: String, domain: String) = listOf(W + wiki, favicon(domain))
+
+    val isEfl = c.contains("efl") || c.contains("carabao") || c.contains("championship") ||
+        c.contains("league one") || c.contains("league two") || c.contains("play-off") || c.contains("playoff")
+    return when {
+        c.contains("premier") -> both("en/thumb/f/f2/Premier_League_Logo.svg/512px-Premier_League_Logo.svg.png", "premierleague.com")
+        isEfl -> both("en/thumb/5/5e/EFL_logo.svg/512px-EFL_logo.svg.png", "efl.com")
+        c.contains("fa cup") || c.contains("community shield") ->
+            both("en/thumb/b/be/Emirates_FA_Cup_logo.svg/512px-Emirates_FA_Cup_logo.svg.png", "thefa.com")
+        c.contains("la liga") || c.contains("laliga") || c.contains("segunda") ->
+            both("commons/thumb/0/0f/LaLiga_logo_2023.svg/512px-LaLiga_logo_2023.svg.png", "laliga.com")
+        c.contains("bundesliga") -> both("en/thumb/d/df/Bundesliga_logo_%282017%29.svg/512px-Bundesliga_logo_%282017%29.svg.png", "bundesliga.com")
+        c.contains("serie a") -> both("commons/thumb/e/e9/Serie_A_logo_2019.svg/512px-Serie_A_logo_2019.svg.png", "legaseriea.it")
+        c.contains("serie b") -> listOf(favicon("legab.it"))
+        c.contains("ligue 1") || c.contains("ligue 2") -> both("commons/thumb/5/5e/Ligue1.svg/512px-Ligue1.svg.png", "ligue1.com")
+        c.contains("mls") -> both("commons/thumb/7/76/MLS_crest_logo_RGB_gradient.svg/512px-MLS_crest_logo_RGB_gradient.svg.png", "mlssoccer.com")
+        c.contains("champions league") || (c.contains("champions") && !c.contains("championship")) ->
+            both("en/thumb/b/bf/UEFA_Champions_League_logo_2.svg/512px-UEFA_Champions_League_logo_2.svg.png", "uefa.com")
+        c.contains("europa") -> both("en/thumb/0/03/UEFA_Europa_League_logo_%282021%29.svg/512px-UEFA_Europa_League_logo_%282021%29.svg.png", "uefa.com")
+        c.contains("conference") -> both("en/thumb/5/54/UEFA_Europa_Conference_League_logo.svg/512px-UEFA_Europa_Conference_League_logo.svg.png", "uefa.com")
+        c.contains("copa del rey") -> both("en/thumb/c/c9/Copa_del_Rey_2021_logo.svg/512px-Copa_del_Rey_2021_logo.svg.png", "rfef.es")
+        c.contains("dfb") -> both("en/thumb/0/07/DFB-Pokal_logo.svg/512px-DFB-Pokal_logo.svg.png", "dfb.de")
+        c.contains("coppa italia") -> both("en/thumb/2/23/Coppa_Italia_logo_%282021%29.svg/512px-Coppa_Italia_logo_%282021%29.svg.png", "legaseriea.it")
+        c.contains("coupe de france") -> listOf(favicon("fff.fr"))
+        c.contains("saudi") || c.contains("roshn") -> listOf(favicon("spl.com.sa"))
+        c.contains("eredivisie") -> listOf(favicon("eredivisie.eu"))
+        c.contains("portugal") || c.contains("liga nos") -> listOf(favicon("ligaportugal.pt"))
+        c.contains("world cup") -> listOf(favicon("fifa.com"))
+        c.contains("usl") -> listOf(favicon("uslchampionship.com"))
+        else -> emptyList()
     }
-    return "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://${domain}&size=256"
 }
 
+/** The first place to look for the logo (kept for callers that want a single address). */
+fun getCompetitionLogoUrl(competition: String): String = competitionLogoCandidates(competition).firstOrNull() ?: ""
+
+// Which candidate worked (or that none did) for each competition, so a list does not retry broken links on every scroll.
+private val competitionLogoChoice = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+/**
+ * The competition's logo. While it loads the tile stays empty; only when no source has a picture are the initials
+ * shown, so a slow connection never flashes a circle with letters.
+ */
 @Composable
 fun CompetitionLogoImage(competition: String, modifier: Modifier = Modifier) {
-    val url = getCompetitionLogoUrl(competition)
-    val fallbackBox = @Composable {
-        val initials = competition.split(" ").take(2).joinToString("") { it.take(1) }.uppercase()
-        val bgColor = when {
-            competition.contains("Premier") -> Color(0xFF38003C)
-            competition.contains("Champions") -> Color(0xFF001489)
-            competition.contains("Europa") -> Color(0xFFF68712)
-            competition.contains("La Liga") -> Color(0xFFEE1222)
-            competition.contains("Serie A") -> Color(0xFF0058A8)
-            competition.contains("Bundesliga") -> Color(0xFFD20515)
-            else -> MaterialTheme.colorScheme.primary
-        }
-        Box(
-            modifier = modifier.background(bgColor),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(initials, color = if (bgColor == MaterialTheme.colorScheme.primary) MaterialTheme.colorScheme.onPrimary else Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-        }
-    }
-    if (url.isNotEmpty()) {
+    val urls = remember(competition) { competitionLogoCandidates(competition) }
+    var index by remember(competition) { mutableStateOf(competitionLogoChoice[competition] ?: 0) }
+
+    if (index < urls.size) {
         coil.compose.SubcomposeAsyncImage(
             model = coil.request.ImageRequest.Builder(androidx.compose.ui.platform.LocalContext.current)
-                .data(url)
-                
+                .data(urls[index])
                 .crossfade(true)
                 .build(),
             contentDescription = "$competition Logo",
             contentScale = androidx.compose.ui.layout.ContentScale.Fit,
             modifier = modifier,
-            loading = { fallbackBox() },
-            error = { fallbackBox() }
+            loading = { Box(modifier = Modifier.fillMaxSize()) },
+            onSuccess = { competitionLogoChoice[competition] = index },
+            onError = {
+                index += 1
+                competitionLogoChoice[competition] = index
+            }
         )
     } else {
-        fallbackBox()
+        val initials = competition.split(" ").filter { it.isNotBlank() }.take(2).joinToString("") { it.take(1) }.uppercase()
+        Box(
+            modifier = modifier.clip(RoundedCornerShape(8.dp)).background(Color(0xFFECEFF1)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(initials.ifEmpty { "?" }, color = Color(0xFF37474F), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+        }
     }
 }

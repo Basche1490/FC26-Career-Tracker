@@ -107,6 +107,15 @@ date,player,type,fee_m,club
 empty when unknown. The file is read every time `FC26_Auto_Capture.lua` starts and each line is sent once. A
 player listed there replaces what the script works out for that player and direction.
 
+### Player-plus-cash deals
+
+When another club takes one of your players as part of a deal for one of theirs, the save only shows who arrived and
+who left. The script records both moves, each as its own entry with the club and the day (for example "Cole Swap, In
+(Permanent), from Brighton" and "Pedro Lima, Out (Permanent), to Brighton" on the same date). The save does not record
+that the two belong together or how much cash changed hands, so the fees show as "Fee ?" (unless one of them is the
+season's biggest signing or sale, whose fee the game does keep). Put the real amounts in `manual_transfers.csv` or edit
+the entries in the app.
+
 ## 3. Playing matches
 
 When a match finishes, click **Advance** on the post-match summary to return to the Career Central Hub. EA FC
@@ -117,9 +126,13 @@ What the match log contains, and where it comes from:
 
 - **Lineup and substitutions.** Everyone who played is listed, including a player who is only on loan with you
   (he may be missing from the exporter's own file; he is then added from the game's record of the match, with
-  his minutes but without invented stats, so his rating shows as "-" if the game does not give one). Each
-  substitution is listed as "player A off, player B on" with the minute. The pairing is worked out from the
-  minutes played and the positions; if the game's record is not of this match, no substitutions are made up.
+  his minutes but without invented stats, so his rating shows as "-" if the game does not give one). Each player
+  carries the position he played, so the app lists the team from striker to goalkeeper. A substitution is shown with
+  symbols (a green arrow and the minute for the player who came on, a red one for the player who went off), the
+  substitute listed under the player he replaced. The pairing is worked out from the minutes played and the
+  positions; if the game's record is not of this match, no substitutions are made up.
+- **Goals.** Our scorers and the other side's scorers are named (the exporter lists the players of both teams); a goal
+  it cannot name, such as an own goal, is shown as the club's. The exporter has no goal minutes, so the app shows none.
 - **Man of the match** is taken from either team. If the best player was on the other side, his name is shown
   with "(Opponent)" and none of your players gets the star.
 - **Goalkeeper saves** (and penalty saves) come from the exporter's player file. If the exporter reports none

@@ -960,6 +960,57 @@ do
 end
 
 do
+    -- A player-plus-cash deal: Brighton take Pedro Lima and we sign Cole Swap from them on the same day. The save has no
+    -- record that the two moves belong together, so each one is recorded as its own deal with the right club and day.
+    local MANAGED = 115486
+    local TEAMS = { [MANAGED] = "Torquay AFC", [1808] = "Brighton" }
+    local NAMES = { [73049] = "Pedro Lima", [460129] = "Marc Palomino", [470002] = "Cole Swap" }
+    local db = {
+        career_users = { { clubteamid = MANAGED } },
+        leagueteamlinks = { { teamid = MANAGED }, { teamid = 1808 } },
+        teamplayerlinks = { { teamid = MANAGED, playerid = 73049 }, { teamid = MANAGED, playerid = 460129 }, { teamid = 1808, playerid = 470002 } },
+        playerloans = {},
+        players = { { playerid = 73049, playerjointeamdate = 20270101 }, { playerid = 460129, playerjointeamdate = 20260701 },
+                    { playerid = 470002, playerjointeamdate = 20270701 } },
+        career_playercontract = {
+            { playerid = 73049, teamid = MANAGED, contract_date = 20270101, last_status_change_date = 20270101, signon_bonus = 90000, wage = 9000, contract_status = 0, loan_wage_split = -1 },
+            { playerid = 460129, teamid = MANAGED, contract_date = 20260701, last_status_change_date = 20260701, signon_bonus = 0, wage = 6200, contract_status = 0, loan_wage_split = -1 },
+        },
+        career_youthplayers = {},
+        career_managerhistory = { { teamid = MANAGED, season = 4, bigbuyplayername = "", bigbuyamount = 0, bigsellplayername = "", bigsellamount = 0 } },
+    }
+    local vfs, clock, seen = {}, 1794000000, {}
+    local function session(today)
+        clock = clock + 100
+        return run_capture_session({ db = db, vfs = vfs, clock = function() return clock end, names = NAMES, teams = TEAMS, today = today })
+    end
+    local ok, err, _, restore = session({ year = 2028, month = 8, day = 9 })
+    restore()
+    check(ok, "exchange scenario: first session starts", err)
+    transfer_events(vfs, seen)
+
+    for _, row in ipairs(db.teamplayerlinks) do
+        if row.playerid == 73049 then row.teamid = 1808 elseif row.playerid == 470002 then row.teamid = MANAGED end
+    end
+    for _, row in ipairs(db.players) do
+        if row.playerid == 73049 or row.playerid == 470002 then row.playerjointeamdate = 20280820 end
+    end
+    table.insert(db.career_playercontract, { playerid = 470002, teamid = MANAGED, contract_date = 20280820, last_status_change_date = 20280820, signon_bonus = 60000, wage = 7000, contract_status = 0, loan_wage_split = -1 })
+    ok, err, _, restore = session({ year = 2028, month = 8, day = 21 })
+    restore()
+    check(ok, "exchange scenario: session after the deal starts", err)
+    local P, total = by_player(transfer_events(vfs, seen))
+    check(total == 2, "both halves of the exchange are recorded (the player who arrived and the player who left)", total)
+    local arrived, left = P["Cole Swap"] and P["Cole Swap"][1], P["Pedro Lima"] and P["Pedro Lima"][1]
+    check(arrived and arrived.type == "In (Permanent)" and arrived.fromToClub == "Brighton" and arrived.date == "2028-08-20",
+        "the arrival is a signing from Brighton on the day of the deal", arrived and (arrived.type .. " " .. arrived.fromToClub .. " " .. arrived.date))
+    check(left and left.type == "Out (Permanent)" and left.fromToClub == "Brighton" and left.date == "2028-08-20",
+        "the player who went the other way is a sale to Brighton on the same day", left and (left.type .. " " .. left.fromToClub .. " " .. left.date))
+    check(arrived and arrived.feeUnknown == "true" and left and left.feeUnknown == "true",
+        "the cash part is not stored in the save, so both fees are marked unknown rather than guessed")
+end
+
+do
     -- Hand-written deals (manual_transfers.csv) replace what the script works out for the same player.
     local MANAGED = 115486
     local vfs, clock, seen = {}, 1793000000, {}
@@ -1436,6 +1487,8 @@ do
     local keeper
     for _, r in ipairs(a.rows) do if r.name == "Marc Palomino" then keeper = r end end
     check(keeper and keeper.saves == 4 and keeper.penalty_saves == 1, "the goalkeeper's saves are read", keeper and keeper.saves)
+    check(#a.opp_scorers == 1 and a.opp_scorers[1].name == "Opp Striker" and a.opp_scorers[1].goals == 3,
+        "the other side's scorers are named from the export", a.opp_scorers[1] and a.opp_scorers[1].name)
     local blank
     for _, r in ipairs(a.rows) do if r.id == "463320" then blank = r end end
     check(blank and blank.name == "Name of 463320", "a player the export has no name for is named from the game", blank and blank.name)
@@ -1781,6 +1834,18 @@ do
         check(subs[2] and subs[2].minute == 57 and subs[2].playerOutName == "Jordan Anderson" and subs[2].playerInName == "Harry Dalton",
             "Anderson came off for Dalton at 57'")
         check(g.log():find("Players the export left out were added", 1, true) ~= nil, "the log says which players were added")
+        check(by_name["Marc Palomino"].position == "GK" and by_name["Enrique Iglesias"].position == "ST"
+            and by_name["Fabi\195\161n Bravo"].position == "LCB" and by_name["Oliver Ebner"].position == "RB",
+            "each player carries the position he played, so the app can line the team up", by_name["Enrique Iglesias"].position)
+        check(by_name["Bruno Henrique Gonzaga"].position == nil or by_name["Bruno Henrique Gonzaga"].position == "LDM",
+            "a substitute carries a real position or none")
+        local theirs = {}
+        for _, gd in ipairs(m.goalDetails or {}) do if gd.isOpponent then theirs[#theirs + 1] = gd.playerName end end
+        check(#theirs == 3 and theirs[1] == "Opp Striker" and theirs[2] == "Opp Striker" and theirs[3] == "Opp Striker",
+            "the three goals against are credited to the opposing scorer by name, not to a stand-in", table.concat(theirs, "|"))
+        local ours = {}
+        for _, gd in ipairs(m.goalDetails or {}) do if not gd.isOpponent then ours[#ours + 1] = gd.playerName end end
+        check(#ours == 1 and ours[1] == "Enrique Iglesias", "our goal is credited to our scorer", table.concat(ours, "|"))
         g.close()
     end
 

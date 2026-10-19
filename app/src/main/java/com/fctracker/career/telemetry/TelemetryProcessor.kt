@@ -606,7 +606,8 @@ object TelemetryProcessor {
                     redCard = p.optBoolean("redCard", false),
                     cleanSheet = p.optBoolean("cleanSheet", false),
                     isMotm = p.optBoolean("isMotm", false),
-                    playerName = name.takeIf { it.isNotBlank() }
+                    playerName = name.takeIf { it.isNotBlank() },
+                    position = if (p.has("position") && !p.isNull("position")) p.optString("position").trim().takeIf { it.isNotBlank() } else null
                 )
             )
         }
@@ -629,11 +630,16 @@ object TelemetryProcessor {
                 }?.id ?: assister
             } else null
             val isOpponent = p.optBoolean("isOpponent")
+            // The scripts write "<club> Goal" when they do not know who scored for the other side: that is no name.
+            val unknownScorer = name.isBlank() || (isOpponent && name.endsWith(" Goal"))
             list.add(
                 GoalDetail(
                     scorerId = if (isOpponent) null else scorerId,
                     assisterId = assisterId,
-                    minute = if (p.has("minute")) p.optInt("minute") else null
+                    minute = if (p.has("minute")) p.optInt("minute") else null,
+                    scorerName = if (unknownScorer) null else name,
+                    assisterName = assister.takeIf { it.isNotBlank() },
+                    minuteEstimated = p.optBoolean("minuteEstimated", false)
                 )
             )
         }

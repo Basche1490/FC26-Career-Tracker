@@ -224,6 +224,14 @@ class ImporterTest(unittest.TestCase):
         subs = [(s["minute"], s["playerOutName"], s["playerInName"]) for s in m["substitutions"]]
         self.assertEqual([(45, "Ignacio Zapata", "Bruno Henrique Gonzaga"), (57, "Jordan Anderson", "Harry Dalton")], subs)
         self.assertTrue(all("_pos" not in p for p in m["playerPerformances"]))
+        # the position each player played, so the app can line the team up from striker to goalkeeper
+        self.assertEqual("GK", by_name["Marc Palomino"]["position"])
+        self.assertEqual("ST", by_name["Enrique Iglesias"]["position"])
+        self.assertEqual("LCB", by_name["Fabian Bravo"]["position"])
+        # the three goals against are credited to the scorer the export names
+        theirs = [g["playerName"] for g in m["goalDetails"] if g["isOpponent"]]
+        self.assertEqual(["Opp Striker"] * 3, theirs)
+        self.assertEqual(["Enrique Iglesias"], [g["playerName"] for g in m["goalDetails"] if not g["isOpponent"]])
 
     def test_record_of_another_match_adds_nothing_made_up(self):
         m = self.run_import(stale_record=True)

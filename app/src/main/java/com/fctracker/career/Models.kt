@@ -159,13 +159,23 @@ data class PlayerPerformance(
      * The player's name as the game reported it. The match list shows it for a player who is not (or no longer)
      * in the squad, such as a loan signing. Nullable because matches saved by older versions do not have it.
      */
-    val playerName: String? = null
+    val playerName: String? = null,
+    /** The position he played in this match (ST, CAM, GK ...) when the game said so; the line-up is sorted by it. */
+    val position: String? = null
 )
 
 data class GoalDetail(
     val minute: Int? = null,
     val scorerId: String? = null,
-    val assisterId: String? = null
+    val assisterId: String? = null,
+    /**
+     * Names as the game reported them, so a scorer who is no longer in the squad (or never was, such as a loan
+     * signing or an opposing player) is still shown by name. Nullable because older matches do not have them.
+     */
+    val scorerName: String? = null,
+    val assisterName: String? = null,
+    /** True when [minute] is only a guess (the game's export has no goal minutes): it is not shown as a fact. */
+    val minuteEstimated: Boolean = false
 )
 
 data class Substitution(
@@ -300,6 +310,15 @@ data class TransferLog(
     /** The game does not store most transfer fees: true when the fee is not known (shown as "Fee ?" until edited). */
     val feeUnknown: Boolean = false
 )
+
+/**
+ * True for a player arriving (bought, loaned in, promoted, signed as a free agent), false for one leaving (sold,
+ * loaned out, released, retired). The older check "type contains In" missed "Free Agent Sign".
+ */
+fun TransferLog.isIncomingDeal(): Boolean {
+    val t = type.trim().lowercase()
+    return t.startsWith("in") || t == "bought" || t == "free agent sign" || t.startsWith("promoted") || t == "loaned in"
+}
 
 /** "€26.0M", "Free", or "Fee ?" when the game did not store the fee and nobody has entered it yet. */
 fun TransferLog.feeLabel(currencySymbol: String): String = when {
