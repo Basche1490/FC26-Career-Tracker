@@ -154,7 +154,12 @@ data class PlayerPerformance(
     val yellowCard: Boolean = false,
     val redCard: Boolean = false,
     val cleanSheet: Boolean = false,
-    val isMotm: Boolean = false
+    val isMotm: Boolean = false,
+    /**
+     * The player's name as the game reported it. The match list shows it for a player who is not (or no longer)
+     * in the squad, such as a loan signing. Nullable because matches saved by older versions do not have it.
+     */
+    val playerName: String? = null
 )
 
 data class GoalDetail(
@@ -166,7 +171,10 @@ data class GoalDetail(
 data class Substitution(
     val minute: Int = 0,
     val playerOutId: String,
-    val playerInId: String
+    val playerInId: String,
+    /** Names as the game reported them (see [PlayerPerformance.playerName]). */
+    val playerOutName: String? = null,
+    val playerInName: String? = null
 )
 
 data class MatchResult(
@@ -190,6 +198,10 @@ data class MatchResult(
     val expectedGoalsAgainst: Double = 0.0,
     val leaguePosition: Int = 1,
     val motmName: String = "",
+    /** True when the man of the match played for the other team (his name is in [motmName]). */
+    val motmIsOpponent: Boolean = false,
+    /** True when [possession] is a guess from the pass counts: the game's export has no possession figure. */
+    val possessionEstimated: Boolean = false,
     val playerPerformances: List<PlayerPerformance> = emptyList(),
     val goalDetails: List<GoalDetail> = emptyList(),
     val substitutions: List<Substitution> = emptyList(),

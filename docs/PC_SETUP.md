@@ -113,6 +113,30 @@ When a match finishes, click **Advance** on the post-match summary to return to 
 only writes results and player stats to the career database once you reach the Hub. Back on the Hub the match
 is sent to your phone automatically.
 
+What the match log contains, and where it comes from:
+
+- **Lineup and substitutions.** Everyone who played is listed, including a player who is only on loan with you
+  (he may be missing from the exporter's own file; he is then added from the game's record of the match, with
+  his minutes but without invented stats, so his rating shows as "-" if the game does not give one). Each
+  substitution is listed as "player A off, player B on" with the minute. The pairing is worked out from the
+  minutes played and the positions; if the game's record is not of this match, no substitutions are made up.
+- **Man of the match** is taken from either team. If the best player was on the other side, his name is shown
+  with "(Opponent)" and none of your players gets the star.
+- **Goalkeeper saves** (and penalty saves) come from the exporter's player file. If the exporter reports none
+  although you faced more shots on target than goals, the saves are estimated for your keeper as shots on target
+  minus goals conceded.
+- **League position** is worked out from the real results of the league (points, goal difference, goals scored,
+  up to and including the match day). The "current table position" field in the game's own data is not used:
+  it is not kept up to date during a season. If other clubs' results of the same day are not stored yet, the
+  script waits up to 20 seconds for them.
+- **Possession is an estimate.** The exporter does not store a possession figure. It is estimated from each
+  team's share of the passes and shown as "~NN%" in the app. The ball-win and ball-loss counts in the
+  export are event counts, not a percentage.
+
+If the Live Editor script is not running, the bridge reports the match itself from the same files. It waits 45
+seconds after an export appears before doing so, so that the script's own (richer) report normally arrives first;
+the second report is then recognised as a duplicate and dropped. **Restart the bridge after updating it.**
+
 ## 4. Sending things by hand
 
 Type these in the Live Editor Lua console while `FC26_Auto_Capture.lua` runs:
@@ -127,6 +151,22 @@ FC26_BeamTransfer(name, type, fee, club)   -- send any transfer by hand
 `pc-bridge/Send_Test_Match.bat` and `Send_Test_Transfer.bat` send a fake match or transfer so you can check the
 whole chain without opening the game.
 
+### No flashing command windows
+
+Earlier versions started a small program for every folder check and every message, and Windows showed a black
+window for a second each time. The script now:
+
+- saves every message as a small `.json` file in `Documents\FC26 Export\outbox`. The bridge reads that folder
+  itself and tells the script that it does so by refreshing `bridge_watching.txt` every few seconds. While the
+  heartbeat is fresh, no program is started at all. Only if the bridge is not running does the script fall back to
+  a sender, which is started hidden and sends everything waiting in one go.
+- checks folders from Lua instead of starting `cmd`, and starts the remaining helper programs without a window.
+
+On start the script logs a line such as `Quiet mode - ...` in `auto_capture_monitor.log` and the console. It says
+which of these methods this Live Editor build supports. If it says that hidden start is not available, a window
+can still flash when the exporter creates a new folder; the bridge being open is then what keeps everything else
+quiet.
+
 ## 5. Checking what the game really stores (the probe)
 
 `live-editor-scripts/FC26_Probe.lua` only reads. Run it with a career loaded, wait for "Probe finished" in the
@@ -136,6 +176,14 @@ while it runs; that is expected, because the probe tries several possible column
 
 Use it when transfers, sales or fees do not show up as they should: the report shows the real column names, so
 the capture script can be fixed against the real data instead of guesses.
+
+## Does the transfer sync repeat every time?
+
+Each time `FC26_Auto_Capture.lua` starts it checks this season's transfers, but it only sends deals whose key is
+not yet in `beamed_transfers.txt`. A burst of transfers right after a start therefore only happens once (after an
+update that changes how deals are described, or the first time a new `manual_transfers.csv` line is read). The
+deals are sent again only if `beamed_transfers.txt` or `auto_capture_state.lua` is deleted, or if you run
+`FC26_AutoCapture_SyncTransfers()` yourself.
 
 ## If something does not arrive
 

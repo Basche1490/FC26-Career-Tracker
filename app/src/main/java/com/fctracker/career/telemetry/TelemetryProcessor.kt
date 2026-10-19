@@ -346,7 +346,7 @@ object TelemetryProcessor {
         events.add(LiveEvent(evTitle, message, timestamp))
 
         var estimated = false
-        val parsed = parseMatchPerformances(data.optJSONArray("playerPerformances"), squadIn)
+        val parsed = parseMatchPerformances(data.optJSONArray("playerPerformances"), squadIn, exact = fromAtlas)
         estimated = estimated || parsed.usedDefaults
         val perfList = parsed.performances.toMutableList()
 
@@ -382,12 +382,28 @@ object TelemetryProcessor {
             squadIn.find { it.id == best.playerId }?.displayName ?: best.playerId
         } else ""
 
+        // The man of the match can play for the other team, so our best player is only starred when the payload
+        // named nobody (or named one of ours that the squad list spells differently); an opposing player's name
+        // must never star one of our players.
+        val declaredOpponent = data.optBoolean("motmIsOpponent", false)
+        val namedByPayload = rawMotm != null
+        fun perfName(p: PlayerPerformance): String =
+            squadIn.find { it.id == p.playerId }?.displayName ?: p.playerName ?: p.playerId
+        val starredByPayload = perfList.any { it.isMotm }
+        val anyNameMatch = perfList.any { perfName(it).equals(motm, ignoreCase = true) }
+        val ourMotm = !declaredOpponent && (starredByPayload || anyNameMatch)
         val finalPerf = perfList.map { p ->
-            val name = squadIn.find { it.id == p.playerId }?.displayName ?: p.playerId
-            if (name.equals(motm, ignoreCase = true) || (best?.playerId == p.playerId && motm.isNotBlank())) {
-                p.copy(isMotm = true)
-            } else p
+            val flagged = when {
+                declaredOpponent -> false
+                starredByPayload -> p.isMotm
+                anyNameMatch -> perfName(p).equals(motm, ignoreCase = true)
+                // an export lists everybody who played: a name that is not on the list belongs to the opponent
+                namedByPayload && fromAtlas -> false
+                else -> best?.playerId == p.playerId
+            }
+            p.copy(isMotm = flagged)
         }
+        val motmIsOpponent = motm.isNotBlank() && (declaredOpponent || (fromAtlas && namedByPayload && !ourMotm))
 
         val goals = parseGoalDetails(data.optJSONArray("goalDetails"), squadIn)
         val subs = parseSubstitutions(data.optJSONArray("substitutions"), squadIn)
@@ -428,6 +444,8 @@ object TelemetryProcessor {
                 expectedGoals = xG,
                 expectedGoalsAgainst = xGA,
                 motmName = motm,
+                motmIsOpponent = motmIsOpponent,
+                possessionEstimated = data.optBoolean("possessionEstimated", false),
                 leaguePosition = leaguePos,
                 opponentCrestUrl = crestUrlFor(opponent),
                 playerPerformances = finalPerf,
@@ -507,7 +525,11 @@ object TelemetryProcessor {
 
     class ParsedPerformances(val performances: List<PlayerPerformance>, val usedDefaults: Boolean)
 
-    fun parseMatchPerformances(array: JSONArray?, players: List<Player>): ParsedPerformances {
+    /**
+     * [exact] = the numbers come from the game's own export: a missing or zero figure is a real zero (or unknown)
+     * and is shown as it is. Otherwise gaps are filled with typical values and [ParsedPerformances.usedDefaults] is set.
+     */
+    fun parseMatchPerformances(array: JSONArray?, players: List<Player>, exact: Boolean = false): ParsedPerformances {
         if (array == null) return ParsedPerformances(emptyList(), false)
         val list = mutableListOf<PlayerPerformance>()
         var usedDefaults = false
@@ -533,28 +555,35 @@ object TelemetryProcessor {
                 isGk -> 22 + (i * 2) % 8
                 else -> 26 + (i * 3) % 12
             }
-            if (rawPasses <= 0) usedDefaults = true
-            val passes = if (rawPasses > 0) rawPasses else defaultPasses
+            if (!exact && rawPasses <= 0) usedDefaults = true
+            val passes = if (exact || rawPasses > 0) rawPasses else defaultPasses
 
-            val passAccuracy = if (p.has("passAccuracy") && p.optInt("passAccuracy") > 0) p.optInt("passAccuracy") else {
+            val passAccuracy = if (exact) p.optInt("passAccuracy", 0)
+            else if (p.has("passAccuracy") && p.optInt("passAccuracy") > 0) p.optInt("passAccuracy") else {
                 usedDefaults = true; 85
             }
 
             val defaultShots = if (!isGk && !isDef) 1 + (i % 3) else 0
-            val shots = if (p.has("shots")) p.optInt("shots", 0) else { usedDefaults = true; defaultShots }
+            val shots = if (exact) p.optInt("shots", 0)
+            else if (p.has("shots")) p.optInt("shots", 0) else { usedDefaults = true; defaultShots }
             val shotAccuracy = if (shots > 0) {
-                if (p.has("shotAccuracy") && p.optInt("shotAccuracy") > 0) p.optInt("shotAccuracy") else { usedDefaults = true; 65 }
+                if (exact) p.optInt("shotAccuracy", 0)
+                else if (p.has("shotAccuracy") && p.optInt("shotAccuracy") > 0) p.optInt("shotAccuracy") else { usedDefaults = true; 65 }
             } else 0
 
             val defaultTackles = if (!isGk) 2 + (i % 3) else 0
-            val tackles = if (p.has("tackles")) p.optInt("tackles", 0) else { usedDefaults = true; defaultTackles }
+            val tackles = if (exact) p.optInt("tackles", 0)
+            else if (p.has("tackles")) p.optInt("tackles", 0) else { usedDefaults = true; defaultTackles }
             val tacklePct = if (tackles > 0) {
-                if (p.has("tacklePercentage") && p.optInt("tacklePercentage") > 0) p.optInt("tacklePercentage") else { usedDefaults = true; 75 }
+                if (exact) p.optInt("tacklePercentage", 0)
+                else if (p.has("tacklePercentage") && p.optInt("tacklePercentage") > 0) p.optInt("tacklePercentage") else { usedDefaults = true; 75 }
             } else 0
-            val interceptions = if (p.has("interceptions")) p.optInt("interceptions") else {
+            val interceptions = if (exact) p.optInt("interceptions", 0)
+            else if (p.has("interceptions")) p.optInt("interceptions") else {
                 usedDefaults = true; if (!isGk) 1 + (i % 3) else 0
             }
-            val rating = if (p.has("rating")) p.optDouble("rating", 7.0) else { usedDefaults = true; 7.0 }
+            val rating = if (p.has("rating")) p.optDouble("rating", 7.0)
+            else if (exact) 0.0 else { usedDefaults = true; 7.0 }
 
             list.add(
                 PlayerPerformance(
@@ -576,7 +605,8 @@ object TelemetryProcessor {
                     yellowCard = p.optBoolean("yellowCard", false),
                     redCard = p.optBoolean("redCard", false),
                     cleanSheet = p.optBoolean("cleanSheet", false),
-                    isMotm = p.optBoolean("isMotm", false)
+                    isMotm = p.optBoolean("isMotm", false),
+                    playerName = name.takeIf { it.isNotBlank() }
                 )
             )
         }
@@ -623,7 +653,15 @@ object TelemetryProcessor {
             val inId = players.find {
                 it.displayName.equals(inName, ignoreCase = true) || it.name.equals(inName, ignoreCase = true)
             }?.id ?: s.optString("playerInId", inName)
-            list.add(Substitution(minute = s.optInt("minute", 65), playerOutId = outId, playerInId = inId))
+            list.add(
+                Substitution(
+                    minute = s.optInt("minute", 65),
+                    playerOutId = outId,
+                    playerInId = inId,
+                    playerOutName = outName.takeIf { it.isNotBlank() },
+                    playerInName = inName.takeIf { it.isNotBlank() }
+                )
+            )
         }
         return list
     }

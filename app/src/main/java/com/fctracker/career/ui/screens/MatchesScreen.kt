@@ -379,7 +379,10 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
                     ) {
                         Icon(Icons.Default.Star, contentDescription = "MOTM", tint = Color(0xFFFFD700), modifier = Modifier.size(13.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("MOTM: ${match.motmName}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD700))
+                        Text(
+                            if (match.motmIsOpponent) "MOTM: ${match.motmName} (${match.opponentName})" else "MOTM: ${match.motmName}",
+                            fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD700)
+                        )
                     }
                 } else {
                     Spacer(Modifier.width(1.dp))
@@ -387,7 +390,10 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
 
                 // Match stats chips
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Poss: ${match.possession}%", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        if (match.possessionEstimated) "Poss: ~${match.possession}%" else "Poss: ${match.possession}%",
+                        fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Text("•", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("Shots: ${match.shotsFor}-${match.shotsAgainst}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (match.expectedGoals > 0.0 || match.expectedGoalsAgainst > 0.0) {
@@ -474,7 +480,7 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
                     ) {
                         match.playerPerformances.forEach { perf ->
                             val player = state?.players?.find { it.id == perf.playerId || it.displayName == perf.playerId || it.name == perf.playerId }
-                            val pName = player?.displayName ?: perf.playerId
+                            val pName = player?.displayName ?: perf.playerName?.takeIf { it.isNotBlank() } ?: perf.playerId
                             val pPos = player?.primaryPosition ?: ""
                             val ratingColor = when {
                                 perf.rating >= 8.0 -> Color(0xFF4CAF50)
@@ -498,7 +504,7 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = String.format(Locale.US, "%.1f", perf.rating),
+                                            text = if (perf.rating > 0) String.format(Locale.US, "%.1f", perf.rating) else "–",
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = ratingColor
@@ -546,8 +552,10 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
                             Spacer(Modifier.height(4.dp))
                             Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), thickness = 0.5.dp)
                             match.substitutions.forEach { sub ->
-                                val pOut = state?.players?.find { it.id == sub.playerOutId }?.displayName ?: sub.playerOutId
-                                val pIn = state?.players?.find { it.id == sub.playerInId }?.displayName ?: sub.playerInId
+                                val pOut = state?.players?.find { it.id == sub.playerOutId }?.displayName
+                                    ?: sub.playerOutName?.takeIf { it.isNotBlank() } ?: sub.playerOutId
+                                val pIn = state?.players?.find { it.id == sub.playerInId }?.displayName
+                                    ?: sub.playerInName?.takeIf { it.isNotBlank() } ?: sub.playerInId
                                 Text(
                                     "🔄 ${sub.minute}': 🔺 $pIn for 🔻 $pOut",
                                     fontSize = 10.sp,
@@ -1033,6 +1041,10 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                             expectedGoalsAgainst = xGAgainst.toDoubleOrNull() ?: 0.0,
                             leaguePosition = leaguePosition.toIntOrNull() ?: 1,
                             motmName = motmSearchQuery,
+                            motmIsOpponent = initialMatch != null && initialMatch.motmIsOpponent &&
+                                motmSearchQuery == initialMatch.motmName,
+                            possessionEstimated = initialMatch != null && initialMatch.possessionEstimated &&
+                                possession == initialMatch.possession.toString(),
                             playerPerformances = finalPerformances,
                             // Editing a match must not throw away what the game recorded: scorers and substitutions
                             goalDetails = initialMatch?.goalDetails ?: emptyList(),

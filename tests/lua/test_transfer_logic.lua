@@ -12,13 +12,14 @@ local root = script_path:match("^(.*)[/\\]tests[/\\]lua[/\\][^/\\]*$") or "."
 local scripts = root .. "/live-editor-scripts/"
 
 local failures, checks = 0, 0
+local out_print = print -- the pretend-game sessions below silence print while the script runs
 local function check(cond, label, detail)
     checks = checks + 1
     if cond then
-        print("  ok    " .. label)
+        out_print("  ok    " .. label)
     else
         failures = failures + 1
-        print("  FAIL  " .. label .. (detail and ("\n        " .. tostring(detail)) or ""))
+        out_print("  FAIL  " .. label .. (detail and ("\n        " .. tostring(detail)) or ""))
     end
 end
 
@@ -89,14 +90,24 @@ do
     local block = src:match("%-%- BEGIN find_script[^\n]*\n(.-)%-%- END find_script")
     check(block ~= nil, "find_script block found between the markers")
 
+    local quiet_block = src:match("%-%- BEGIN quiet_exec[^\n]*\n(.-)%-%- END quiet_exec")
+    check(quiet_block ~= nil, "quiet_exec block found between the markers")
+    local popen_calls = 0
+
     local function run_search(files, env, cwd, subdirs_of)
-        local saved_getenv, saved_execute, saved_popen = os.getenv, os.execute, io.popen
+        local saved_getenv, saved_execute, saved_popen, saved_rename = os.getenv, os.execute, io.popen, os.rename
         os.getenv = function(k) return env[k] end
         io.popen = function()
+            popen_calls = popen_calls + 1 -- no program may be started just to find the current folder any more
             return { read = function() return cwd end, close = function() end }
         end
+        -- a folder "exists" when the test says so (renaming a folder to itself is how the script asks)
+        os.rename = function(a, b)
+            if a == b and subdirs_of[a:lower()] then return true end
+            return nil, "No such file or directory", 2
+        end
         os.execute = function(cmd)
-            -- mimic:  cmd /c dir /b /ad "<folder>" > "<file>" 2>nul
+            -- mimic:  cmd /c dir /b /ad "<folder>" > "<file>" 2>nul & echo x> "<done file>"
             local folder, out = cmd:match('dir /b /ad "([^"]*)" > "([^"]*)"')
             if folder then
                 local list = subdirs_of[folder:lower()] or {}
@@ -105,18 +116,20 @@ do
             end
             return true
         end
+        rawset(_G, "FC26_REAL_OS_EXECUTE", nil)
         local prelude = [[
             local SCRIPT_DIR, user_profile, FILES = ...
             local function trim(v) return (tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
             local function win_path(p) return (tostring(p or ""):gsub("/", "\\")) end
             local function file_exists(path) return FILES[path:lower()] == true end
         ]]
-        local fn = assert(load(prelude .. block .. "\nreturn find_script", "find_script"))
+        local fn = assert(load(prelude .. quiet_block .. block .. "\nreturn find_script", "find_script"))
         local lower = {}
         for path in pairs(files) do lower[path:lower()] = true end
         local find = fn("", env.USERPROFILE or "", lower)
         local found, dirs = find("FC26_AutoCapture_v1.1.1.lua")
-        os.getenv, os.execute, io.popen = saved_getenv, saved_execute, saved_popen
+        os.getenv, os.execute, io.popen, os.rename = saved_getenv, saved_execute, saved_popen, saved_rename
+        rawset(_G, "FC26_REAL_OS_EXECUTE", nil)
         return found, dirs
     end
 
@@ -134,14 +147,158 @@ do
     check(found == "C:\\Users\\Joel\\OneDrive\\Desktop\\FC26-LE\\LE 26\\lua\\scripts\\" .. EXE,
         "found when the Desktop lives in OneDrive", tostring(found))
 
-    found = run_search({ ["D:\\Tools\\LE\\lua\\scripts\\" .. EXE] = true }, base_env, "D:\\Tools\\LE", {})
-    check(found == "D:\\Tools\\LE\\lua\\scripts\\" .. EXE, "found through Live Editor's working folder", tostring(found))
+    found = run_search({ ["lua\\scripts\\" .. EXE] = true }, base_env, nil, {})
+    check(found == "lua\\scripts\\" .. EXE, "found through Live Editor's working folder (lua\\scripts)", tostring(found))
+    check(popen_calls == 0, "no program is started to look up the current folder", popen_calls)
 
     found = run_search({ ["C:\\Users\\Joel\\Downloads\\" .. EXE] = true }, base_env, nil, {})
     check(found == "C:\\Users\\Joel\\Downloads\\" .. EXE, "found in Downloads", tostring(found))
 
     local missing, searched = run_search({}, base_env, nil, {})
     check(missing == nil and #searched > 5, "returns nil and the searched folders when it is nowhere", tostring(missing))
+end
+
+
+-- ---------------------------------------------------------------------------------------------------------
+print("2c. quiet folder handling and the Atlas export lookup")
+do
+    local src = read_file(scripts .. "FC26_Auto_Capture.lua")
+    local quiet_block = src:match("%-%- BEGIN quiet_exec[^\n]*\n(.-)%-%- END quiet_exec")
+    local atlas_block = src:match("%-%- BEGIN atlas_lookup[^\n]*\n(.-)%-%- END atlas_lookup")
+    check(atlas_block ~= nil, "atlas_lookup block found between the markers")
+
+    -- the exact commands the Atlas exporter builds (taken from its source) are answered without starting anything
+    local exporter = read_file(scripts .. "FC26_AutoCapture_v1.1.1.lua")
+    check(exporter:find([[os.execute('if not exist "' .. path .. '" mkdir "' .. path .. '"')]], 1, true) ~= nil
+        and exporter:find([[os.execute('cmd.exe /C if not exist "' .. path .. '" mkdir "' .. path .. '"')]], 1, true) ~= nil,
+        "the exporter still builds the mkdir commands this script answers")
+
+    local function with_quiet(setup)
+        local saved = { execute = os.execute, rename = os.rename, getenv = os.getenv, open = io.open, remove = os.remove }
+        local real_calls, dirs, files = {}, {}, {}
+        os.execute = function(cmd)
+            real_calls[#real_calls + 1] = cmd
+            local made = cmd:match('mkdir "([^"]+)"')
+            if made then dirs[(made:gsub("\\", "/"))] = true end
+            return true
+        end
+        os.rename = function(a, b)
+            if a == b and dirs[(a:gsub("\\", "/"))] then return true end
+            return nil, "No such file or directory", 2
+        end
+        os.getenv = function(k) if k == "TEMP" then return "/tmp" end return saved.getenv(k) end
+        rawset(_G, "FC26_REAL_OS_EXECUTE", nil)
+        local prelude = [[
+            local FILES = ...
+            local function trim(v) return (tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+            local function win_path(p) return (tostring(p or ""):gsub("/", "\\")) end
+            local function file_exists(path) return FILES[path] == true end
+        ]]
+        local env = assert(load(prelude .. quiet_block .. "\nreturn QUIET", "quiet"))(files)
+        local shimmed = os.execute
+        local result = setup(env, shimmed, real_calls, dirs, files)
+        os.execute, os.rename, os.getenv, os.remove = saved.execute, saved.rename, saved.getenv, saved.remove
+        rawset(_G, "FC26_REAL_OS_EXECUTE", nil)
+        _G.shellExecute, _G.getDirectoryList, _G.getFileList, _G.sleep = nil, nil, nil, nil
+        return result
+    end
+
+    with_quiet(function(Q, execute, real_calls, dirs)
+        dirs["C:/Users/Joel/Documents/FC26 Export"] = true
+        local base = [[C:\Users\Joel\Documents\FC26 Export]]
+        local ok, how, code = execute('if not exist "' .. base .. '" mkdir "' .. base .. '"')
+        check(ok == true and how == "exit" and code == 0 and #real_calls == 0,
+            "the exporter's 'if not exist ... mkdir' for an existing folder starts nothing")
+        ok = execute('cmd.exe /C if not exist "' .. base .. '" mkdir "' .. base .. '"')
+        check(ok == true and #real_calls == 0, "the 'cmd.exe /C ...' form is answered the same way")
+        local fresh = base .. [[\MatchStats\incoming\FC26_MatchStats_pmc_1.partial]]
+        ok = execute('if not exist "' .. fresh .. '" mkdir "' .. fresh .. '"')
+        check(ok == true and #real_calls == 1 and Q.windows == 1, "a folder that really is missing is created (one window without shellExecute)", #real_calls)
+        ok = execute('if not exist "' .. fresh .. '" mkdir "' .. fresh .. '"')
+        check(#real_calls == 1, "asking again for the same folder starts nothing")
+        execute('move /Y "a" "b" >NUL')
+        check(real_calls[#real_calls] == 'move /Y "a" "b" >NUL', "any other command is passed on unchanged")
+    end)
+
+    with_quiet(function(Q, execute, real_calls, dirs, files)
+        local created = {}
+        _G.shellExecute = function(program, params, folder, show)
+            created[#created + 1] = { program = program, params = params, show = show }
+            local made = params:match('mkdir "([^"]+)"')
+            if made then dirs[(made:gsub("\\", "/"))] = true end
+        end
+        local fresh = [[C:\Users\Joel\Documents\FC26 Export\Snapshots\incoming\x.partial]]
+        local ok = execute('if not exist "' .. fresh .. '" mkdir "' .. fresh .. '"')
+        check(ok == true and #real_calls == 0 and #created == 1 and created[1].show == 0 and Q.windows == 0,
+            "with shellExecute a missing folder is created hidden (no window)", #real_calls .. "/" .. #created)
+    end)
+
+    with_quiet(function(Q)
+        local calls = {}
+        _G.getDirectoryList = function(path) calls[#calls + 1] = path return { "FC26_MatchStats_pmc_20261016_100000_a", "FC26_MatchStats_pmc_20261017_090000_b", "." } end
+        Q.dir_api = true
+        local names = Q.list_dirs([[C:\x]], true)
+        check(false == (names == nil), "directory listing through Live Editor's function works")
+    end)
+
+    -- Atlas lookup: the exporter reports the folder it just published
+    local function atlas_env(files, listing, start_stamp)
+        local calls = { listing = 0 }
+        local env = assert(load([[
+            local MATCH_STATS_ROOT, FILES, LISTING, STAMP, CALLS, WIN = ...
+            local QUIET = { list_dirs = function() CALLS.listing = CALLS.listing + 1 return LISTING end }
+            local function file_exists(p) return FILES[p] == true end
+            local function os_date() return STAMP end
+            local os = setmetatable({ date = os_date }, { __index = _G.os })
+            ]] .. atlas_block .. [[
+            return { find = find_atlas_folder, last = last_export_folder, used = _G["FC26_ATLAS_USED"] }
+        ]], "atlas"))("C:/FC26 Export/MatchStats", files, listing, start_stamp, calls)
+        return env, calls
+    end
+    local function ready_files(path)
+        return { [path .. "/MATCH_READY"] = true, [path .. "/16_match_participants_wide.csv"] = true, [path .. "/18_match_teams_wide.csv"] = true }
+    end
+    _G["FC26_ATLAS_USED"] = nil
+    local R = "C:/FC26 Export/MatchStats/ready"
+    local files = ready_files(R .. "/FC26_MatchStats_pmc_20261019_140000_c")
+    local env, calls = atlas_env(files, {}, "20261019_135000")
+    rawset(_G, "FC26_EXPORT_MATCH_STATS_LAST_EXPORT_RESULT", nil)
+    check(env.find(false, 0) == nil and calls.listing == 0, "before the exporter reported anything and before the wait: no lookup")
+    rawset(_G, "FC26_EXPORT_MATCH_STATS_LAST_EXPORT_RESULT", { success = true, ready_dir = [[C:\FC26 Export\MatchStats\ready\FC26_MatchStats_pmc_20261019_140000_c]] })
+    local name, path = env.find(false, 0)
+    check(name == "FC26_MatchStats_pmc_20261019_140000_c" and path == R .. "/FC26_MatchStats_pmc_20261019_140000_c" and calls.listing == 0,
+        "the folder the exporter reported is used with no folder lookup", tostring(name))
+    env.used[name] = true
+    check(env.find(false, 5) == nil and calls.listing == 0, "once used it is not offered again, and nothing is listed too early")
+    check(env.find(true, 0) == name, "the manual 'sync latest' accepts it again")
+    rawset(_G, "FC26_EXPORT_MATCH_STATS_LAST_EXPORT_RESULT", { success = false, ready_dir = "x" })
+    check(env.last() == nil, "a failed export report is ignored")
+    rawset(_G, "FC26_EXPORT_MATCH_STATS_LAST_EXPORT_RESULT", nil)
+
+    -- the exporter reports nothing: look at the folder after a while, ignore folders older than this script, wait for a half-written one
+    local files2 = ready_files(R .. "/FC26_MatchStats_pmc_20261019_141500_new")
+    local listing = { "FC26_MatchStats_pmc_20261019_141500_new", "FC26_MatchStats_pmc_20261019_100000_old" }
+    env, calls = atlas_env(files2, listing, "20261019_120000")
+    _G["FC26_ATLAS_USED"] = env.used
+    local n = env.find(false, 6)
+    check(n == nil and calls.listing == 0, "the folder itself is only looked at after 12 s", calls.listing)
+    n = env.find(false, 13)
+    check(n == "FC26_MatchStats_pmc_20261019_141500_new" and calls.listing == 1, "then the newest finished export is found", tostring(n))
+    env.used[n] = true
+    n = env.find(false, 14)
+    check(n == nil and calls.listing == 1, "listing is repeated at most every 8 s", calls.listing)
+    check(env.used["FC26_MatchStats_pmc_20261019_100000_old"] == nil, "(old folder not touched yet)")
+    local nowt = os.time
+    os.time = function() return nowt() + 30 end
+    n = env.find(false, 40)
+    os.time = nowt
+    check(n == nil and env.used["FC26_MatchStats_pmc_20261019_100000_old"] == true, "a folder made before the script started is treated as an earlier match's")
+
+    local half = {} -- newest folder has no MATCH_READY yet
+    env, calls = atlas_env(half, { "FC26_MatchStats_pmc_20261019_150000_half", "FC26_MatchStats_pmc_20261019_141500_new" }, "20261019_120000")
+    local nm, _, names = env.find(false, 20)
+    check(nm == nil and names and #names == 2, "a half-written newest export is waited for, an older one is not used instead")
+    _G["FC26_ATLAS_USED"] = nil
 end
 
 -- ---------------------------------------------------------------------------------------------------------
@@ -459,7 +616,7 @@ local function run_capture_session(spec)
     local vfs = spec.vfs
     local home = "/home/test"
     local real = { open = io.open, popen = io.popen, execute = os.execute, getenv = os.getenv, time = os.time,
-                   remove = os.remove, dofile = dofile, print = print }
+                   remove = os.remove, dofile = dofile, print = print, rename = os.rename }
 
     local function reader(content)
         local pos, obj = 1, {}
@@ -477,12 +634,31 @@ local function run_capture_session(spec)
                 return (line:gsub("\r$", ""))
             end
         end
+        function obj:seek(whence) if whence == "end" then return #content end return pos - 1 end
         function obj:close() end
         return obj
+    end
+    -- A folder "exists" when the test created it (spec.dirs, filled by the mkdir commands below) or holds a file.
+    local dirs = spec.dirs or {}
+    spec.dirs = dirs
+    local function mark_dir(path)
+        path = path:gsub("\\", "/")
+        while path ~= "" and path ~= "/" do
+            dirs[path] = true
+            path = path:match("^(.*)/[^/]*$") or ""
+        end
+    end
+    spec.mark_dir = mark_dir
+    local function dir_known(dir)
+        if dirs[dir] then return true end
+        local prefix = dir .. "/"
+        for p in pairs(vfs) do if p:sub(1, #prefix) == prefix then return true end end
+        return false
     end
     io.open = function(path, mode)
         mode = mode or "r"
         local m = mode:sub(1, 1)
+        if path:sub(-12) == "/.fc26_probe" and not dir_known(path:sub(1, -13)) then return nil end -- no such folder
         if m == "r" then
             if vfs[path] == nil then return nil end
             return reader(vfs[path])
@@ -491,11 +667,24 @@ local function run_capture_session(spec)
         if m == "a" and vfs[path] == nil then vfs[path] = "" end
         local w = {}
         function w:write(...) for _, part in ipairs({ ... }) do vfs[path] = vfs[path] .. tostring(part) end return w end
+        function w:seek() return #vfs[path] end
         function w:close() end
         return w
     end
     io.popen = function() return { read = function() return "" end, close = function() end } end
-    os.execute = function() return true end
+    os.execute = function(cmd)
+        if spec.executed then spec.executed[#spec.executed + 1] = cmd end -- what would have opened a command window
+        local made = cmd:match('mkdir "([^"]+)"')
+        if made then mark_dir(made) end
+        return true
+    end
+    os.rename = function(a, b)
+        if a ~= b and vfs[a] ~= nil then vfs[b] = vfs[a] vfs[a] = nil return true end
+        if a == b and vfs[a] ~= nil then return true end
+        return nil, "No such file or directory", 2
+    end
+    rawset(_G, "FC26_REAL_OS_EXECUTE", nil)
+    _G.shellExecute = spec.shell
     os.remove = function(path) vfs[path] = nil return true end
     os.time = function() return spec.clock() end
     os.getenv = function(k)
@@ -516,7 +705,8 @@ local function run_capture_session(spec)
         function t:GetRecordFieldValue(rec, field) local row = self.rows[rec] return row and row[field] end
         return t
     end
-    package.preload["imports/core/memory"] = function() return {} end
+    package.loaded["imports/core/memory"] = nil
+    package.preload["imports/core/memory"] = function() return spec.memory or {} end
     package.preload["imports/other/helpers"] = function() return {} end
     package.preload["imports/services/enums"] = function() return {} end
     package.preload["imports/career_mode/helpers"] = function() return {} end
@@ -536,6 +726,8 @@ local function run_capture_session(spec)
     _G.GetPlayerName = function(pid) return spec.names[pid] end
     _G.GetTeamName = function(tid) return spec.teams[tid] end
     _G.GetUserTeamID = function() return 115486 end
+    _G.GetCompetitionNameByObjID = function(id) return spec.comps and spec.comps[id] or nil end
+    _G.GetPlayerPrimaryPositionName = function(id) return spec.positions and spec.positions[id] or nil end
     _G.GetCurrentDate = function() return spec.today end
     _G.createTimer = nil
     local handler = nil
@@ -550,8 +742,12 @@ local function run_capture_session(spec)
     local function restore()
         io.open, io.popen, os.execute, os.getenv, os.time, os.remove = real.open, real.popen, real.execute, real.getenv,
             real.time, real.remove
+        os.rename = real.rename
+        rawset(_G, "FC26_REAL_OS_EXECUTE", nil)
+        _G.shellExecute = nil
         _G.dofile, _G.print = real.dofile, real.print
         _G.AddEventHandler = nil
+        _G.GetCompetitionNameByObjID, _G.GetPlayerPrimaryPositionName = nil, nil
     end
     return ok, err, handler, restore
 end
@@ -802,6 +998,832 @@ do
     check(P["Jordan Anderson"] and P["Jordan Anderson"][1].type == "Promoted In", "other players still come from the save")
     local log = vfs["/home/test/Documents/FC26 Export/auto_capture_monitor.log"] or ""
     check(log:find("line not understood", 1, true) ~= nil, "a broken line is reported in the monitor log")
+end
+
+-- ---------------------------------------------------------------------------------------------------------
+print("6. payloads go out without command windows")
+do
+    local src = read_file(scripts .. "FC26_Auto_Capture.lua")
+    local bat_block = src:match("%-%- BEGIN sender_bat[^\n]*\n(.-)%-%- END sender_bat")
+    check(bat_block ~= nil, "sender_bat block found between the markers")
+    local bat = assert(load(bat_block .. "\nreturn SENDER_BAT", "sender_bat"))()
+    check(bat:find("dir /b /o:n", 1, true) and bat:find("for /f", 1, true), "the sender loops over every file in the outbox")
+    check(bat:find("exit /b 1", 1, true) and bat:find("if errorlevel 1 goto :done", 1, true),
+        "the sender stops after the first failure (bridge down) instead of trying every file")
+    check(bat:find("%LOCK%", 1, true) and bat:find("del \"%LOCK%\"", 1, true), "the sender holds a lock while it runs")
+    check(select(2, bat:gsub("@@OUTBOX@@", "")) == 1 and bat:find("@@JSON@@", 1, true) == nil, "one outbox placeholder, no per-file placeholder")
+
+    local MANAGED = 115486
+    local ROOT = "/home/test/Documents/FC26 Export"
+    local function small_db()
+        return {
+            career_users = { { clubteamid = MANAGED } },
+            leagueteamlinks = { { teamid = MANAGED }, { teamid = 236 } },
+            teamplayerlinks = { { teamid = MANAGED, playerid = 463320 }, { teamid = MANAGED, playerid = 462884 },
+                                { teamid = MANAGED, playerid = 460045 } },
+            playerloans = {},
+            players = { { playerid = 463320, playerjointeamdate = 20280709 }, { playerid = 462884, playerjointeamdate = 20280714 },
+                        { playerid = 460045, playerjointeamdate = 20280701 } },
+            career_playercontract = {
+                { playerid = 463320, teamid = MANAGED, contract_date = 20280709, last_status_change_date = 20280709, signon_bonus = 135000, wage = 15000, contract_status = 0, loan_wage_split = -1 },
+                { playerid = 462884, teamid = MANAGED, contract_date = 20280714, last_status_change_date = 20280714, signon_bonus = 155000, wage = 17000, contract_status = 0, loan_wage_split = -1 },
+                { playerid = 460045, teamid = MANAGED, contract_date = 20280701, last_status_change_date = 20280701, signon_bonus = 0, wage = 5200, contract_status = 0, loan_wage_split = -1 },
+            },
+            career_youthplayers = {},
+            career_managerhistory = {},
+        }
+    end
+    local NAMES = { [463320] = "Leo Guerra", [462884] = "Oliver Ebner", [460045] = "Jordan Anderson" }
+    local TEAMS = { [MANAGED] = "Torquay AFC", [236] = "FC Porto" }
+
+    local function outbox_files(vfs)
+        local list = {}
+        for path in pairs(vfs) do
+            if path:find("/outbox/", 1, true) and path:sub(-5) == ".json" then list[#list + 1] = path end
+        end
+        table.sort(list)
+        return list
+    end
+    local function count(list, needle)
+        local n = 0
+        for _, c in ipairs(list) do if c:find(needle, 1, true) then n = n + 1 end end
+        return n
+    end
+    local function existing_dirs()
+        return { [ROOT] = true, [ROOT .. "/outbox"] = true, [ROOT .. "/Snapshots"] = true, [ROOT .. "/MatchStats"] = true,
+                 ["/home/test/tmp"] = true }
+    end
+    local function start(spec_extra, vfs, clock_ref)
+        local spec = { db = small_db(), vfs = vfs, clock = function() return clock_ref.t end, names = NAMES, teams = TEAMS,
+                       today = { year = 2028, month = 8, day = 9 }, dirs = existing_dirs() }
+        for k, v in pairs(spec_extra or {}) do spec[k] = v end
+        return run_capture_session(spec)
+    end
+    local function tick(handler, clock_ref, seconds)
+        clock_ref.t = clock_ref.t + seconds
+        handler(nil, 1, nil)
+    end
+
+    -- first start ever on a PC: the folders are created (one command each); later starts create nothing
+    do
+        local vfs, executed, clk = {}, {}, { t = 1793900000 }
+        local ok, err, _, restore = start({ executed = executed, dirs = {} }, vfs, clk)
+        restore()
+        check(ok, "first start on a new PC works", err)
+        check(count(executed, "mkdir") >= 3 and count(executed, "mkdir") <= 5, "missing folders are created once", count(executed, "mkdir"))
+        local again = {}
+        ok, err, _, restore = start({ executed = again, dirs = existing_dirs() }, {}, { t = 1793900100 })
+        restore()
+        check(count(again, "mkdir") == 0, "folders that exist are not created again", table.concat(again, " | "))
+    end
+
+    -- a) the bridge does not read the folder itself (older bridge): ONE sender for the whole burst
+    do
+        local vfs, executed, clk = {}, {}, { t = 1794000000 }
+        local ok, err, handler, restore = start({ executed = executed }, vfs, clk)
+        check(ok and type(handler) == "function", "script starts (older bridge)", err)
+        local files = outbox_files(vfs)
+        check(#files == 3, "three payloads are waiting in the outbox", #files)
+        local sorted_ok = true
+        for i = 2, #files do if files[i] <= files[i - 1] then sorted_ok = false end end
+        check(sorted_ok and files[1]:match("/(%d+_%d+)%.json$") ~= nil, "payload file names are unique and in order", files[1])
+        for _, p in ipairs(files) do check(vfs[p]:sub(1, 1) == "{", "outbox file is a complete JSON object: " .. p:match("[^/]+$")) end
+        for path in pairs(vfs) do check(path:sub(-4) ~= ".tmp", "no half-written .tmp file is left behind") end
+        check(count(executed, "start /min") == 0, "nothing is started while the burst is still being collected")
+        tick(handler, clk, 1)
+        check(count(executed, "start /min") == 0, "still collecting after 1 s")
+        tick(handler, clk, 2)
+        check(count(executed, "start /min") == 1, "one sender starts for all three payloads", count(executed, "start /min"))
+        local bat_text
+        for path, content in pairs(vfs) do if path:find("fc26_send_", 1, true) and path:sub(-4) == ".bat" then bat_text = content end end
+        check(bat_text and bat_text:find("\\outbox", 1, true) and not bat_text:find("@@", 1, true), "the sender batch file points at the outbox folder")
+        tick(handler, clk, 10)
+        check(count(executed, "start /min") == 1, "no second sender while the first one's files are still being retried (30 s)")
+        tick(handler, clk, 25)
+        check(count(executed, "start /min") == 2, "undelivered files are retried after 30 s with one more sender", count(executed, "start /min"))
+        -- the bridge answers: the sender deletes the files
+        for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end
+        tick(handler, clk, 40)
+        tick(handler, clk, 40)
+        check(count(executed, "start /min") == 2, "nothing more is started once everything is delivered")
+        restore()
+    end
+
+    -- b) the bridge reads the folder itself: no program at all unless a file stays unread
+    do
+        local vfs, executed, clk = {}, {}, { t = 1794100000 }
+        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t)
+        local ok, err, handler, restore = start({ executed = executed }, vfs, clk)
+        check(ok, "script starts (bridge reads the folder)", err)
+        check(#outbox_files(vfs) == 3, "payloads are saved in the outbox")
+        check(#executed == 0, "no program is started at all at startup (no folder listing, no mkdir, no sender)", table.concat(executed, " | "))
+        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 4)
+        tick(handler, clk, 5)
+        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t)
+        tick(handler, clk, 5)
+        check(count(executed, "start /min") == 0, "the bridge gets time to read the files first")
+        for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end -- the bridge read and deleted them
+        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 20)
+        tick(handler, clk, 20)
+        tick(handler, clk, 20)
+        check(#executed == 0, "the bridge read everything: nothing was ever started", table.concat(executed, " | "))
+        restore()
+    end
+
+    -- c) the bridge says it reads the folder but a file is still there after the grace period: the sender takes over
+    do
+        local vfs, executed, clk = {}, {}, { t = 1794200000 }
+        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t)
+        local ok, err, handler, restore = start({ executed = executed }, vfs, clk)
+        check(ok, "script starts (bridge claims to read the folder)", err)
+        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 15)
+        tick(handler, clk, 15)
+        check(count(executed, "start /min") == 0, "no sender within the grace period")
+        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 10)
+        tick(handler, clk, 10)
+        check(count(executed, "start /min") == 1, "a file still waiting after 20 s is sent by the sender", count(executed, "start /min"))
+        restore()
+    end
+
+    -- d) Live Editor can start programs hidden (shellExecute): no window, and a sender that leaves no trace is replaced
+    do
+        local vfs, executed, clk = {}, {}, { t = 1794300000 }
+        local calls, sender_writes_log = {}, true
+        local function shell(program, params, folder, show)
+            calls[#calls + 1] = { program = program, params = params, folder = folder, show = show }
+            local echo_path = params:match('echo ok> "([^"]+)"')
+            if echo_path then vfs[(echo_path:gsub("\\", "/"))] = "ok" end
+            local list_out = params:match('> "([^"]+)" 2>nul')
+            if list_out then vfs[(list_out:gsub("\\", "/"))] = "" end -- an empty folder listing
+            local done = params:match('echo x> "([^"]+)"')
+            if done then vfs[(done:gsub("\\", "/"))] = "x" end
+            if params:find("fc26_send_", 1, true) and sender_writes_log then
+                vfs[ROOT .. "/bridge_send_log.txt"] = (vfs[ROOT .. "/bridge_send_log.txt"] or "") .. "x [sender] started\n"
+            end
+        end
+        local ok, err, handler, restore = start({ executed = executed, shell = shell }, vfs, clk)
+        check(ok, "script starts with shellExecute available", err)
+        local log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
+        check(log:find("hidden program start: yes", 1, true) ~= nil, "the log says hidden start works", log:match("Quiet mode[^\n]*"))
+        tick(handler, clk, 3)
+        local sender_calls = 0
+        for _, c in ipairs(calls) do if c.params:find("fc26_send_", 1, true) then sender_calls = sender_calls + 1 check(c.show == 0, "the sender is started hidden (SW_HIDE = 0)", c.show) end end
+        check(sender_calls == 1, "one hidden sender for the burst", sender_calls)
+        check(count(executed, "start /min") == 0 and count(executed, "cmd /c") == 0, "no visible window was needed", table.concat(executed, " | "))
+        tick(handler, clk, 20)
+        log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
+        check(log:find("left no trace", 1, true) == nil, "a hidden sender that wrote its log line is trusted")
+        restore()
+
+        vfs, executed, clk = {}, {}, { t = 1794400000 }
+        calls, sender_writes_log = {}, false
+        ok, err, handler, restore = start({ executed = executed, shell = shell }, vfs, clk)
+        check(ok, "script starts (hidden sender that does nothing)", err)
+        tick(handler, clk, 3)
+        check(count(executed, "start /min") == 0, "first attempt is hidden")
+        tick(handler, clk, 16)
+        log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
+        check(log:find("left no trace", 1, true) ~= nil, "a hidden sender that left no trace is noticed")
+        tick(handler, clk, 20)
+        check(count(executed, "start /min") == 1, "the visible sender takes over so nothing is left undelivered", count(executed, "start /min"))
+        restore()
+    end
+
+    -- e) shellExecute exists but does nothing: it is not used at all
+    do
+        local vfs, executed, clk = {}, {}, { t = 1794500000 }
+        local ok, err, handler, restore = start({ executed = executed, shell = function() end }, vfs, clk)
+        check(ok, "script starts with a shellExecute that does nothing", err)
+        local log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
+        check(log:find("hidden program start: no", 1, true) ~= nil, "the log says hidden start does not work here")
+        tick(handler, clk, 3)
+        check(count(executed, "start /min") == 1, "the visible sender is used", count(executed, "start /min"))
+        restore()
+    end
+end
+
+
+-- ---------------------------------------------------------------------------------------------------------
+-- A small JSON reader so the tests can look inside the payloads the script sends.
+local JSON_NULL = setmetatable({}, { __tostring = function() return "null" end })
+local function json_decode(text)
+    local pos = 1
+    local function skip() pos = text:find("%S", pos) or (#text + 1) end
+    local value
+    local function str()
+        local out = {}
+        pos = pos + 1
+        while true do
+            local c = text:sub(pos, pos)
+            if c == "" then error("unterminated string") end
+            if c == '"' then pos = pos + 1 break end
+            if c == "\\" then
+                local n = text:sub(pos + 1, pos + 1)
+                local map = { n = "\n", t = "\t", r = "\r", ['"'] = '"', ["\\"] = "\\", ["/"] = "/", b = "\b", f = "\f" }
+                if n == "u" then
+                    out[#out + 1] = utf8.char(tonumber(text:sub(pos + 2, pos + 5), 16))
+                    pos = pos + 6
+                else
+                    out[#out + 1] = map[n] or error("bad escape \\" .. n)
+                    pos = pos + 2
+                end
+            else
+                out[#out + 1] = c
+                pos = pos + 1
+            end
+        end
+        return table.concat(out)
+    end
+    function value()
+        skip()
+        local c = text:sub(pos, pos)
+        if c == "{" then
+            local obj = {}
+            pos = pos + 1
+            skip()
+            if text:sub(pos, pos) == "}" then pos = pos + 1 return obj end
+            while true do
+                skip()
+                local k = str()
+                skip()
+                assert(text:sub(pos, pos) == ":", "colon expected at " .. pos)
+                pos = pos + 1
+                obj[k] = value()
+                skip()
+                local d = text:sub(pos, pos)
+                pos = pos + 1
+                if d == "}" then return obj end
+                assert(d == ",", "comma expected at " .. pos .. " near " .. text:sub(pos - 20, pos + 20))
+            end
+        elseif c == "[" then
+            local arr = {}
+            pos = pos + 1
+            skip()
+            if text:sub(pos, pos) == "]" then pos = pos + 1 return arr end
+            while true do
+                arr[#arr + 1] = value()
+                skip()
+                local d = text:sub(pos, pos)
+                pos = pos + 1
+                if d == "]" then return arr end
+                assert(d == ",", "comma expected in array at " .. pos)
+            end
+        elseif c == '"' then
+            return str()
+        elseif text:sub(pos, pos + 3) == "true" then pos = pos + 4 return true
+        elseif text:sub(pos, pos + 4) == "false" then pos = pos + 5 return false
+        elseif text:sub(pos, pos + 3) == "null" then pos = pos + 4 return JSON_NULL
+        end
+        local num = text:match("^-?%d+%.?%d*[eE]?[+-]?%d*", pos)
+        assert(num and num ~= "", "unexpected character at " .. pos .. ": " .. text:sub(pos, pos + 10))
+        pos = pos + #num
+        return tonumber(num)
+    end
+    local result = value()
+    skip()
+    assert(pos > #text, "extra text after the JSON value")
+    return result
+end
+
+-- ---------------------------------------------------------------------------------------------------------
+print("7. match log: substitutions, players the export missed, saves, man of the match, table position")
+local match_env
+do
+    local src = read_file(scripts .. "FC26_Auto_Capture.lua")
+    local function grab(name)
+        local fn = src:match("(local function " .. name .. "%(.-\nend\n)")
+        assert(fn, "cannot find " .. name)
+        return fn
+    end
+    local logic = src:match("%-%- BEGIN match_logic[^\n]*\n(.-)%-%- END match_logic")
+    local league = src:match("%-%- BEGIN league_table[^\n]*\n(.-)%-%- END league_table")
+    check(logic ~= nil and league ~= nil, "match_logic and league_table blocks found between the markers")
+    match_env = assert(load(
+        grab("jstr") .. grab("to_int") .. grab("to_num") .. grab("percent_value") .. grab("truthy_flag") ..
+        logic .. league .. [[
+        return { pair = pair_substitutions, lineup_matches = lineup_matches_export, analyse = analyse_atlas_export,
+                 apply = apply_lineup, saves = estimate_keeper_saves, perf = format_performance,
+                 sub = format_substitution, table = build_league_table, comp = pick_league_comp } ]], "match_logic"))()
+end
+local M7 = match_env
+do
+    local src = read_file(scripts .. "FC26_Auto_Capture.lua")
+    local fn = src:match("(local function is_league_competition%(.-\nend\n)")
+    local is_league = assert(load(fn .. "\nreturn is_league_competition", "is_league"))()
+    check(is_league("EFL Championship"), "the EFL Championship counts as a league (it used to be taken for the Champions League)")
+    check(is_league("Premier League") and is_league("Serie A") and is_league("LALIGA EA SPORTS"), "other leagues count as leagues")
+    check(not is_league("FA Cup") and not is_league("Carabao Cup") and not is_league("UEFA Champions League"), "cups and the Champions League do not")
+    check(not is_league("UEFA Europa League") and not is_league("EFL Championship Play-offs"), "nor do the Europa League or the play-offs")
+end
+
+-- the real record of Torquay's last match (from the save snapshot): three substitutes, 92 minutes long
+local function torquay_record()
+    return {
+        { id = 462221, minutes = 0,  pos = 3,  sub = false },   -- unused substitute
+        { id = 461360, minutes = 47, pos = 11, sub = true },    -- Bradshaw
+        { id = 460045, minutes = 47, pos = 18, sub = true },    -- Anderson
+        { id = 78859,  minutes = 35, pos = 23, sub = true },    -- Arturo
+        { id = 259627, minutes = 90, pos = 27, sub = false },
+        { id = 460106, minutes = 90, pos = 25, sub = false },
+        { id = 460055, minutes = 57, pos = 23, sub = false },   -- Takeuchi, replaced by Arturo
+        { id = 275436, minutes = 45, pos = 18, sub = false },   -- Darvich, replaced by Anderson
+        { id = 460023, minutes = 45, pos = 11, sub = false },   -- Akua, replaced by Bradshaw
+        { id = 461436, minutes = 90, pos = 9,  sub = false },
+        { id = 461438, minutes = 90, pos = 7,  sub = false },
+        { id = 73616,  minutes = 90, pos = 6,  sub = false },
+        { id = 462884, minutes = 90, pos = 4,  sub = false },
+        { id = 460038, minutes = 90, pos = 3,  sub = false },
+        { id = 460129, minutes = 90, pos = 0,  sub = false },
+    }
+end
+do
+    local pairs_out, marks, length = M7.pair(torquay_record())
+    local text = {}
+    for _, p in ipairs(pairs_out) do text[#text + 1] = p.minute .. ":" .. p.out.id .. ">" .. p["in"].id end
+    check(#pairs_out == 3, "all three substitutions of the real match are found", table.concat(text, " "))
+    check(table.concat(text, " ") == "45:275436>460045 45:460023>461360 57:460055>78859",
+        "each substitute is matched to the player he replaced (same position, same minute)", table.concat(text, " "))
+    check(length == 92, "the match length (stoppage time included) is worked out", length)
+    check(marks[78859] and marks[78859].in_minute == 57, "the substitute came on when the other player went off")
+    check(marks[460055] and marks[460055].out_minute == 57, "the replaced player left at that minute")
+    check(marks[259627] == nil, "a player who stayed on all game has no minute marks")
+    check(marks[462221] == nil, "an unused substitute has no minute marks")
+
+    -- two substitutes at the same minute: the position tells them apart
+    local two = {
+        { id = 1, minutes = 90, pos = 0 },  { id = 2, minutes = 45, pos = 11 }, { id = 3, minutes = 45, pos = 18 },
+        { id = 4, minutes = 90, pos = 3 },  { id = 5, minutes = 90, pos = 4 },  { id = 6, minutes = 90, pos = 6 },
+        { id = 7, minutes = 90, pos = 7 },  { id = 8, minutes = 90, pos = 9 },  { id = 9, minutes = 90, pos = 23 },
+        { id = 10, minutes = 90, pos = 25 }, { id = 11, minutes = 90, pos = 27 },
+        { id = 12, minutes = 45, pos = 18, sub = true }, { id = 13, minutes = 45, pos = 11, sub = true },
+    }
+    local p2 = M7.pair(two)
+    local t2 = {}
+    for _, p in ipairs(p2) do t2[#t2 + 1] = p.out.id .. ">" .. p["in"].id end
+    table.sort(t2)
+    check(table.concat(t2, " ") == "2>13 3>12", "same minute, different positions: nobody is swapped", table.concat(t2, " "))
+
+    -- a sending-off has no replacement; a substitute nobody can be matched to still gets a minute
+    local red = {}
+    for i = 1, 11 do red[#red + 1] = { id = i, minutes = (i == 5) and 60 or 90, pos = i } end
+    red[#red + 1] = { id = 12, minutes = 20, pos = 99, sub = true }
+    local p3, m3, len3 = M7.pair(red)
+    check(#p3 == 0, "a sending-off is not turned into a substitution")
+    check(m3[5] and m3[5].out_minute == 60, "the player who left still gets his minute")
+    check(m3[12] and m3[12].in_minute == len3 - 20, "a substitute without a partner gets an estimated minute", m3[12] and m3[12].in_minute)
+
+    local none = {}
+    for i = 1, 11 do none[#none + 1] = { id = i, minutes = 90, pos = i } end
+    local p4 = M7.pair(none)
+    check(#p4 == 0, "a match without substitutions has none")
+
+    -- the game's record is only trusted when it is about the same players as the export
+    local ids = {}
+    for _, h in ipairs(torquay_record()) do if h.minutes > 0 then ids[tostring(h.id)] = true end end
+    check(M7.lineup_matches(torquay_record(), ids), "the record of the same match is accepted")
+    check(not M7.lineup_matches(torquay_record(), { ["1"] = true, ["2"] = true, ["3"] = true, ["4"] = true, ["5"] = true,
+        ["6"] = true, ["7"] = true, ["8"] = true, ["9"] = true, ["10"] = true, ["11"] = true }),
+        "the record of another match is refused")
+    check(M7.lineup_matches(torquay_record(), nil), "without an export the record is accepted when 11 or more players played")
+    check(not M7.lineup_matches({ { id = 1, minutes = 90 } }, nil), "a record with fewer than 11 players is refused")
+    local one_missing = {}
+    for k, v in pairs(ids) do one_missing[k] = v end
+    one_missing["460129"] = nil
+    check(M7.lineup_matches(torquay_record(), one_missing), "one player missing from the export does not make the record unusable")
+end
+
+-- an export in which our club is team_index 1 and the team file lists index 1 first
+local function export_rows()
+    local function p(team, id, name, minutes, extra)
+        local r = { team_index = tostring(team), player_id = tostring(id), player_name = name, minutes_played = tostring(minutes),
+                    game_rating = "6.5", man_of_the_match = "0", passes = "20", pass_accuracy_pct_derived = "80", shots = "0",
+                    shots_on_target = "0", tackles = "1", interceptions = "0", goals_derived = "0", assists = "0" }
+        for k, v in pairs(extra or {}) do r[k] = v end
+        return r
+    end
+    return {
+        p(0, 900001, "Opp Keeper", 90, { game_rating = "5.9" }),
+        p(0, 900002, "Opp Striker", 90, { game_rating = "9.1", man_of_the_match = "1", goals_derived = "3" }),
+        p(0, 900003, "Opp Winger", 90),
+        p(1, 460129, "Marc Palomino", 90, { saves = "4", penalty_saves = "1", shots_against = "9", game_rating = "6.2" }),
+        p(1, 462884, "Oliver Ebner", 90),
+        p(1, 463320, "", 90),                                                       -- the export has no name for him
+        p(1, 461483, "Enrique Iglesias", 90, { goals_derived = "1", game_rating = "7.4", shots = "3", shots_on_target = "2" }),
+        p(1, 460053, "Ignacio Zapata", 45),
+        p(1, 462221, "Bruno Henrique Gonzaga", 47),
+        p(1, 470001, "Nico Striker", 0),                                            -- on the bench all game
+    }, {
+        { team_index = "1", passes = "300", shots = "7", shots_on_target = "3", npk_expected_goals = "0.8",
+          pass_accuracy_pct_derived = "77.5", shootout_goals = "255" },
+        { team_index = "0", passes = "500", shots = "14", shots_on_target = "7", npk_expected_goals = "2.6",
+          pass_accuracy_pct_derived = "88", shootout_goals = "255" },
+    }
+end
+do
+    local participants, teams = export_rows()
+    local squad = { [460129] = true, [462884] = true, [463320] = true, [461483] = true, [460053] = true, [462221] = true, [470001] = true }
+    local a = M7.analyse(participants, teams, { squad = squad, is_home = true, goals_against = 3,
+        player_name = function(id) return "Name of " .. id end })
+    check(a.managed_idx == 1, "our side is found from the squad, not from home/away", a.managed_idx)
+    check(#a.rows == 6, "players who never came on are left out", #a.rows)
+    check(a.shots_for == 7 and a.shots_against == 14, "team shots come from our own row of the team file", a.shots_for .. "-" .. a.shots_against)
+    check(a.passing_accuracy == 78 or a.passing_accuracy == 77, "pass accuracy comes from our own row", a.passing_accuracy)
+    check(a.possession == 38 and a.possession_estimated, "possession is the pass share of our row, marked as an estimate", a.possession)
+    check(a.motm == "Opp Striker" and a.motm_is_opponent, "an opposing man of the match is named and flagged as the opponent's", a.motm)
+    local flagged = 0
+    for _, r in ipairs(a.rows) do if r.motm then flagged = flagged + 1 end end
+    check(flagged == 0, "none of our players is marked man of the match then", flagged)
+    local keeper
+    for _, r in ipairs(a.rows) do if r.name == "Marc Palomino" then keeper = r end end
+    check(keeper and keeper.saves == 4 and keeper.penalty_saves == 1, "the goalkeeper's saves are read", keeper and keeper.saves)
+    local blank
+    for _, r in ipairs(a.rows) do if r.id == "463320" then blank = r end end
+    check(blank and blank.name == "Name of 463320", "a player the export has no name for is named from the game", blank and blank.name)
+
+    -- our own man of the match, and a real possession column
+    participants[2].man_of_the_match = "0"
+    participants[7].man_of_the_match = "1"
+    teams[1].possession = "61.5"
+    local b = M7.analyse(participants, teams, { squad = squad, is_home = true, goals_against = 3 })
+    check(b.motm == "Enrique Iglesias" and not b.motm_is_opponent, "our own man of the match is not called an opponent")
+    check(b.possession == 61 or b.possession == 62, "a possession figure in the export is used as it is", b.possession)
+    check(not b.possession_estimated, "and is not marked as an estimate")
+    local ours = 0
+    for _, r in ipairs(b.rows) do if r.motm then ours = ours + 1 end end
+    check(ours == 1, "exactly one of our players carries the man of the match star", ours)
+
+    -- the game's record adds the loaned-in player the export left out, and the substitutions
+    local history = {
+        { id = 460129, minutes = 90, pos = 0 }, { id = 462884, minutes = 90, pos = 3 }, { id = 463320, minutes = 90, pos = 4 },
+        { id = 461607, minutes = 90, pos = 6 },                                            -- loaned in, not in the export
+        { id = 463808, minutes = 90, pos = 7 }, { id = 73049, minutes = 90, pos = 9 }, { id = 460053, minutes = 45, pos = 11 },
+        { id = 460045, minutes = 57, pos = 18 }, { id = 460055, minutes = 90, pos = 23 }, { id = 464205, minutes = 90, pos = 27 },
+        { id = 461483, minutes = 90, pos = 25 },
+        { id = 462221, minutes = 47, pos = 11, sub = true }, { id = 460047, minutes = 35, pos = 18, sub = true },
+        { id = 470001, minutes = 0, pos = 25 },
+    }
+    local c = M7.analyse(participants, teams, { squad = squad, is_home = true, goals_against = 3,
+        player_name = function(id) return "Name of " .. id end })
+    c.goals_against = 3
+    local subs = M7.apply(c, history, {
+        player_name = function(id) return ({ [461607] = "Fabi\195\161n Bravo", [463808] = "Denilson Fernandes",
+            [73049] = "Pedro Lima", [460045] = "Jordan Anderson", [460055] = "Kento Takeuchi", [464205] = "Elivélton Jesus",
+            [460047] = "Harry Dalton" })[id] or ("Name of " .. id) end,
+        rating_for = function(id) return id == 461607 and 7.0 or 0 end })
+    local names = {}
+    for _, r in ipairs(c.rows) do names[#names + 1] = r.name end
+    local function row_named(n) for _, r in ipairs(c.rows) do if r.name == n then return r end end end
+    check(row_named("Fabi\195\161n Bravo") ~= nil, "the loaned-in player is in the match log although the export missed him")
+    check(row_named("Fabi\195\161n Bravo").rating == 7.0, "his rating comes from the game's rating history")
+    check(#c.added >= 5, "every player of the game's record who is not in the export is added", #c.added)
+    check(row_named("Ignacio Zapata").out_minute == 45 and row_named("Bruno Henrique Gonzaga").in_minute == 45,
+        "the player who went off and the substitute carry the minute")
+    check(#subs == 2, "two substitutions are listed", #subs)
+    check(subs[1] and subs[1].minute == 45 and subs[1].out_name == "Ignacio Zapata" and subs[1].in_name == "Bruno Henrique Gonzaga",
+        "Zapata came off for Gonzaga at 45'", subs[1] and (subs[1].out_name .. ">" .. subs[1].in_name))
+    check(subs[2] and subs[2].minute == 57 and subs[2].out_name == "Jordan Anderson" and subs[2].in_name == "Harry Dalton",
+        "Anderson came off for Dalton at 57', although Anderson is not in the export", subs[2] and (subs[2].out_name .. ">" .. subs[2].in_name))
+    local last_started = 0
+    for i, r in ipairs(c.rows) do if not r.in_minute then last_started = i end end
+    local first_sub = #c.rows
+    for i, r in ipairs(c.rows) do if r.in_minute and i < first_sub then first_sub = i end end
+    check(last_started < first_sub, "starters are listed before the substitutes")
+
+    -- saves: only worked out when the export has none
+    local with_saves = M7.saves(c, 3)
+    check(not with_saves, "saves in the export are never replaced by an estimate")
+    for _, r in ipairs(c.rows) do r.saves = 0 end
+    c.shots_on_target_against = 7
+    check(M7.saves(c, 3) and row_named("Marc Palomino").saves == 4, "without saves in the export the keeper gets shots on target minus goals")
+
+    -- the lines sent to the app are valid JSON with the new fields
+    local line = json_decode(M7.perf(row_named("Ignacio Zapata")))
+    check(line.playerName == "Ignacio Zapata" and line.subOutMinute == 45 and line.subInMinute == nil, "a substituted-off player is sent with subOutMinute")
+    line = json_decode(M7.perf(row_named("Bruno Henrique Gonzaga")))
+    check(line.subInMinute == 45 and line.saves == 0 and line.penaltySaves == 0, "a substitute is sent with subInMinute")
+    line = json_decode(M7.perf(row_named("Marc Palomino")))
+    check(line.saves == 4 and line.penaltySaves == 1, "the goalkeeper is sent with his saves")
+    local sub_line = json_decode(M7.sub(subs[1]))
+    check(sub_line.playerOutName == "Ignacio Zapata" and sub_line.playerInName == "Bruno Henrique Gonzaga" and sub_line.minute == 45,
+        "a substitution is sent with both names and the minute")
+    local odd = json_decode(M7.sub({ minute = 70, out_id = "1", out_name = 'Quote"Name', in_id = "2", in_name = "Back\\slash" }))
+    check(odd.playerOutName == 'Quote"Name' and odd.playerInName == "Back\\slash", "quotes and backslashes in names do not break the JSON")
+end
+
+-- the league table, worked out from a small pretend season
+do
+    local ids = { M = 115486, A = 50, B = 106, C = 88, D = 1795, E = 1806 }
+    local standings = {}
+    local order = { "M", "A", "B", "C", "D", "E" }
+    for i, k in ipairs(order) do standings[i - 1] = { team_id = ids[k], competition_object_id = 779, team_index = i - 1 } end
+    local function idx(k) for i, n in ipairs(order) do if n == k then return i - 1 end end end
+    local function fx(date, h, a, hs, as, done, comp)
+        return { competition_object_id = comp or 779, date_raw = date, home_standing_index = idx(h), away_standing_index = idx(a),
+                 home_score = hs, away_score = as, completed = done }
+    end
+    local fixtures = {
+        fx(20280805, "M", "A", 3, 0, true), fx(20280805, "B", "C", 1, 1, true), fx(20280805, "D", "E", 2, 1, true),
+        fx(20280812, "M", "B", 1, 3, true), fx(20280812, "A", "C", 2, 2, true), fx(20280812, "D", "E", 0, 0, true),
+        fx(20280819, "A", "M", 0, 0, false), fx(20280819, "C", "D", 0, 0, false),
+        fx(20280809, "M", "D", 5, 0, true, 1856),                    -- a cup match: not part of the league table
+    }
+    local t = M7.table(fixtures, standings, 779, 20280812)
+    local order_ids = {}
+    for _, r in ipairs(t.rows) do order_ids[#order_ids + 1] = r.team_id end
+    check(table.concat(order_ids, ",") == "106,1795,115486,88,1806,50",
+        "table order: points, then goal difference, then goals scored", table.concat(order_ids, ","))
+    check(t.position[115486] == 3, "the club is third after matchday 2", t.position[115486])
+    check(t.pending_that_day == 0, "all matches of that day are in")
+    local mine
+    for _, r in ipairs(t.rows) do if r.team_id == 115486 then mine = r end end
+    check(mine.played == 2 and mine.pts == 3 and mine.gf == 4 and mine.ga == 3, "the club's own line is right (the cup match is not counted)",
+        mine.played .. "/" .. mine.pts .. "/" .. mine.gf .. "/" .. mine.ga)
+
+    local early = M7.table(fixtures, standings, 779, 20280805)
+    check(early.position[115486] == 1, "a match reported late keeps the position it had that day", early.position[115486])
+
+    local before = M7.table(fixtures, standings, 779, 20280801)
+    local all_zero = true
+    for _, r in ipairs(before.rows) do if r.pts ~= 0 or r.played ~= 0 then all_zero = false end end
+    check(#before.rows == 6 and all_zero, "before the first match every club is listed with no points")
+
+    fixtures[6].completed = false
+    local waiting = M7.table(fixtures, standings, 779, 20280812)
+    check(waiting.pending_that_day == 1, "an unplayed match of the same day is noticed", waiting.pending_that_day)
+    check(waiting.position[115486] == 2, "while that match is missing the table is different (so the script waits for it)", waiting.position[115486])
+
+    local league_names = function(name) return name ~= "FA Cup" end
+    check(M7.comp({}, { compobjid = 779, competition = "EFL Championship" }, league_names) == 779, "a league match names its own league")
+    check(M7.comp({ { compobjid = 1856, competition = "FA Cup" }, { compobjid = 779, competition = "EFL Championship" },
+                    { compobjid = 779, competition = "EFL Championship" } }, { compobjid = 1856, competition = "FA Cup" }, league_names) == 779,
+        "after a cup match the club's league is the competition it plays most in")
+    check(M7.comp({}, nil, league_names) == nil, "no league can be found without fixtures")
+end
+
+
+-- ---------------------------------------------------------------------------------------------------------
+print("7c. a finished match, start to end, against a pretend game")
+do
+    local MANAGED = 115486
+    local ROOT = "/home/test/Documents/FC26 Export"
+    local EXPORT_DIR = ROOT .. "/MatchStats/ready/FC26_MatchStats_pmc_20281012_120000_abc"
+    local TEAMS = { [MANAGED] = "Torquay AFC", [50] = "Parma", [106] = "Sunderland", [88] = "Birmingham City",
+                    [1795] = "Watford", [1806] = "Stoke City" }
+    local NAMES = { [460129] = "Marc Palomino", [462884] = "Oliver Ebner", [463320] = "Leo Guerra", [461607] = "Fabi\195\161n Bravo",
+                    [463808] = "Denilson Fernandes", [73049] = "Pedro Lima", [460053] = "Ignacio Zapata",
+                    [460045] = "Jordan Anderson", [460055] = "Kento Takeuchi", [464205] = "Elivélton Jesus",
+                    [461483] = "Enrique Iglesias", [462221] = "Bruno Henrique Gonzaga", [460047] = "Harry Dalton",
+                    [470001] = "Nico Striker" }
+    local POSITIONS = { [0] = "GK", [3] = "RB", [4] = "RCB", [6] = "LCB", [7] = "LB", [9] = "RDM", [11] = "LDM",
+                        [18] = "CAM", [23] = "RW", [25] = "ST", [27] = "LW" }
+    local STANDINGS = { MANAGED, 50, 106, 88, 1795, 1806 }          -- standing index 0..5
+    local function sidx(tid) for i, t in ipairs(STANDINGS) do if t == tid then return i - 1 end end end
+
+    local function fixture(id, date, home, away, hs, as, done, comp)
+        return { id = id, date = date, h = sidx(home), a = sidx(away), hs = hs, as = as, done = done, comp = comp }
+    end
+    local function season()
+        return {
+            fixture(1, 20280805, MANAGED, 50, 3, 0, true), fixture(2, 20280805, 106, 88, 1, 1, true),
+            fixture(3, 20280805, 1795, 1806, 2, 1, true),
+            fixture(4, 20280812, MANAGED, 106, 0, 0, false),          -- the match that is about to be played
+            fixture(5, 20280812, 50, 88, 2, 2, true), fixture(6, 20280812, 1795, 1806, 0, 0, false),
+            fixture(7, 20280819, 50, MANAGED, 0, 0, false),
+        }
+    end
+
+    -- a pretend game memory holding the standings and the fixtures, laid out the way the script reads them
+    local function build_memory(fixtures)
+        local cells = {}
+        local BASE, P1, P2, MGR, L1, B1, L2, B2 = 0x10000, 0x20000, 0x30000, 0x40000, 0x50000, 0x60000, 0x70000, 0x80000
+        cells[BASE + 0xCFDBE08], cells[P1 + 0x60], cells[P2 + 0x48] = P1, P2, MGR
+        cells[MGR + 0x88], cells[L1 + 0x28], cells[L1 + 0x1C] = L1, B1, #STANDINGS
+        for i, tid in ipairs(STANDINGS) do
+            local a = B1 + 0x18 * (i - 1)
+            cells[a], cells[a + 0x02], cells[a + 0x04], cells[a + 0x08], cells[a + 0x16] = i, 779, tid, i - 1, true
+        end
+        cells[MGR + 0x60], cells[L2 + 0x28], cells[L2 + 0x1C] = L2, B2, #fixtures
+        local function write(i, f)
+            local a = B2 + 0x18 * (i - 1)
+            cells[a], cells[a + 0x04], cells[a + 0x06], cells[a + 0x08] = f.date, 1500, f.id, f.comp or 779
+            cells[a + 0x0A], cells[a + 0x0C], cells[a + 0x0E] = f.h, f.a, 0
+            cells[a + 0x0F], cells[a + 0x10], cells[a + 0x11], cells[a + 0x12] = f.hs, 255, f.as, 255
+            cells[a + 0x13], cells[a + 0x14] = f.done and true or false, true
+        end
+        for i, f in ipairs(fixtures) do write(i, f) end
+        local function num(_, a) return cells[a] or 0 end
+        local mem = { GetModuleBase = function() return BASE end, ReadPointer = num, ReadInt = num, ReadShort = num,
+                      ReadChar = num, ReadBool = function(_, a) return cells[a] == true end }
+        return mem, function(i, f) write(i, f) end
+    end
+
+    local function history_rows(ours_ids_replaced)
+        local function h(pid, minutes, pos, fact) return { playerid = pid, teamid = MANAGED, minsplayed = minutes, position = pos, playerfact = fact } end
+        local rows = {
+            h(460129, 90, 0, 0), h(462884, 90, 3, 0), h(463320, 90, 4, 0), h(461607, 90, 6, 0), h(463808, 90, 7, 0),
+            h(73049, 90, 9, 0), h(460053, 45, 11, 0), h(460045, 57, 18, 0), h(460055, 90, 23, 0), h(464205, 90, 27, 0),
+            h(461483, 90, 25, 0), h(462221, 47, 11, 10), h(460047, 35, 18, 10), h(470001, 0, 25, 6),
+            { playerid = 999001, teamid = 50, minsplayed = 90, position = 0, playerfact = 0 },     -- another club's record
+        }
+        if ours_ids_replaced then
+            -- the record of an earlier match: different players
+            for i, r in ipairs(rows) do if r.teamid == MANAGED then r.playerid = 880000 + i end end
+        end
+        return rows
+    end
+
+    local function build_db(stale_history)
+        local squad = {}
+        for pid in pairs(NAMES) do
+            if pid ~= 461607 then squad[#squad + 1] = { teamid = MANAGED, playerid = pid } end   -- the loanee is not listed
+        end
+        return {
+            career_users = { { clubteamid = MANAGED } },
+            leagueteamlinks = { { teamid = MANAGED, leagueid = 1, nummatchesplayed = 1, currenttableposition = 2 } },  -- the stale "2"
+            teamplayerlinks = squad, playerloans = {}, players = {}, career_playercontract = {},
+            career_youthplayers = {}, career_managerhistory = {},
+            career_playerlastmatchhistory = history_rows(stale_history),
+            career_playermatchratinghistory = { { playerid = 461607, rating = 7, date = 20280812, minsplayed = 90 } },
+        }
+    end
+
+    local PART_COLS = { "team_index", "player_id", "player_name", "minutes_played", "game_rating", "man_of_the_match", "passes",
+                        "pass_accuracy_pct_derived", "shots", "shots_on_target", "tackles", "interceptions", "goals_derived",
+                        "assists", "saves", "penalty_saves", "shots_against", "yellow_card_events", "red_dismissals" }
+    local function csv(cols, rows)
+        local out = { table.concat(cols, ",") }
+        for _, r in ipairs(rows) do
+            local cells = {}
+            for i, c in ipairs(cols) do cells[i] = r[c] or "" end
+            out[#out + 1] = table.concat(cells, ",")
+        end
+        return table.concat(out, "\n") .. "\n"
+    end
+    local function write_export(vfs)
+        local function p(team, id, name, minutes, extra)
+            local r = { team_index = team, player_id = id, player_name = name, minutes_played = minutes, game_rating = "6.5",
+                        man_of_the_match = "0", passes = "20", pass_accuracy_pct_derived = "80", shots = "0", shots_on_target = "0",
+                        tackles = "1", interceptions = "0", goals_derived = "0", assists = "0" }
+            for k, v in pairs(extra or {}) do r[k] = v end
+            return r
+        end
+        local rows = {
+            p(0, 900001, "Opp Keeper", 90), p(0, 900002, "Opp Striker", 90, { game_rating = "9.1", man_of_the_match = "1", goals_derived = "3" }),
+            p(0, 900003, "Opp Winger", 90),
+            p(1, 460129, "Marc Palomino", 90, { saves = "4", penalty_saves = "1", shots_against = "9", game_rating = "6.2" }),
+            p(1, 462884, "Oliver Ebner", 90), p(1, 463320, "Leo Guerra", 90), p(1, 463808, "Denilson Fernandes", 90),
+            p(1, 73049, "Pedro Lima", 90), p(1, 460053, "Ignacio Zapata", 45), p(1, 460045, "Jordan Anderson", 57),
+            p(1, 460055, "Kento Takeuchi", 90), p(1, 464205, "Elivélton Jesus", 90),
+            p(1, 461483, "Enrique Iglesias", 90, { goals_derived = "1", game_rating = "7.4", shots = "3", shots_on_target = "2" }),
+            p(1, 462221, "Bruno Henrique Gonzaga", 47), p(1, 460047, "Harry Dalton", 35),
+            p(1, 470001, "Nico Striker", 0),
+        }
+        vfs[EXPORT_DIR .. "/16_match_participants_wide.csv"] = csv(PART_COLS, rows)
+        vfs[EXPORT_DIR .. "/18_match_teams_wide.csv"] = csv(
+            { "team_index", "passes", "shots", "shots_on_target", "npk_expected_goals", "pass_accuracy_pct_derived", "shootout_goals" },
+            { { team_index = "1", passes = "300", shots = "7", shots_on_target = "3", npk_expected_goals = "0.8", pass_accuracy_pct_derived = "77.5", shootout_goals = "255" },
+              { team_index = "0", passes = "500", shots = "14", shots_on_target = "7", npk_expected_goals = "2.6", pass_accuracy_pct_derived = "88", shootout_goals = "255" } })
+        vfs[EXPORT_DIR .. "/MATCH_READY"] = "ready"
+    end
+
+    local function match_payloads(vfs)
+        local list = {}
+        for path, text in pairs(vfs) do
+            if path:find("/outbox/", 1, true) and path:sub(-5) == ".json" and text:find('"dataType": "match"', 1, true) then
+                list[#list + 1] = json_decode(text)
+            end
+        end
+        return list
+    end
+
+    local function play(opts)
+        local vfs, clk = {}, { t = 1795000000 }
+        local fixtures = season()
+        local mem, set_fixture = build_memory(fixtures)
+        local spec = { db = build_db(opts.stale_history), vfs = vfs, clock = function() return clk.t end, names = NAMES, teams = TEAMS,
+                       today = { year = 2028, month = 8, day = 12 }, memory = mem, positions = POSITIONS,
+                       comps = { [779] = "EFL Championship", [1856] = "FA Cup" },
+                       dirs = { [ROOT] = true, [ROOT .. "/outbox"] = true, [ROOT .. "/Snapshots"] = true, [ROOT .. "/MatchStats"] = true,
+                                ["/home/test/tmp"] = true } }
+        if opts.exporter then _G.FC26_EXPORT_AUTO_CAPTURE_STATE = {} end
+        local ok, err, handler, restore = run_capture_session(spec)
+        local function tick(seconds)
+            clk.t = clk.t + seconds
+            handler(nil, 1, nil)
+        end
+        local game = { ok = ok, err = err, vfs = vfs, tick = tick, fixtures = fixtures, set = set_fixture }
+        function game.finish_match()
+            fixtures[4].hs, fixtures[4].as, fixtures[4].done = 1, 3, true
+            set_fixture(4, fixtures[4])
+        end
+        function game.finish_other()
+            fixtures[6].done = true
+            set_fixture(6, fixtures[6])
+        end
+        function game.close()
+            restore()
+            _G.FC26_EXPORT_AUTO_CAPTURE_STATE = nil
+            _G.FC26_EXPORT_MATCH_STATS_LAST_EXPORT_RESULT = nil
+            -- the script keeps these across reloads on purpose; every pretend session starts clean
+            _G.FC26_BEAMED_FIXTURE_KEYS, _G.FC26_ATLAS_USED = nil, nil
+            _G.FC26_DB_FIXTURES_CACHE, _G.FC26_DB_FIXTURES_TIME = nil, nil
+        end
+        function game.log() return vfs[ROOT .. "/auto_capture_monitor.log"] or "" end
+        return game
+    end
+
+    -- A. the Atlas exporter produced the match files
+    do
+        local g = play({ exporter = true })
+        check(g.ok, "script starts against the pretend game", g.err)
+        write_export(g.vfs)
+        _G.FC26_EXPORT_MATCH_STATS_LAST_EXPORT_RESULT = { success = true, ready_dir = EXPORT_DIR }
+        g.tick(3)
+        g.finish_match()
+        g.tick(3)
+        g.tick(3)
+        check(#match_payloads(g.vfs) == 0, "the match waits while another match of the day is still unplayed")
+        g.tick(3)
+        check(#match_payloads(g.vfs) == 0, "and keeps waiting")
+        g.finish_other()
+        g.tick(4)
+        g.tick(4)
+        local list = match_payloads(g.vfs)
+        check(#list == 1, "once the day's results are in, the match is sent once", #list)
+        local m = list[1] or {}
+        if not list[1] then out_print("        log: " .. g.log():sub(-1500)) end
+        check(m.opponentName == "Sunderland" and m.goalsFor == 1 and m.goalsAgainst == 3, "the score and the opponent are right")
+        check(m.leaguePosition == 3, "league position comes from the results (3rd), not the stored value (2)", m.leaguePosition)
+        if m.leaguePosition ~= 3 then out_print("        log: " .. g.log():sub(-1800)) end
+        check(m.detailSource == "atlas", "the match carries the exported player data", m.detailSource)
+        check(m.possession == 38 and m.possessionEstimated == true,
+            "possession is our share of the passes (300 of 800) and is marked as an estimate", m.possession)
+        check(m.shotsFor == 7 and m.shotsAgainst == 14, "shots are ours and theirs the right way round", tostring(m.shotsFor) .. "-" .. tostring(m.shotsAgainst))
+        check(m.motmName == "Opp Striker" and m.motmIsOpponent == true, "the opposing man of the match is named and flagged", m.motmName)
+        local starred = 0
+        for _, p in ipairs(m.playerPerformances or {}) do if p.isMotm then starred = starred + 1 end end
+        check(starred == 0, "none of our players is starred when the opponent won it", starred)
+
+        local by_name = {}
+        for _, p in ipairs(m.playerPerformances or {}) do by_name[p.playerName] = p end
+        check(by_name["Fabi\195\161n Bravo"] ~= nil, "the loaned-in player, missing from the export, is in the match log")
+        check(by_name["Fabi\195\161n Bravo"] and by_name["Fabi\195\161n Bravo"].rating == 7, "with the rating the game recorded")
+        check(by_name["Marc Palomino"] and by_name["Marc Palomino"].saves == 4 and by_name["Marc Palomino"].penaltySaves == 1,
+            "the goalkeeper's saves are in the match log")
+        check(by_name["Nico Striker"] == nil, "a substitute who never came on is not in the match log")
+        check(#(m.playerPerformances or {}) == 13, "13 players took part", #(m.playerPerformances or {}))
+        check(by_name["Ignacio Zapata"] and by_name["Ignacio Zapata"].subOutMinute == 45, "the player who went off carries his minute")
+        check(by_name["Bruno Henrique Gonzaga"] and by_name["Bruno Henrique Gonzaga"].subInMinute == 45, "the substitute carries his minute")
+        local subs = m.substitutions or {}
+        check(#subs == 2, "two substitutions are in the match log", #subs)
+        check(subs[1] and subs[1].minute == 45 and subs[1].playerOutName == "Ignacio Zapata" and subs[1].playerInName == "Bruno Henrique Gonzaga",
+            "Zapata came off for Gonzaga at 45'")
+        check(subs[2] and subs[2].minute == 57 and subs[2].playerOutName == "Jordan Anderson" and subs[2].playerInName == "Harry Dalton",
+            "Anderson came off for Dalton at 57'")
+        check(g.log():find("Players the export left out were added", 1, true) ~= nil, "the log says which players were added")
+        g.close()
+    end
+
+    -- B. no Atlas export at all: the match is built from the game's own records
+    do
+        local g = play({ exporter = false })
+        check(g.ok, "script starts without the Atlas exporter", g.err)
+        g.tick(3)
+        g.finish_match()
+        g.finish_other()
+        for _ = 1, 8 do g.tick(3) end
+        local list = match_payloads(g.vfs)
+        check(#list == 1, "without an export the match is still sent, after a short wait", #list)
+        local m = list[1] or {}
+        if not list[1] then out_print("        log: " .. g.log():sub(-1500)) end
+        check(m.detailSource == "estimated", "and is marked as estimated", m.detailSource)
+        check(m.leaguePosition == 3, "the league position is right here too", m.leaguePosition)
+        local by_name = {}
+        for _, p in ipairs(m.playerPerformances or {}) do by_name[p.playerName] = p end
+        check(by_name["Fabi\195\161n Bravo"] ~= nil, "the loaned-in player is in the match log")
+        check(by_name["Nico Striker"] == nil, "the unused substitute is not")
+        check(#(m.substitutions or {}) == 2, "the substitutions come from the game's record", #(m.substitutions or {}))
+        check(m.possessionEstimated == true, "possession is flagged as a guess")
+        g.close()
+    end
+
+    -- C. the game's last-match record belongs to another match: nothing is guessed from it
+    do
+        local g = play({ exporter = true, stale_history = true })
+        write_export(g.vfs)
+        _G.FC26_EXPORT_MATCH_STATS_LAST_EXPORT_RESULT = { success = true, ready_dir = EXPORT_DIR }
+        g.tick(3)
+        g.finish_match()
+        g.finish_other()
+        for _ = 1, 4 do g.tick(4) end
+        local list = match_payloads(g.vfs)
+        check(#list == 1, "a record of another match does not stop the match from being sent", #list)
+        local m = list[1] or {}
+        check(#(m.substitutions or {}) == 0, "but no substitutions are made up from it", #(m.substitutions or {}))
+        check(#(m.playerPerformances or {}) == 12, "the match log keeps the export's own players", #(m.playerPerformances or {}))
+        check(g.log():find("different players than this export", 1, true) ~= nil, "the log explains why")
+        g.close()
+    end
 end
 
 

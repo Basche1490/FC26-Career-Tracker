@@ -299,6 +299,56 @@ function Read-RequestBody {
     return $text.TrimStart([char]0xFEFF)
 }
 
+# Stores one payload. Used for HTTP POSTs and for the payload files found in the outbox folder.
+# Returns @{ Code = 200 (stored, or a duplicate that was ignored) or 400 (refused); Reply = JSON text; Reason = why refused }.
+function Receive-PayloadText {
+    param([string]$Text)
+    $text = $Text.Trim()
+    if ($text -eq "") {
+        return @{ Code = 400; Reply = ""; Reason = "Empty body." }
+    }
+
+    $reply = '{"status":"ok"}'
+    if ($text.StartsWith("{") -or $text.StartsWith("[")) {
+        # JSON from the Live Editor scripts. A malformed one is refused with HTTP 400 instead of being stored:
+        # a broken event that looks like JSON would stall the phone app for every event after it.
+        $jsonObj = ConvertFrom-JsonObject $text
+        if ($null -eq $jsonObj) {
+            $preview = if ($text.Length -gt 120) { $text.Substring(0, 120) } else { $text }
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] REJECTED malformed JSON payload ($($text.Length) bytes): $preview" -ForegroundColor Red
+            return @{ Code = 400; Reply = ""; Reason = "Payload is not a valid JSON object." }
+        }
+
+        # Store compact, strictly valid JSON (raw control characters inside strings are escaped)
+        if ([regex]::IsMatch($text, '[\x00-\x1F]')) {
+            $compact = ConvertTo-CompactJson $text
+            if ($null -ne (ConvertFrom-JsonObject $compact)) { $text = $compact }
+        }
+
+        $title = "Match Update"
+        if ($jsonObj.title) { $title = [string]$jsonObj.title }
+        $msg = ""
+        if ($jsonObj.message) { $msg = Remove-PenaltyNoise ([string]$jsonObj.message) }
+
+        if ($jsonObj.dataType -eq "match") {
+            $added = Add-MatchEvent -Title $title -Message $msg -RawPayload $text -Opponent ([string]$jsonObj.opponentName) -GoalsFor (ConvertTo-Int $jsonObj.goalsFor) -GoalsAgainst (ConvertTo-Int $jsonObj.goalsAgainst) -FixtureKey ([string]$jsonObj.fixtureKey)
+            if ($added) {
+                Write-Host "  -> Result: $($jsonObj.goalsFor) - $($jsonObj.goalsAgainst) vs $($jsonObj.opponentName)" -ForegroundColor Yellow
+            } else {
+                $reply = '{"status":"duplicate"}'
+            }
+        } else {
+            Add-TelemetryEvent -Title $title -Message $msg -RawPayload $text
+            if ($jsonObj.playerName) {
+                Write-Host "  -> Transfer: $($jsonObj.playerName) ($($jsonObj.type))" -ForegroundColor Cyan
+            }
+        }
+    } else {
+        Add-TelemetryEvent -Title "Match Update" -Message (Remove-PenaltyNoise $text)
+    }
+    return @{ Code = 200; Reply = $reply; Reason = "" }
+}
+
 function Create-SampleMatchJson {
     $today = (Get-Date -Format 'yyyy-MM-dd')
     return @"
@@ -533,6 +583,239 @@ function Read-CsvRows {
     }
 }
 
+# -------------------------------------------------------------------------
+# Match log helpers (the same rules as the Live Editor script, so both senders describe a match the same way)
+# -------------------------------------------------------------------------
+$AtlasDeferSeconds = 45   # give the Live Editor script this long to report the match itself first (it knows more)
+$global:AtlasFirstSeen = @{}
+$global:AtlasDeferredNoted = [System.Collections.Generic.HashSet[string]]::new()
+
+# A regular league (not a cup, European competition or play-off). "Championship" is a league: it must not be taken
+# for the Champions League.
+function Test-LeagueName {
+    param([string]$Name)
+    $c = ([string]$Name).ToLower().Replace("championship", "league")
+    foreach ($k in @("cup", "trophy", "shield", "fa", "uefa", "champions", "conference", "europa", "play-off", "playoff")) {
+        if ($c.Contains($k)) { return $false }
+    }
+    return $true
+}
+
+function New-HistoryRow {
+    param([int]$Id, [int]$Minutes, $Pos, [bool]$Sub, [string]$Name)
+    return [PSCustomObject]@{ Id = $Id; Minutes = $Minutes; Pos = $Pos; Sub = $Sub; Name = $Name }
+}
+
+function Search-SubstitutionPairs {
+    param($Subs, $Outgoing, [int]$Index, $Used, $Current, [int]$Score, [int]$Length, $Found)
+    if ($Index -ge $Subs.Count) {
+        if ($Score -gt $Found.Score) { $Found.Score = $Score; $Found.List = @($Current) }
+        return
+    }
+    $s = $Subs[$Index]
+    for ($oi = 0; $oi -lt $Outgoing.Count; $oi++) {
+        if ($Used.ContainsKey($oi)) { continue }
+        $o = $Outgoing[$oi]
+        $diff = [Math]::Abs($s.Minutes + $o.Minutes - $Length)
+        if ($diff -le 1) {
+            $penalty = 2
+            if (($null -eq $s.Pos) -or ($null -eq $o.Pos) -or ($s.Pos -eq $o.Pos)) { $penalty = 0 }
+            $Used[$oi] = $true
+            $next = @($Current) + [PSCustomObject]@{ Sub = $s; Out = $o }
+            Search-SubstitutionPairs -Subs $Subs -Outgoing $Outgoing -Index ($Index + 1) -Used $Used -Current $next -Score ($Score + 100 - $diff - $penalty) -Length $Length -Found $Found
+            $Used.Remove($oi)
+        }
+    }
+    Search-SubstitutionPairs -Subs $Subs -Outgoing $Outgoing -Index ($Index + 1) -Used $Used -Current $Current -Score $Score -Length $Length -Found $Found   # this substitute replaced nobody that can be identified
+}
+
+# History rows are the game's record of the club's last match: Id, Minutes, Pos (position id), Sub (came on as a
+# substitute). A substitute's minutes plus the minutes of the player he replaced add up to the length of the match,
+# and he takes over the same position. Returns Pairs (Minute, Out, In), Marks (player id -> In / Out minute), Length.
+function Get-SubstitutionPairs {
+    param($History)
+    $starters = @($History | Where-Object { $_.Minutes -gt 0 -and -not $_.Sub })
+    $subs = @($History | Where-Object { $_.Minutes -gt 0 -and $_.Sub })
+    $counts = @{}
+    foreach ($s in $starters) {
+        $k = [string]$s.Minutes
+        if ($counts.ContainsKey($k)) { $counts[$k] = $counts[$k] + 1 } else { $counts[$k] = 1 }
+    }
+    $full = 0
+    $most = 0
+    foreach ($k in $counts.Keys) {                  # players who stayed on all game share one number: the most common
+        $minutes = [int]$k
+        if (($counts[$k] -gt $most) -or (($counts[$k] -eq $most) -and ($minutes -gt $full))) { $full = $minutes; $most = $counts[$k] }
+    }
+    $outgoing = @($starters | Where-Object { $_.Minutes -lt $full })
+
+    $bestScore = -1
+    $bestList = @()
+    $bestLength = $full
+    if ($subs.Count -gt 0 -and $subs.Count -le 8 -and $outgoing.Count -gt 0) {
+        for ($length = $full; $length -le ($full + 12); $length++) {
+            $found = @{ Score = 0; List = @() }
+            Search-SubstitutionPairs -Subs $subs -Outgoing $outgoing -Index 0 -Used @{} -Current @() -Score 0 -Length $length -Found $found
+            if ($found.Score -gt $bestScore) { $bestScore = $found.Score; $bestList = @($found.List); $bestLength = $length }
+        }
+    }
+
+    $marks = @{}
+    $pairs = @()
+    foreach ($pr in $bestList) {
+        $pairs += [PSCustomObject]@{ Minute = $pr.Out.Minutes; Out = $pr.Out; In = $pr.Sub }
+        $key = [string]$pr.Sub.Id
+        if (-not $marks.ContainsKey($key)) { $marks[$key] = @{} }
+        $marks[$key].In = $pr.Out.Minutes
+    }
+    foreach ($o in $outgoing) {                      # also a sending-off or an injury
+        $key = [string]$o.Id
+        if (-not $marks.ContainsKey($key)) { $marks[$key] = @{} }
+        $marks[$key].Out = $o.Minutes
+    }
+    foreach ($s in $subs) {
+        $key = [string]$s.Id
+        if (-not $marks.ContainsKey($key)) { $marks[$key] = @{} }
+        if ((-not $marks[$key].ContainsKey("In")) -and $bestLength -gt 0) { $marks[$key].In = [Math]::Max(1, $bestLength - $s.Minutes) }
+    }
+    $pairs = @($pairs | Sort-Object Minute, @{ Expression = { $_.Out.Id } })
+    return [PSCustomObject]@{ Pairs = $pairs; Marks = $marks; Length = $bestLength }
+}
+
+# Is the game's last-match record about the same players as the export? ExportedIds: HashSet of string ids.
+function Test-LineupMatchesExport {
+    param($History, $ExportedIds)
+    $played = @($History | Where-Object { $_.Minutes -gt 0 })
+    if ($played.Count -lt 11) { return $false }
+    if ($null -eq $ExportedIds -or $ExportedIds.Count -eq 0) { return $true }
+    $hit = 0
+    foreach ($h in $played) { if ($ExportedIds.Contains([string]$h.Id)) { $hit++ } }
+    return (($hit / $played.Count) -ge 0.7) -and (($hit / $ExportedIds.Count) -ge 0.7)
+}
+
+# Adds what the game's own record knows to the exported player lines (ordered hashtables): players the export left
+# out (a player on loan, say), who played which position and every substitution.
+# Returns Perfs (starters first, then the substitutes in the order they came on), Subs and PosById.
+function Add-LineupToPerformances {
+    param($Perfs, $History, [int]$GoalsAgainst)
+    $info = Get-SubstitutionPairs $History
+    $byId = @{}
+    $list = New-Object System.Collections.ArrayList
+    foreach ($p in $Perfs) { [void]$list.Add($p); $byId[[string]$p.playerId] = $p }
+    $posById = @{}
+    foreach ($h in $History) {
+        if ($h.Minutes -le 0) { continue }
+        $key = [string]$h.Id
+        if (-not $byId.ContainsKey($key)) {
+            $name = $h.Name
+            if (-not $name) { $name = "Player $key" }
+            $perf = [ordered]@{
+                playerId = $key; playerName = $name; rating = 0.0; goals = 0; assists = 0; passes = 0; passAccuracy = 0
+                shots = 0; shotAccuracy = 0; saves = 0; penaltySaves = 0; tackles = 0; tacklePercentage = 0; interceptions = 0
+                cleanSheet = ($GoalsAgainst -eq 0); yellowCard = $false; redCard = $false; isMotm = $false
+            }
+            [void]$list.Add($perf)
+            $byId[$key] = $perf
+        }
+        $posById[$key] = $h.Pos
+        if ($info.Marks.ContainsKey($key)) {
+            $m = $info.Marks[$key]
+            if ($m.ContainsKey("In")) { $byId[$key].subInMinute = $m.In }
+            if ($m.ContainsKey("Out")) { $byId[$key].subOutMinute = $m.Out }
+        }
+    }
+    $starters = @($list | Where-Object { -not $_.Contains("subInMinute") })
+    $bench = @($list | Where-Object { $_.Contains("subInMinute") } | Sort-Object @{ Expression = { $_.subInMinute } }, @{ Expression = { [string]$_.playerId } })
+    $subs = @()
+    foreach ($pr in $info.Pairs) {
+        $outPerf = $byId[[string]$pr.Out.Id]
+        $inPerf = $byId[[string]$pr.In.Id]
+        if ($outPerf -and $inPerf) {
+            $subs += [PSCustomObject]@{
+                minute = $pr.Minute; playerOutName = $outPerf.playerName; playerInName = $inPerf.playerName
+                playerOutId = [string]$pr.Out.Id; playerInId = [string]$pr.In.Id
+            }
+        }
+    }
+    return [PSCustomObject]@{ Perfs = @($starters + $bench); Subs = $subs; PosById = $posById }
+}
+
+# Only when the export has no saves at all: shots on target that were not goals were saved.
+function Set-KeeperSaves {
+    param($Perfs, $PosById, [int]$ShotsOnTargetAgainst, [int]$GoalsAgainst)
+    $total = 0
+    foreach ($p in $Perfs) { $total += [int]$p.saves }
+    $saved = $ShotsOnTargetAgainst - $GoalsAgainst
+    if ($total -gt 0 -or $saved -le 0) { return $false }
+    foreach ($p in $Perfs) {
+        $key = [string]$p.playerId
+        if ($PosById.ContainsKey($key) -and $PosById[$key] -eq 0) { $p.saves = $saved; return $true }
+    }
+    return $false
+}
+
+# The club's last-match record from a snapshot (last_match_players.csv).
+function Get-SnapshotLineup {
+    param([string]$SnapshotDir, [int]$TeamId)
+    $rows = @()
+    foreach ($r in (Read-CsvRows (Join-Path $SnapshotDir "last_match_players.csv"))) {
+        if ((ConvertTo-Int $r.team_id) -ne $TeamId) { continue }
+        $pid2 = ConvertTo-Int $r.player_id
+        if ($pid2 -le 0) { continue }
+        $pos = $null
+        if (([string]$r.actual_position_id).Trim() -ne "") { $pos = ConvertTo-Int $r.actual_position_id }
+        $fact = ConvertTo-Int $r.player_fact_raw
+        $isSub = (([int][Math]::Floor($fact / 8)) % 2) -eq 1
+        $rows += New-HistoryRow -Id $pid2 -Minutes (ConvertTo-Int $r.minutes_played) -Pos $pos -Sub $isSub -Name ([string]$r.display_name)
+    }
+    return $rows
+}
+
+# Position in the league on the day of the match, from the snapshot's season fixtures; $null when unknown.
+function Get-SnapshotLeaguePosition {
+    param([string]$SnapshotDir, [int]$TeamId, [int]$CompId, [int]$DateRaw)
+    if ($CompId -le 0) { return $null }
+    $teams = @{}
+    function Get-Row($tid) {
+        if (-not $teams.ContainsKey($tid)) { $teams[$tid] = [PSCustomObject]@{ TeamId = $tid; Pts = 0; Gf = 0; Ga = 0; Gd = 0 } }
+        return $teams[$tid]
+    }
+    foreach ($f in (Read-CsvRows (Join-Path $SnapshotDir "fixtures.csv"))) {
+        if ((ConvertTo-Int $f.competition_object_id) -ne $CompId) { continue }
+        $hid = ConvertTo-Int $f.home_team_id
+        $aid = ConvertTo-Int $f.away_team_id
+        if ($hid -le 0 -or $aid -le 0) { continue }
+        $h = Get-Row $hid
+        $a = Get-Row $aid
+        $done = (([string]$f.is_completed).Trim() -eq "1") -or (([string]$f.is_completed).Trim().ToLower() -eq "true")
+        $date = ConvertTo-Int $f.date_raw
+        if (-not $done -or ($DateRaw -gt 0 -and $date -gt $DateRaw)) { continue }
+        $hs = ConvertTo-Int $f.home_score -1
+        $as = ConvertTo-Int $f.away_score -1
+        if ($hs -lt 0 -or $hs -ge 60 -or $as -lt 0 -or $as -ge 60) { continue }
+        $h.Gf += $hs; $h.Ga += $as; $a.Gf += $as; $a.Ga += $hs
+        if ($hs -gt $as) { $h.Pts += 3 } elseif ($hs -lt $as) { $a.Pts += 3 } else { $h.Pts += 1; $a.Pts += 1 }
+    }
+    if ($teams.Count -lt 2) { return $null }
+    foreach ($t in $teams.Values) { $t.Gd = $t.Gf - $t.Ga }
+    $sorted = @($teams.Values | Sort-Object @{ Expression = { $_.Pts }; Descending = $true }, @{ Expression = { $_.Gd }; Descending = $true }, @{ Expression = { $_.Gf }; Descending = $true }, @{ Expression = { $_.TeamId }; Descending = $false })
+    for ($i = 0; $i -lt $sorted.Count; $i++) {
+        if ($sorted[$i].TeamId -eq $TeamId) { return ($i + 1) }
+    }
+    return $null
+}
+
+# The team file's row for team_index $Idx (found by its column, not by its position in the file).
+function Get-TeamRow {
+    param($Rows, [int]$Idx)
+    foreach ($r in $Rows) {
+        if (([string]$r.team_index).Trim() -ne "" -and (ConvertTo-Int $r.team_index -1) -eq $Idx) { return $r }
+    }
+    if ($Rows.Count -gt $Idx) { return $Rows[$Idx] }
+    if ($Rows.Count -gt 0) { return $Rows[0] }
+    return $null
+}
+
 function Import-AtlasFolder {
     param([string]$Folder, [string]$FolderId, [string]$SnapshotsReady)
 
@@ -557,6 +840,9 @@ function Import-AtlasFolder {
     $completedMatches = @()
     $latest = $null
     $managedSquadPlayerIds = [System.Collections.Generic.HashSet[int]]::new()
+    $latestSnap = $null
+    $leagueCompId = 0
+    $matchDateRaw = 0
 
     if ($SnapshotsReady -and (Test-Path -LiteralPath $SnapshotsReady)) {
         $snapFolders = @(Get-ChildItem -LiteralPath $SnapshotsReady -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
@@ -584,6 +870,7 @@ function Import-AtlasFolder {
                 elseif ($managedScore -eq $opponentScore) { $resultBadge = "D" }
                 else { $resultBadge = "L" }
                 if ($latest.date) { $matchDate = [string]$latest.date }
+                $matchDateRaw = ConvertTo-Int $latest.date_raw
             }
 
             # Primary domestic league = the managed team's row with the most matches played (team_leagues.csv)
@@ -592,14 +879,11 @@ function Import-AtlasFolder {
                 $tlTid = ConvertTo-Int $tl.team_id
                 $tlTname = [string]$tl.team_name
                 if ($tlTid -eq $managedTeamId -or ($managedClubName -and $tlTname.ToLower().Contains($managedClubName.ToLower()))) {
+                    # only the league's name is taken from here: the stored table position is refreshed now and then
+                    # (it can stay at the pre-season value), so it is not used
                     $pld = ConvertTo-Int $tl.matches_played
-                    $pos = ConvertTo-Int $tl.current_table_position
-                    if ($pld -gt $bestPld -and $pos -gt 0) {
+                    if ($pld -gt $bestPld) {
                         $bestPld = $pld
-                        $leaguePos = $pos
-                        if ($tl.league_name) { $currentLeagueName = [string]$tl.league_name }
-                    } elseif ($bestPld -eq -1 -and $pos -gt 0) {
-                        $leaguePos = $pos
                         if ($tl.league_name) { $currentLeagueName = [string]$tl.league_name }
                     }
                 }
@@ -611,6 +895,30 @@ function Import-AtlasFolder {
                     [void]$managedSquadPlayerIds.Add((ConvertTo-Int $r.player_id))
                 }
             }
+        }
+    }
+
+    # League position from the season's results (the competition of this match if it is a league match, else the
+    # competition the club has played most league matches in)
+    if ($latestSnap) {
+        if ($latest -and (Test-LeagueName ([string]$latest.competition_name)) -and (ConvertTo-Int $latest.competition_object_id) -gt 0) {
+            $leagueCompId = ConvertTo-Int $latest.competition_object_id
+        } else {
+            $seen = @{}
+            foreach ($cm in $completedMatches) {
+                $cid = ConvertTo-Int $cm.competition_object_id
+                if ($cid -gt 0 -and (Test-LeagueName ([string]$cm.competition_name))) {
+                    if ($seen.ContainsKey($cid)) { $seen[$cid] = $seen[$cid] + 1 } else { $seen[$cid] = 1 }
+                }
+            }
+            $bestN = 0
+            foreach ($cid in $seen.Keys) { if ($seen[$cid] -gt $bestN) { $bestN = $seen[$cid]; $leagueCompId = [int]$cid } }
+        }
+        try {
+            $computedPos = Get-SnapshotLeaguePosition -SnapshotDir $latestSnap -TeamId $managedTeamId -CompId $leagueCompId -DateRaw $matchDateRaw
+            if ($null -ne $computedPos) { $leaguePos = [int]$computedPos }
+        } catch {
+            Write-Host "  (league table could not be worked out: $($_.Exception.Message))" -ForegroundColor DarkYellow
         }
     }
 
@@ -659,6 +967,15 @@ function Import-AtlasFolder {
 
     # Participants (a failure here must throw so the folder is retried, not imported empty)
     $participants = @(Read-CsvRows $participantsCsv -Required)
+    $history = @()
+    $historyNames = @{}
+    if ($latestSnap) {
+        $history = @(Get-SnapshotLineup -SnapshotDir $latestSnap -TeamId $managedTeamId)
+        foreach ($h in $history) {
+            if ($h.Name) { $historyNames[[string]$h.Id] = $h.Name }
+            if ($h.Minutes -gt 0) { [void]$managedSquadPlayerIds.Add($h.Id) }      # a loaned-in player counts too
+        }
+    }
     $count0 = 0
     $count1 = 0
     $maxMinutes = 0
@@ -681,10 +998,8 @@ function Import-AtlasFolder {
 
     # Team totals (18_match_teams_wide.csv)
     $teamRows = @(Read-CsvRows $teamsCsv -Required)
-    $mTeam = $null
-    $oTeam = $null
-    if ($teamRows.Count -gt $managedTeamIndex) { $mTeam = $teamRows[$managedTeamIndex] } elseif ($teamRows.Count -gt 0) { $mTeam = $teamRows[0] }
-    if ($teamRows.Count -gt $oppTeamIndex) { $oTeam = $teamRows[$oppTeamIndex] } elseif ($teamRows.Count -gt 1) { $oTeam = $teamRows[1] }
+    $mTeam = Get-TeamRow $teamRows $managedTeamIndex
+    $oTeam = Get-TeamRow $teamRows $oppTeamIndex
 
     # Extra time & penalties
     $isPlayoffLeg1 = $isPlayoff -and $stageVal.ToLower().Contains("leg 1")
@@ -705,20 +1020,30 @@ function Import-AtlasFolder {
     if ($homePen -ge 255 -or $homePen -lt 0) { $homePen = 0 }
     if ($awayPen -ge 255 -or $awayPen -lt 0) { $awayPen = 0 }
 
-    # Man of the match straight from the game's own flag, else the best rating
-    $topPlayer = ""
-    $highestRating = -1.0
+    # Man of the match straight from the game's own flag (either team can win it), else the best rating
+    function Get-ParticipantName($row) {
+        if ($row.player_name) { return [string]$row.player_name }
+        $key = [string](ConvertTo-Int $row.player_id)
+        if ($historyNames.ContainsKey($key)) { return $historyNames[$key] }
+        return "Player"
+    }
+    $motmRow = $null
     foreach ($p in $participants) {
-        $r = ConvertTo-Dbl $p.game_rating 6.0
         $motmFlag = ([string]$p.man_of_the_match).Trim().ToLower()
-        if (($motmFlag -eq "true" -or $motmFlag -eq "1") -and $p.player_name) {
-            $topPlayer = [string]$p.player_name
-            break
+        if ($motmFlag -eq "true" -or $motmFlag -eq "1") { $motmRow = $p; break }
+    }
+    if ($null -eq $motmRow) {
+        $highestRating = -1.0
+        foreach ($p in $participants) {
+            $r = ConvertTo-Dbl $p.game_rating 0.0
+            if ($r -gt $highestRating) { $highestRating = $r; $motmRow = $p }
         }
-        if ($r -gt $highestRating -and $p.player_name) {
-            $highestRating = $r
-            $topPlayer = [string]$p.player_name
-        }
+    }
+    $topPlayer = ""
+    $motmIsOpponent = $false
+    if ($null -ne $motmRow) {
+        $topPlayer = Get-ParticipantName $motmRow
+        $motmIsOpponent = ((ConvertTo-Int $motmRow.team_index) -ne $managedTeamIndex)
     }
 
     $shotsFor = ConvertTo-Int (Get-FirstValue $mTeam.shots $mTeam.shots_on_target)
@@ -729,10 +1054,16 @@ function Import-AtlasFolder {
     $passesAgainst = ConvertTo-Int $oTeam.passes
     $passAcc = ConvertTo-Int (ConvertTo-Pct $mTeam.pass_accuracy_pct_derived)
     $possession = ConvertTo-Int (ConvertTo-Pct (Get-FirstValue $mTeam.possession $mTeam.possession_pct))
-    if ($possession -le 0 -and ($passesFor + $passesAgainst) -gt 0) {
-        $possession = [int][Math]::Floor(($passesFor / ($passesFor + $passesAgainst)) * 100)
+    $possessionEstimated = $false
+    if ($possession -le 0) {
+        # The exporter has no possession figure: the share of all passes is the closest thing it records.
+        $possessionEstimated = $true
+        if (($passesFor + $passesAgainst) -gt 0) {
+            $possession = [Math]::Max(25, [Math]::Min(75, [int][Math]::Floor(($passesFor / ($passesFor + $passesAgainst)) * 100 + 0.5)))
+        } else {
+            $possession = 50
+        }
     }
-    if ($possession -le 0) { $possession = 52 }
 
     # Player performances - only players who actually played (the export lists the whole matchday squad)
     $playerPerfs = @()
@@ -743,7 +1074,7 @@ function Import-AtlasFolder {
         $played = -not ($maxMinutes -gt 0 -and $pMinutes -ge 0 -and $pMinutes -le 0)
         if ($pTeam -ne $managedTeamIndex -or -not $played) { continue }
 
-        $pName = if ($p.player_name) { [string]$p.player_name } else { "Player" }
+        $pName = Get-ParticipantName $p
         $pGoals = ConvertTo-Int (Get-FirstValue $p.goals_derived $p.npk_goals)
         $pAssists = ConvertTo-Int $p.assists
         $pRating = ConvertTo-Dbl $p.game_rating 6.5
@@ -768,10 +1099,9 @@ function Import-AtlasFolder {
             }
             if ($tAtt -gt 0) { $pTacklePct = [Math]::Min(100, [int][Math]::Floor(($tWon / $tAtt) * 100)) } else { $pTacklePct = 0 }
         }
-        $pMotmFlag = ([string]$p.man_of_the_match).Trim().ToLower()
-        $isMotm = ($pName -eq $topPlayer) -or ($pMotmFlag -eq "true") -or ($pMotmFlag -eq "1")
+        $isMotm = [object]::ReferenceEquals($p, $motmRow)
 
-        $playerPerfs += [PSCustomObject]@{
+        $playerPerfs += [ordered]@{
             playerId = [string]$p.player_id
             playerName = $pName
             rating = [Math]::Round($pRating, 1)
@@ -781,6 +1111,8 @@ function Import-AtlasFolder {
             passAccuracy = $pPassAcc
             shots = $pShots
             shotAccuracy = $pShotAcc
+            saves = (ConvertTo-Int $p.saves)
+            penaltySaves = (ConvertTo-Int $p.penalty_saves)
             tackles = $pTackles
             tacklePercentage = $pTacklePct
             interceptions = (ConvertTo-Int $p.interceptions)
@@ -791,6 +1123,26 @@ function Import-AtlasFolder {
         }
 
         for ($g = 0; $g -lt $pGoals; $g++) { $goalPlayers += $pName }
+    }
+
+    # The game's own record of the last match adds who replaced whom and any player the export left out (a loan
+    # signing, say). It is only used when it is about the same players as the export.
+    $substitutions = @()
+    $posById = @{}
+    if ($history.Count -gt 0) {
+        $exportedIds = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($pp in $playerPerfs) { [void]$exportedIds.Add([string]$pp.playerId) }
+        if (Test-LineupMatchesExport $history $exportedIds) {
+            $merged = Add-LineupToPerformances $playerPerfs $history $opponentScore
+            $playerPerfs = @($merged.Perfs)
+            $substitutions = @($merged.Subs)
+            $posById = $merged.PosById
+        } else {
+            Write-Host "  (the game's last-match record is about different players: substitutions are not sent)" -ForegroundColor DarkYellow
+        }
+    }
+    if (Set-KeeperSaves $playerPerfs $posById (ConvertTo-Int $oTeam.shots_on_target) $opponentScore) {
+        Write-Host "  (the export has no saves: the goalkeeper's saves are worked out from shots on target)" -ForegroundColor DarkYellow
     }
 
     # The export has no goal minutes: spread them evenly over the match and flag them as estimated.
@@ -839,13 +1191,16 @@ function Import-AtlasFolder {
         shotsFor = $shotsFor
         shotsAgainst = $shotsAgainst
         possession = $possession
+        possessionEstimated = $possessionEstimated
         passingAccuracy = $passAcc
         expectedGoals = [Math]::Round($xGF, 2)
         expectedGoalsAgainst = [Math]::Round($xGA, 2)
         motmName = $topPlayer
+        motmIsOpponent = $motmIsOpponent
         leaguePosition = $leaguePosOut
         detailSource = "atlas"
         playerPerformances = $playerPerfs
+        substitutions = $substitutions
         goalDetails = $goalDetails
     }
 
@@ -885,6 +1240,13 @@ function Check-AtlasExportFolder {
                 $teamsCsv = Join-Path $folder.FullName "18_match_teams_wide.csv"
 
                 if (((Test-Path -LiteralPath $readyMarker) -or (Test-Path -LiteralPath $altMarker)) -and (Test-Path -LiteralPath $participantsCsv) -and (Test-Path -LiteralPath $teamsCsv)) {
+                    if (-not $global:AtlasFirstSeen.ContainsKey($folderId)) { $global:AtlasFirstSeen[$folderId] = [DateTime]::UtcNow }
+                    if (([DateTime]::UtcNow - $global:AtlasFirstSeen[$folderId]).TotalSeconds -lt $AtlasDeferSeconds) {
+                        if ($global:AtlasDeferredNoted.Add($folderId)) {
+                            Write-Host "[PROJECT ATLAS] New export ${folderId}: waiting up to $AtlasDeferSeconds s for the Live Editor script to report the match itself (it adds more detail)." -ForegroundColor DarkCyan
+                        }
+                        continue
+                    }
                     try {
                         Import-AtlasFolder -Folder $folder.FullName -FolderId $folderId -SnapshotsReady $snapshotsReady
                         [void]$global:ProcessedAtlasFolders.Add($folderId)
@@ -916,6 +1278,90 @@ function Check-AtlasExportFolder {
     }
 }
 
+# =========================================================================
+# OUTBOX HOT-FOLDER
+# The Live Editor script saves every transfer and match as a small .json file in Documents\FC26 Export\outbox.
+# Reading those files here means the script does not have to start a helper program for each one (every helper
+# program flashes a command window on top of the game). bridge_watching.txt tells the script that this bridge is
+# reading the folder, so it only starts its own sender if a file is still waiting after a while.
+# =========================================================================
+$OutboxSettleSeconds = 1
+$OutboxBadAfterSeconds = 90
+$global:LastOutboxHeartbeat = [DateTime]::MinValue
+$global:LastOutboxError = ""
+$global:OutboxHandled = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+function Write-OutboxLog {
+    param([string]$Root, [string]$Id, [string]$Text)
+    try {
+        $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$Id] $Text"
+        [System.IO.File]::AppendAllText((Join-Path $Root "bridge_send_log.txt"), $line + "`r`n")
+    } catch {}
+}
+
+function Check-OutboxFolder {
+    try {
+        $now = [DateTime]::UtcNow
+        $beat = (($now - $global:LastOutboxHeartbeat).TotalSeconds -ge 5)
+        foreach ($root in (Get-AtlasRoots)) {
+            if ($beat) {
+                try { [System.IO.File]::WriteAllText((Join-Path $root "bridge_watching.txt"), [string][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) } catch {}
+            }
+            $outbox = Join-Path $root "outbox"
+            if (-not (Test-Path -LiteralPath $outbox)) { continue }
+
+            $files = @(Get-ChildItem -LiteralPath $outbox -Filter "*.json" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc, Name)
+            $present = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($file in $files) { [void]$present.Add($file.FullName) }
+            foreach ($done in @($global:OutboxHandled)) {
+                if (-not $present.Contains($done)) { [void]$global:OutboxHandled.Remove($done) }
+            }
+
+            foreach ($file in $files) {
+                $id = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+                if ($global:OutboxHandled.Contains($file.FullName)) {
+                    # stored earlier but the file could not be deleted then: never store it twice
+                    try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop } catch {}
+                    continue
+                }
+                $age = ($now - $file.LastWriteTimeUtc).TotalSeconds
+                if ($age -lt $OutboxSettleSeconds) { continue }   # the script may still be writing it
+
+                $text = $null
+                try {
+                    $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+                    try {
+                        $text = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes)
+                    } catch {
+                        $text = [System.Text.Encoding]::GetEncoding("iso-8859-1").GetString($bytes)
+                    }
+                    $text = $text.TrimStart([char]0xFEFF)
+                } catch {
+                    continue   # locked: try again on the next pass
+                }
+
+                $result = Receive-PayloadText $text
+                if ($result.Code -eq 200) {
+                    [void]$global:OutboxHandled.Add($file.FullName)
+                    try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop } catch {}
+                    Write-OutboxLog $root $id "HTTP 200 (read from the outbox folder by the bridge)"
+                } elseif ($age -gt $OutboxBadAfterSeconds) {
+                    # still unreadable after a minute and a half: it is not just half-written
+                    try { Move-Item -LiteralPath $file.FullName -Destination ($file.FullName + ".bad") -Force -ErrorAction Stop } catch {}
+                    Write-OutboxLog $root $id "REFUSED ($($result.Reason)) - renamed to .bad"
+                }
+            }
+        }
+        if ($beat) { $global:LastOutboxHeartbeat = $now }
+    } catch {
+        $errText = "$($_.Exception.Message)"
+        if ($errText -ne $global:LastOutboxError) {
+            $global:LastOutboxError = $errText
+            Write-Host "[OUTBOX] watcher error: $errText" -ForegroundColor Yellow
+        }
+    }
+}
+
 Import-AtlasState
 
 $asyncResult = $Listener.BeginGetContext($null, $null)
@@ -926,6 +1372,7 @@ while ($Listener.IsListening) {
         $now = [DateTime]::UtcNow
         if (($now - $lastAtlasCheck).TotalSeconds -ge 2) {
             $lastAtlasCheck = $now
+            Check-OutboxFolder
             Check-AtlasExportFolder
         }
 
@@ -1077,51 +1524,12 @@ while ($Listener.IsListening) {
                 Send-Reject $Response 413 "Payload too large."
                 continue
             }
-            $text = $Body.Trim()
-            if ($text -eq "") {
-                Send-Reject $Response 400 "Empty body."
+            $result = Receive-PayloadText $Body
+            if ($result.Code -ne 200) {
+                Send-Reject $Response $result.Code $result.Reason
                 continue
             }
-
-            $reply = '{"status":"ok"}'
-            if ($text.StartsWith("{") -or $text.StartsWith("[")) {
-                # JSON from the Live Editor scripts. A malformed one is refused with HTTP 400 instead of being stored:
-                # a broken event that looks like JSON would stall the phone app for every event after it.
-                $jsonObj = ConvertFrom-JsonObject $text
-                if ($null -eq $jsonObj) {
-                    $preview = if ($text.Length -gt 120) { $text.Substring(0, 120) } else { $text }
-                    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] REJECTED malformed JSON payload ($($text.Length) bytes): $preview" -ForegroundColor Red
-                    Send-Reject $Response 400 "Payload is not a valid JSON object."
-                    continue
-                }
-
-                # Store compact, strictly valid JSON (raw control characters inside strings are escaped)
-                if ([regex]::IsMatch($text, '[\x00-\x1F]')) {
-                    $compact = ConvertTo-CompactJson $text
-                    if ($null -ne (ConvertFrom-JsonObject $compact)) { $text = $compact }
-                }
-
-                $title = "Match Update"
-                if ($jsonObj.title) { $title = [string]$jsonObj.title }
-                $msg = ""
-                if ($jsonObj.message) { $msg = Remove-PenaltyNoise ([string]$jsonObj.message) }
-
-                if ($jsonObj.dataType -eq "match") {
-                    $added = Add-MatchEvent -Title $title -Message $msg -RawPayload $text -Opponent ([string]$jsonObj.opponentName) -GoalsFor (ConvertTo-Int $jsonObj.goalsFor) -GoalsAgainst (ConvertTo-Int $jsonObj.goalsAgainst) -FixtureKey ([string]$jsonObj.fixtureKey)
-                    if ($added) {
-                        Write-Host "  -> Result: $($jsonObj.goalsFor) - $($jsonObj.goalsAgainst) vs $($jsonObj.opponentName)" -ForegroundColor Yellow
-                    } else {
-                        $reply = '{"status":"duplicate"}'
-                    }
-                } else {
-                    Add-TelemetryEvent -Title $title -Message $msg -RawPayload $text
-                    if ($jsonObj.playerName) {
-                        Write-Host "  -> Transfer: $($jsonObj.playerName) ($($jsonObj.type))" -ForegroundColor Cyan
-                    }
-                }
-            } else {
-                Add-TelemetryEvent -Title "Match Update" -Message (Remove-PenaltyNoise $text)
-            }
+            $reply = $result.Reply
 
             $Response.StatusCode = 200
             $Response.ContentType = "application/json"

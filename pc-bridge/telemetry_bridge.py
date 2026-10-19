@@ -183,6 +183,40 @@ def create_sample_match():
         ]
     }
 
+def process_payload_text(text):
+    """Stores one payload (used for HTTP POSTs and for the payload files in the outbox folder).
+    Returns (http_status, reply_dict_or_message): 200 = stored (or a duplicate that was ignored), 400 = refused."""
+    text = (text or "").strip().lstrip("\ufeff")
+    if not text:
+        return 400, "Empty body."
+
+    reply = {"status": "ok"}
+    if text[0] in "{[":
+        # JSON payload from the Live Editor scripts. A malformed one is refused with HTTP 400 instead of being
+        # stored: a broken event that looks like JSON would stall the phone app for every event after it.
+        data = None
+        for strict in (True, False):          # strict=False tolerates raw control characters inside strings
+            try:
+                data = json.loads(text, strict=strict)
+                break
+            except ValueError:
+                continue
+        if not isinstance(data, dict):
+            print(f"[{time.strftime('%H:%M:%S')}] REJECTED malformed JSON payload ({len(text)} bytes): {text[:120]!r}")
+            return 400, "Payload is not a valid JSON object."
+        title = str(data.get("title") or "Match Update")
+        msg = sanitize_penalty_text(str(data.get("message") or ""))
+        if data.get("dataType") == "match":
+            if not add_match_event(title, msg, data):
+                reply = {"status": "duplicate"}
+        else:
+            add_event(title, msg, json.dumps(data, ensure_ascii=False))
+    else:
+        # plain text message (not JSON): shown in the feed as-is
+        add_event("Match Update", sanitize_penalty_text(text), None)
+    return 200, reply
+
+
 class TelemetryHandler(http.server.BaseHTTPRequestHandler):
     timeout = 15  # drop clients that stall in the middle of a request
 
@@ -278,36 +312,10 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
             self._reject(413, "Payload too large.")
             return
         post_data = self.rfile.read(content_length).decode('utf-8', errors='replace')
-        text = post_data.strip().lstrip("\ufeff")
-        if not text:
-            self._reject(400, "Empty body.")
+        status, reply = process_payload_text(post_data)
+        if status != 200:
+            self._reject(status, reply)
             return
-
-        status, reply = 200, {"status": "ok"}
-        if text[0] in "{[":
-            # JSON payload from the Live Editor scripts. A malformed one is refused with HTTP 400 instead of being
-            # stored: a broken event that looks like JSON would stall the phone app for every event after it.
-            data = None
-            for strict in (True, False):          # strict=False tolerates raw control characters inside strings
-                try:
-                    data = json.loads(text, strict=strict)
-                    break
-                except ValueError:
-                    continue
-            if not isinstance(data, dict):
-                print(f"[{time.strftime('%H:%M:%S')}] REJECTED malformed JSON payload ({len(text)} bytes): {text[:120]!r}")
-                self._reject(400, "Payload is not a valid JSON object.")
-                return
-            title = str(data.get("title") or "Match Update")
-            msg = sanitize_penalty_text(str(data.get("message") or ""))
-            if data.get("dataType") == "match":
-                if not add_match_event(title, msg, data):
-                    reply = {"status": "duplicate"}
-            else:
-                add_event(title, msg, json.dumps(data, ensure_ascii=False))
-        else:
-            # plain text message (not JSON): shown in the feed as-is
-            add_event("Match Update", sanitize_penalty_text(text), None)
 
         self.send_response(status)
         self.send_header('Content-type', 'application/json')
@@ -453,6 +461,8 @@ STALE_EXPORT_SECONDS = 600       # exports older than this at first start are ne
 MAX_ATLAS_ATTEMPTS = 3
 processed_atlas_folders = set()
 atlas_attempts = {}
+atlas_first_seen = {}
+atlas_deferred_noted = set()
 
 def _load_processed():
     try:
@@ -468,6 +478,209 @@ def _save_processed():
             json.dump(sorted(processed_atlas_folders)[-500:], f)
     except Exception:
         pass
+
+# ---------------------------------------------------------------------------
+# Match log helpers (the same rules as the Live Editor script, so both senders describe a match the same way)
+# ---------------------------------------------------------------------------
+ATLAS_DEFER_SECONDS = 45   # give the Live Editor script this long to report the match itself first (it knows more)
+
+def pair_substitutions(history):
+    """history: rows {"id", "minutes", "pos", "sub"} from the game's record of the club's last match.
+    A substitute's minutes plus the minutes of the player he replaced add up to the length of the match, and he takes
+    over the same position. Returns (pairs, marks, length): pairs = [{"minute", "out": row, "incoming": row}],
+    marks = {player id: {"in_minute"/"out_minute"}}."""
+    starters = [h for h in history if h["minutes"] > 0 and not h["sub"]]
+    subs = [h for h in history if h["minutes"] > 0 and h["sub"]]
+    counts = {}
+    for s in starters:
+        counts[s["minutes"]] = counts.get(s["minutes"], 0) + 1
+    full, most = 0, 0
+    for minutes, n in counts.items():          # players who stayed on all game share one number: the most common
+        if n > most or (n == most and minutes > full):
+            full, most = minutes, n
+    outgoing = [s for s in starters if s["minutes"] < full]
+
+    best_score, best_list, best_length = -1, [], full
+    if subs and len(subs) <= 8 and outgoing:
+        for length in range(full, full + 13):
+            found = {"score": 0, "list": []}
+            used, current = set(), []
+
+            def search(i, score):
+                if i >= len(subs):
+                    if score > found["score"]:
+                        found["score"], found["list"] = score, list(current)
+                    return
+                s = subs[i]
+                for oi, o in enumerate(outgoing):
+                    if oi in used:
+                        continue
+                    diff = abs(s["minutes"] + o["minutes"] - length)
+                    if diff <= 1:
+                        same = s["pos"] is None or o["pos"] is None or s["pos"] == o["pos"]
+                        used.add(oi)
+                        current.append((s, o))
+                        search(i + 1, score + 100 - diff - (0 if same else 2))
+                        current.pop()
+                        used.discard(oi)
+                search(i + 1, score)           # this substitute replaced nobody that can be identified
+
+            search(0, 0)
+            if found["score"] > best_score:
+                best_score, best_list, best_length = found["score"], found["list"], length
+
+    marks, pairs = {}, []
+    for s, o in best_list:
+        pairs.append({"minute": o["minutes"], "out": o, "incoming": s})
+        marks.setdefault(s["id"], {})["in_minute"] = o["minutes"]
+    for o in outgoing:                          # also a sending-off or an injury
+        marks.setdefault(o["id"], {})["out_minute"] = o["minutes"]
+    for s in subs:
+        if "in_minute" not in marks.get(s["id"], {}) and best_length > 0:
+            marks.setdefault(s["id"], {})["in_minute"] = max(1, best_length - s["minutes"])
+    pairs.sort(key=lambda p: (p["minute"], p["out"]["id"]))
+    return pairs, marks, best_length
+
+def lineup_matches_export(history, exported_ids):
+    """Is the game's last-match record about the same players as the export? exported_ids: set of str ids or None."""
+    played = [h for h in history if h["minutes"] > 0]
+    if len(played) < 11:
+        return False
+    if not exported_ids:
+        return True
+    hit = sum(1 for h in played if str(h["id"]) in exported_ids)
+    return hit / len(played) >= 0.7 and hit / len(exported_ids) >= 0.7
+
+def apply_lineup(player_perfs, history, goals_against=0):
+    """Adds what the game's own record knows to the exported player lines (dicts, changed in place): players the export
+    left out (a player on loan, say) and every substitution. Returns the list of substitutions for the payload."""
+    pairs, marks, _length = pair_substitutions(history)
+    by_id = {str(p["playerId"]): p for p in player_perfs}
+    for h in history:
+        if h["minutes"] <= 0:
+            continue
+        key = str(h["id"])
+        perf = by_id.get(key)
+        if perf is None:
+            perf = {"playerId": key, "playerName": h.get("name") or f"Player {key}", "rating": 0.0, "goals": 0, "assists": 0,
+                    "passes": 0, "passAccuracy": 0, "shots": 0, "shotAccuracy": 0, "saves": 0, "penaltySaves": 0,
+                    "tackles": 0, "tacklePercentage": 0, "interceptions": 0, "cleanSheet": goals_against == 0,
+                    "yellowCard": False, "redCard": False, "isMotm": False}
+            player_perfs.append(perf)
+            by_id[key] = perf
+        perf["_pos"] = h.get("pos")
+        m = marks.get(h["id"])
+        if m and "in_minute" in m:
+            perf["subInMinute"] = m["in_minute"]
+        if m and "out_minute" in m:
+            perf["subOutMinute"] = m["out_minute"]
+    starters = [p for p in player_perfs if "subInMinute" not in p]
+    bench = sorted((p for p in player_perfs if "subInMinute" in p), key=lambda p: (p["subInMinute"], str(p["playerId"])))
+    player_perfs[:] = starters + bench
+    subs = []
+    for p in pairs:
+        out_perf, in_perf = by_id.get(str(p["out"]["id"])), by_id.get(str(p["incoming"]["id"]))
+        if out_perf and in_perf:
+            subs.append({"minute": p["minute"], "playerOutName": out_perf["playerName"], "playerInName": in_perf["playerName"],
+                         "playerOutId": str(p["out"]["id"]), "playerInId": str(p["incoming"]["id"])})
+    return subs
+
+def estimate_keeper_saves(player_perfs, shots_on_target_against, goals_against):
+    """Only when the export has no saves at all: shots on target that were not goals were saved."""
+    if sum(p.get("saves", 0) for p in player_perfs) > 0:
+        return False
+    saved = shots_on_target_against - goals_against
+    if saved <= 0:
+        return False
+    keepers = [p for p in player_perfs if p.get("_pos") == 0]
+    if not keepers:
+        return False
+    keepers[0]["saves"] = saved
+    return True
+
+def build_league_table(fixtures, comp_obj_id, max_date_raw=None):
+    """fixtures: dicts with competition_object_id, home_team_id, away_team_id, date_raw, completed, home_score, away_score.
+    Returns (rows sorted by points, goal difference, goals scored; number of that day's matches still unplayed)."""
+    teams, pending = {}, 0
+
+    def team(tid):
+        return teams.setdefault(tid, {"team_id": tid, "played": 0, "won": 0, "drawn": 0, "lost": 0, "gf": 0, "ga": 0, "pts": 0})
+
+    for f in fixtures:
+        if f["competition_object_id"] != comp_obj_id or f["home_team_id"] <= 0 or f["away_team_id"] <= 0:
+            continue
+        h, a = team(f["home_team_id"]), team(f["away_team_id"])
+        in_time = max_date_raw is None or f["date_raw"] <= max_date_raw
+        if f["completed"] and in_time:
+            hs, a_s = f["home_score"], f["away_score"]
+            if 0 <= hs < 60 and 0 <= a_s < 60:
+                h["played"] += 1; a["played"] += 1
+                h["gf"] += hs; h["ga"] += a_s; a["gf"] += a_s; a["ga"] += hs
+                if hs > a_s:
+                    h["won"] += 1; h["pts"] += 3; a["lost"] += 1
+                elif hs < a_s:
+                    a["won"] += 1; a["pts"] += 3; h["lost"] += 1
+                else:
+                    h["drawn"] += 1; a["drawn"] += 1; h["pts"] += 1; a["pts"] += 1
+        elif not f["completed"] and max_date_raw is not None and f["date_raw"] == max_date_raw:
+            pending += 1
+    rows = sorted(teams.values(), key=lambda t: (-t["pts"], -(t["gf"] - t["ga"]), -t["gf"], t["team_id"]))
+    return rows, pending
+
+def _read_csv_rows(path):
+    try:
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            return list(csv.DictReader(f))
+    except Exception:
+        return []
+
+def snapshot_lineup(snapshot_dir, team_id):
+    """The club's last-match record from a snapshot (last_match_players.csv)."""
+    rows = []
+    for r in _read_csv_rows(os.path.join(snapshot_dir, "last_match_players.csv")):
+        if _i(r.get("team_id")) != team_id:
+            continue
+        pid = _i(r.get("player_id"))
+        if pid <= 0:
+            continue
+        pos = r.get("actual_position_id")
+        rows.append({"id": pid, "minutes": _i(r.get("minutes_played")), "name": r.get("display_name") or "",
+                     "pos": _i(pos) if str(pos or "").strip() != "" else None,
+                     "sub": (_i(r.get("player_fact_raw")) // 8) % 2 == 1})
+    return rows
+
+def snapshot_league_position(snapshot_dir, team_id, comp_obj_id, date_raw):
+    """Position in the league on the day of the match, from the snapshot's season fixtures; None when unknown."""
+    if not comp_obj_id:
+        return None
+    fixtures = []
+    for r in _read_csv_rows(os.path.join(snapshot_dir, "fixtures.csv")):
+        if _i(r.get("competition_object_id")) != comp_obj_id:
+            continue
+        fixtures.append({"competition_object_id": comp_obj_id, "home_team_id": _i(r.get("home_team_id")),
+                         "away_team_id": _i(r.get("away_team_id")), "date_raw": _i(r.get("date_raw")),
+                         "completed": str(r.get("is_completed", "")).strip() in ("1", "true", "True"),
+                         "home_score": _i(r.get("home_score"), -1), "away_score": _i(r.get("away_score"), -1)})
+    rows, _pending = build_league_table(fixtures, comp_obj_id, date_raw or None)
+    for i, t in enumerate(rows, start=1):
+        if t["team_id"] == team_id and len(rows) >= 2:
+            return i
+    return None
+
+def _is_league_name(name):
+    """A regular league (not a cup, European competition or play-off). 'Championship' is a league: it must not be
+    taken for the Champions League."""
+    c = str(name or "").lower().replace("championship", "league")
+    if any(k in c for k in ("cup", "trophy", "shield", "fa", "uefa", "champions", "conference", "europa", "play-off", "playoff")):
+        return False
+    return True
+
+def _team_row(rows, idx):
+    """The team file's row for team_index idx (found by its column, not by its position in the file)."""
+    for r in rows:
+        if str(r.get("team_index", "")).strip() != "" and _i(r.get("team_index"), -1) == idx:
+            return r
+    return rows[idx] if len(rows) > idx else (rows[0] if rows else {})
 
 def import_atlas_folder(folder, folder_id, snapshots_ready):
     part_csv = os.path.join(folder, "16_match_participants_wide.csv")
@@ -488,6 +701,9 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
     completed_matches = []
     managed_squad_player_ids = set()
     latest = {}
+    latest_snap = None
+    league_comp_id = 0
+    match_date_raw = 0
 
     if os.path.exists(snapshots_ready):
         s_folders = [os.path.join(snapshots_ready, d) for d in os.listdir(snapshots_ready) if os.path.isdir(os.path.join(snapshots_ready, d))]
@@ -521,6 +737,7 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
                         opponent_score = _i(latest.get("opponent_score"))
                         result_badge = latest.get("result") or latest.get("managed_team_result") or ("W" if managed_score > opponent_score else ("D" if managed_score == opponent_score else "L"))
                         match_date = latest.get("date") or match_date
+                        match_date_raw = _i(latest.get("date_raw"))
                         if latest.get("managed_team_id"):
                             try: managed_team_id = int(latest["managed_team_id"])
                             except: pass
@@ -533,14 +750,11 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
                         tid = _i(tl.get("team_id"))
                         tname = tl.get("team_name") or ""
                         if tid == managed_team_id or (managed_club_name and managed_club_name.lower() in tname.lower()):
+                            # only the league's name is taken from here: the stored table position is refreshed
+                            # now and then (it can stay at the pre-season value), so it is not used
                             pld = _i(tl.get("matches_played"))
-                            pos_val = _i(tl.get("current_table_position"))
-                            if pld > best_pld and pos_val > 0:
+                            if pld > best_pld:
                                 best_pld = pld
-                                league_pos = pos_val
-                                if tl.get("league_name"): current_league_name = tl["league_name"]
-                            elif best_pld == -1 and pos_val > 0:
-                                league_pos = pos_val
                                 if tl.get("league_name"): current_league_name = tl["league_name"]
 
             # Extract Managed Squad player IDs
@@ -551,6 +765,24 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
                         if rtid == managed_team_id and r.get("player_id"):
                             try: managed_squad_player_ids.add(int(r["player_id"]))
                             except: pass
+
+    # League position from the season's results (the competition of this match if it is a league match, else the
+    # competition the club has played most league matches in)
+    if latest_snap:
+        if latest and _is_league_name(latest.get("competition_name")) and _i(latest.get("competition_object_id")) > 0:
+            league_comp_id = _i(latest.get("competition_object_id"))
+        else:
+            seen = {}
+            for m in completed_matches:
+                cid = _i(m.get("competition_object_id"))
+                if cid > 0 and _is_league_name(m.get("competition_name")):
+                    seen[cid] = seen.get(cid, 0) + 1
+            if seen:
+                league_comp_id = max(seen, key=seen.get)
+        try:
+            league_pos = snapshot_league_position(latest_snap, managed_team_id, league_comp_id, match_date_raw)
+        except Exception:
+            league_pos = None
 
     # Determine Playoff vs Regular League vs Cup
     raw_comp = latest.get("competition_name") or current_league_name
@@ -592,6 +824,10 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
     with open(part_csv, "r", encoding="utf-8-sig") as pf:
         participants = list(csv.DictReader(pf))
 
+    history = snapshot_lineup(latest_snap, managed_team_id) if latest_snap else []
+    history_names = {h["id"]: h["name"] for h in history if h.get("name")}
+    managed_squad_player_ids.update(h["id"] for h in history if h["minutes"] > 0)   # a loaned-in player counts too
+
     count0 = 0
     count1 = 0
     max_minutes = 0
@@ -619,8 +855,8 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
     with open(teams_csv, "r", encoding="utf-8-sig") as tf:
         team_rows = list(csv.DictReader(tf))
 
-    m_team = team_rows[managed_team_idx] if len(team_rows) > managed_team_idx else (team_rows[0] if team_rows else {})
-    o_team = team_rows[opp_team_idx] if len(team_rows) > opp_team_idx else (team_rows[1] if len(team_rows) > 1 else {})
+    m_team = _team_row(team_rows, managed_team_idx)
+    o_team = _team_row(team_rows, opp_team_idx)
 
     # Real Extra Time & Penalties extraction
     is_playoff_leg1 = is_playoff and ("leg 1" in stage_val.lower())
@@ -640,18 +876,22 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
     if home_pen >= 255 or home_pen < 0: home_pen = 0
     if away_pen >= 255 or away_pen < 0: away_pen = 0
 
-    # Man of the Match directly from the game's man_of_the_match column
-    top_player = ""
-    highest_rating = -1.0
+    # Man of the match straight from the game's own flag (either team can win it), else the best rating
+    def _name_of(p):
+        return p.get("player_name") or history_names.get(_i(p.get("player_id"))) or "Player"
+    motm_row = None
     for p in participants:
-        r = _f(p.get("game_rating"), 6.0)
-        is_motm = (str(p.get("man_of_the_match") or "").lower() in ("true", "1"))
-        if is_motm and p.get("player_name"):
-            top_player = p.get("player_name", "")
+        if str(p.get("man_of_the_match") or "").strip().lower() in ("true", "1"):
+            motm_row = p
             break
-        if r > highest_rating and p.get("player_name"):
-            highest_rating = r
-            top_player = p.get("player_name", "")
+    if motm_row is None:
+        highest_rating = -1.0
+        for p in participants:
+            r = _f(p.get("game_rating"), 0.0)
+            if r > highest_rating:
+                highest_rating, motm_row = r, p
+    top_player = _name_of(motm_row) if motm_row is not None else ""
+    motm_is_opponent = motm_row is not None and _i(motm_row.get("team_index")) != managed_team_idx
 
     shots_for = _i(m_team.get("shots") or m_team.get("shots_on_target"))
     shots_against = _i(o_team.get("shots") or o_team.get("shots_on_target"))
@@ -661,9 +901,14 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
     passes_a = _i(o_team.get("passes"))
     pass_acc = _i(_pct(m_team.get("pass_accuracy_pct_derived")))
     poss = _i(_pct(m_team.get("possession") or m_team.get("possession_pct")))
-    if poss <= 0 and (passes_f + passes_a) > 0:
-        poss = int((passes_f / (passes_f + passes_a)) * 100)
-    if poss <= 0: poss = 52
+    poss_estimated = False
+    if poss <= 0:
+        # The exporter has no possession figure: the share of all passes is the closest thing it records.
+        poss_estimated = True
+        if (passes_f + passes_a) > 0:
+            poss = max(25, min(75, int(passes_f / (passes_f + passes_a) * 100 + 0.5)))
+        else:
+            poss = 50
 
     # Parse real player performances from 16_match_participants_wide.csv
     player_perfs = []
@@ -675,7 +920,7 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
         p_minutes = _f(p.get("minutes_played"), -1.0)
         played = not (max_minutes > 0 and 0 <= p_minutes <= 0)   # export lists the whole matchday squad
         if p_team == managed_team_idx and played:
-            p_name = p.get("player_name") or "Player"
+            p_name = _name_of(p)
             p_id = p.get("player_id", "")
             p_goals = _i(p.get("goals_derived") or p.get("npk_goals"))
             p_assists = _i(p.get("assists"))
@@ -696,7 +941,7 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
                     t_att = float(p_tackles)
                     t_won = _f(p.get("tackles_completed"), p_tackles)
                 p_tpct = min(100, int(t_won / t_att * 100)) if t_att > 0 else 0
-            is_motm = (p_name == top_player or str(p.get("man_of_the_match") or "").lower() in ("true", "1"))
+            is_motm = p is motm_row
 
             player_perfs.append({
                 "playerId": str(p_id),
@@ -708,6 +953,8 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
                 "passAccuracy": p_pacc,
                 "shots": p_shots,
                 "shotAccuracy": p_sacc,
+                "saves": _i(p.get("saves")),
+                "penaltySaves": _i(p.get("penalty_saves")),
                 "tackles": p_tackles,
                 "tacklePercentage": p_tpct,
                 "interceptions": _i(p.get("interceptions")),
@@ -719,6 +966,19 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
 
             for _g in range(p_goals):
                 goal_players.append(p_name)
+
+    # The game's own record of the last match adds who replaced whom and any player the export left out (a loan
+    # signing, say). It is only used when it is about the same players as the export.
+    substitutions = []
+    if history:
+        if lineup_matches_export(history, {str(pp["playerId"]) for pp in player_perfs}):
+            substitutions = apply_lineup(player_perfs, history, opponent_score)
+        else:
+            print("  (the game's last-match record is about different players: substitutions are not sent)")
+    if estimate_keeper_saves(player_perfs, _i(o_team.get("shots_on_target")), opponent_score):
+        print("  (the export has no saves: the goalkeeper's saves are worked out from shots on target)")
+    for pp in player_perfs:
+        pp.pop("_pos", None)
 
     # The export has no goal minutes: spread them evenly over the match and flag them as estimated.
     for k, scorer in enumerate(goal_players, start=1):
@@ -757,13 +1017,16 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
         "shotsFor": shots_for,
         "shotsAgainst": shots_against,
         "possession": poss,
+        "possessionEstimated": poss_estimated,
         "passingAccuracy": pass_acc,
         "expectedGoals": round(xg_f, 2),
         "expectedGoalsAgainst": round(xg_a, 2),
         "motmName": top_player,
+        "motmIsOpponent": motm_is_opponent,
         "leaguePosition": league_pos if (league_pos and league_pos > 0) else None,
         "detailSource": "atlas",
         "playerPerformances": player_perfs,
+        "substitutions": substitutions,
         "goalDetails": goal_details
     }
 
@@ -819,6 +1082,13 @@ def watch_atlas_exports():
                     teams_csv = os.path.join(folder, "18_match_teams_wide.csv")
 
                     if (os.path.exists(ready_file) or os.path.exists(alt_ready)) and os.path.exists(part_csv) and os.path.exists(teams_csv):
+                        first_seen = atlas_first_seen.setdefault(folder_id, time.time())
+                        if time.time() - first_seen < ATLAS_DEFER_SECONDS:
+                            if folder_id not in atlas_deferred_noted:
+                                atlas_deferred_noted.add(folder_id)
+                                print(f"[PROJECT ATLAS] New export {folder_id}: waiting up to {ATLAS_DEFER_SECONDS} s for the "
+                                      "Live Editor script to report the match itself (it adds more detail).")
+                            continue
                         try:
                             import_atlas_folder(folder, folder_id, snapshots_ready)
                             processed_atlas_folders.add(folder_id)
@@ -838,6 +1108,92 @@ def watch_atlas_exports():
             traceback.print_exc()
         time.sleep(2)
 
+OUTBOX_SETTLE_SECONDS = 1
+OUTBOX_BAD_AFTER_SECONDS = 90
+
+def _write_outbox_log(root, ident, text):
+    try:
+        with open(os.path.join(root, "bridge_send_log.txt"), "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{ident}] {text}\n")
+    except Exception:
+        pass
+
+def check_outbox_once(roots=None, now=None, beat=True):
+    """The Live Editor script saves every transfer and match as a small .json file in Documents\\FC26 Export\\outbox.
+    Reading those files here means the script does not have to start a helper program for each one (every helper
+    program flashes a command window on top of the game). bridge_watching.txt tells the script that this bridge is
+    reading the folder, so it only starts its own sender if a file is still waiting after a while."""
+    now = time.time() if now is None else now
+    for root in (atlas_roots() if roots is None else roots):
+        if beat:
+            try:
+                with open(os.path.join(root, "bridge_watching.txt"), "w") as f:
+                    f.write(str(int(now)))
+            except Exception:
+                pass
+        outbox = os.path.join(root, "outbox")
+        if not os.path.isdir(outbox):
+            continue
+        entries = []
+        for name in os.listdir(outbox):
+            if name.lower().endswith(".json"):
+                path = os.path.join(outbox, name)
+                try:
+                    entries.append((os.path.getmtime(path), name, path))
+                except OSError:
+                    pass
+        for mtime, name, path in sorted(entries):
+            if path in _outbox_handled:
+                try:
+                    os.remove(path)                      # stored earlier but could not be deleted then
+                except OSError:
+                    pass
+                continue
+            age = now - mtime
+            if age < OUTBOX_SETTLE_SECONDS:
+                continue                                  # the script may still be writing it
+            try:
+                with open(path, "rb") as f:
+                    raw = f.read()
+            except OSError:
+                continue                                  # locked: try again on the next pass
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("latin-1")
+            ident = name[:-5]
+            status, reply = process_payload_text(text)
+            if status == 200:
+                _outbox_handled.add(path)
+                try:
+                    os.remove(path)
+                    _outbox_handled.discard(path)
+                except OSError:
+                    pass
+                _write_outbox_log(root, ident, "HTTP 200 (read from the outbox folder by the bridge)")
+            elif age > OUTBOX_BAD_AFTER_SECONDS:
+                try:
+                    os.replace(path, path + ".bad")       # unreadable after a minute and a half: not just half-written
+                except OSError:
+                    pass
+                _write_outbox_log(root, ident, f"REFUSED ({reply}) - renamed to .bad")
+
+_outbox_handled = set()
+
+def watch_outbox():
+    last_beat = 0.0
+    while True:
+        try:
+            now = time.time()
+            beat = now - last_beat >= 5
+            check_outbox_once(now=now, beat=beat)
+            if beat:
+                last_beat = now
+        except Exception:
+            print("[OUTBOX] watcher error:")
+            traceback.print_exc()
+        time.sleep(1)
+
 if __name__ == "__main__":
     local_ip = get_local_ip()
     port = LOCAL_PORT
@@ -856,6 +1212,8 @@ if __name__ == "__main__":
         
     try:
         threading.Thread(target=watch_atlas_exports, daemon=True).start()
+        threading.Thread(target=watch_outbox, daemon=True).start()
+        print("🟢 Outbox folder watcher active (the Live Editor script saves payloads there)")
         print("🟢 Project Atlas hot-folder auto-importer active (Documents\\FC26 Export)")
         with ReusableServer(("", port), TelemetryHandler) as httpd:
             print(f"🟢 Python Bridge actively listening on Port {port}")

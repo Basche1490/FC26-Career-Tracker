@@ -83,6 +83,86 @@ class TelemetryProcessorTest {
         assertTrue(match.playerPerformances.first { it.playerId == "p6" }.isMotm)
     }
 
+    private val matchWithOpponentMotm = """
+        {"dataType":"match","detailSource":"atlas","opponentName":"Chelsea","isHome":true,"goalsFor":1,"goalsAgainst":3,
+         "date":"2026-02-08","competition":"Premier League","stage":"Matchday 7",
+         "shotsFor":7,"shotsAgainst":14,"expectedGoals":0.8,"expectedGoalsAgainst":2.6,"possession":38,
+         "possessionEstimated":true,"passingAccuracy":78,"motmName":"Cole Palmer","motmIsOpponent":true,
+         "playerPerformances":[
+           {"playerId":"p1","playerName":"Player 1","rating":6.2,"goals":0,"assists":0,"passes":20,"passAccuracy":80,"shots":0,
+            "tackles":1,"tacklePercentage":50,"interceptions":0,"saves":4,"penaltySaves":1,"isMotm":false},
+           {"playerId":"p6","playerName":"Player 6","rating":7.4,"goals":1,"assists":0,"passes":30,"passAccuracy":85,"shots":3,
+            "shotAccuracy":66,"tackles":0,"tacklePercentage":0,"interceptions":0,"isMotm":false,"subOutMinute":45},
+           {"playerId":"p7","playerName":"Player 7","rating":6.8,"goals":0,"assists":0,"passes":25,"passAccuracy":80,"shots":0,
+            "tackles":2,"tacklePercentage":50,"interceptions":1,"isMotm":false,"subInMinute":45},
+           {"playerId":"461607","playerName":"Fabian Bravo","rating":7.0,"goals":0,"assists":0,"passes":0,"passAccuracy":0,"shots":0,
+            "tackles":0,"tacklePercentage":0,"interceptions":0,"isMotm":false}],
+         "substitutions":[{"minute":45,"playerOutName":"Player 6","playerInName":"Player 7","playerOutId":"p6","playerInId":"p7"},
+                          {"minute":70,"playerOutName":"Fabian Bravo","playerInName":"Someone New","playerOutId":"461607","playerInId":"555"}]}
+    """
+
+    @Test
+    fun opposingManOfTheMatchIsNamedAndNoneOfOurPlayersIsStarred() {
+        val state = AppState(leagueName = "Premier League", players = squad(14))
+        val match = run(state, event(matchWithOpponentMotm)).state.recentMatches.single()
+
+        assertEquals("Cole Palmer", match.motmName)
+        assertTrue(match.motmIsOpponent)
+        assertTrue(match.playerPerformances.none { it.isMotm }) // our best player used to get the star anyway
+    }
+
+    @Test
+    fun opposingManOfTheMatchIsRecognisedEvenWhenThePayloadDoesNotSayIt() {
+        // An older script sent the name only: nobody in the export carries it, so he played for the other side.
+        val payload = matchWithOpponentMotm.replace(""""motmIsOpponent":true,""", "")
+        val match = run(AppState(leagueName = "Premier League", players = squad(14)), event(payload)).state.recentMatches.single()
+
+        assertTrue(match.motmIsOpponent)
+        assertTrue(match.playerPerformances.none { it.isMotm })
+    }
+
+    @Test
+    fun ourOwnManOfTheMatchIsStarredAndNotCalledAnOpponent() {
+        val payload = matchWithOpponentMotm
+            .replace(""""motmName":"Cole Palmer","motmIsOpponent":true""", """"motmName":"Player 6"""")
+        val match = run(AppState(leagueName = "Premier League", players = squad(14)), event(payload)).state.recentMatches.single()
+
+        assertFalse(match.motmIsOpponent)
+        assertEquals(listOf("p6"), match.playerPerformances.filter { it.isMotm }.map { it.playerId })
+    }
+
+    @Test
+    fun substitutionsSavesAndAPlayerWhoIsNotInTheSquadSurviveIntoTheMatch() {
+        val match = run(AppState(leagueName = "Premier League", players = squad(14)), event(matchWithOpponentMotm))
+            .state.recentMatches.single()
+
+        assertEquals(2, match.substitutions.size)
+        val first = match.substitutions[0]
+        assertEquals(45, first.minute)
+        assertEquals("p6", first.playerOutId)
+        assertEquals("p7", first.playerInId)
+        // a player the squad does not know (a loan signing) is shown by the name the game gave
+        val second = match.substitutions[1]
+        assertEquals("Fabian Bravo", second.playerOutName)
+        assertEquals("Someone New", second.playerInName)
+
+        val keeper = match.playerPerformances.first { it.playerId == "p1" }
+        assertEquals(4, keeper.saves)
+        assertEquals(1, keeper.penaltySaves)
+        assertEquals(45, match.playerPerformances.first { it.playerId == "p6" }.subOutMinute)
+        assertEquals(45, match.playerPerformances.first { it.playerId == "p7" }.subInMinute)
+
+        val loanee = match.playerPerformances.first { it.playerId == "461607" }
+        assertEquals("Fabian Bravo", loanee.playerName)
+        assertEquals(7.0, loanee.rating, 0.001)
+        assertEquals(0, loanee.passes) // nothing is invented for a player the export had no numbers for
+        assertEquals(0, loanee.passAccuracy)
+        assertEquals(4, match.playerPerformances.size) // nobody is invented around the real line-up
+
+        assertTrue(match.possessionEstimated)
+        assertEquals(38, match.possession)
+    }
+
     @Test
     fun fullPayloadFromAnotherSourceIsNotFlagged() {
         val payload = """

@@ -1,9 +1,11 @@
--- FC26 AutoCapture v2.5.0 (Precision Live Telemetry & Atlas Tracker)
+-- FC26 AutoCapture v2.6.0 (Precision Live Telemetry & Atlas Tracker)
 -- Complete support for EFL Championship, Premier League, FA Cup, Carabao Cup, Play-offs.
 -- Gathers REAL in-game data: Real League Position, Real Lineups, Real Goal Scorers, Real MOTM.
 -- Strict League Rules: League matches NEVER have extra time or penalty shootouts.
 -- Accurate Matchday XX calculation for all league matches; dedicated tournament rounds for cups.
 -- Safe session lifecycle: No phantom beaming on startup; immediate beam on actual match completion.
+-- v2.6: complete match log (substitutions, loan players, saves, opposing man of the match, league position from
+-- the real results); no flashing command windows.
 
 local MEMORY = require "imports/core/memory"
 require "imports/other/helpers"
@@ -12,7 +14,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "2.5.0"
+local VERSION = "2.6.0"
 local SCRIPT_INSTANCE = "FC26_AUTOCAP_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
 _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] = SCRIPT_INSTANCE
 
@@ -82,11 +84,234 @@ local OUTBOX_DIR = COMMUNITY_ROOT .. "/outbox"
 
 local get_current_career_date -- defined further down; the match code above it needs it
 
+-- BEGIN quiet_exec (this exact block is also run by tests/lua/test_transfer_logic.lua)
+-- Every program a script starts through os.execute / io.popen opens a console window on top of the game for a moment.
+-- This block keeps that to the minimum: folders that already exist are never "created" again, folder contents are read
+-- through Live Editor's own functions when it has them, and the few programs that still have to run are started
+-- hidden when Live Editor allows it (shellExecute with SW_HIDE). It also covers the Project Atlas exporter, which makes
+-- folders with os.execute: its calls are answered here without starting anything when the folder is already there.
+local QUIET = { hidden = nil, dir_api = false, file_api = false, started = 0, windows = 0, notes = {} }
+QUIET.real_execute = rawget(_G, "FC26_REAL_OS_EXECUTE") or os.execute
+rawset(_G, "FC26_REAL_OS_EXECUTE", QUIET.real_execute)
+QUIET.counter = 0
+
+function QUIET.comspec()
+    local c = os.getenv("ComSpec")
+    if c == nil or c == "" then c = "cmd.exe" end
+    return c
+end
+
+-- true when the folder exists (decided by the file system alone, no program is started)
+function QUIET.dir_exists(path)
+    path = tostring(path or ""):gsub("[/\\]+$", "")
+    if path == "" then return false end
+    local ok, _, code = os.rename(path, path) -- renaming a folder to itself changes nothing; only a missing folder fails with "no such file"
+    if ok or code == 13 or code == 17 then return true end
+    local probe = path .. "/.fc26_probe"
+    local f = io.open(probe, "wb")
+    if f then
+        f:close()
+        pcall(os.remove, probe)
+        return true
+    end
+    return false
+end
+
+function QUIET.sleep_ms(ms)
+    local fn = rawget(_G, "sleep")
+    if type(fn) == "function" and pcall(fn, ms) then return end
+    local t = os.clock()
+    while os.clock() - t < ms / 1000 do end
+end
+
+function QUIET.wait_until(fn, max_ms)
+    local waited = 0
+    while true do
+        if fn() then return true end
+        if waited >= max_ms then return false end
+        QUIET.sleep_ms(25)
+        waited = waited + 25
+    end
+end
+
+-- Starts a program with its window hidden. Returns false when Live Editor cannot do that (the caller then decides
+-- whether a visible window is acceptable).
+function QUIET.hidden_run(program, params)
+    if QUIET.hidden == false then return false end
+    local fn = rawget(_G, "shellExecute")
+    if type(fn) ~= "function" then return false end
+    local ok = pcall(fn, program, params or "", "", 0)
+    if ok then QUIET.started = QUIET.started + 1 end
+    return ok
+end
+
+-- Runs "cmd /c <inner>" and waits until it has finished (a "done" marker is written at the end).
+function QUIET.run_and_wait(inner, max_ms)
+    QUIET.counter = QUIET.counter + 1
+    local temp_dir = os.getenv("TEMP") or os.getenv("TMP") or "."
+    local done = temp_dir .. "/fc26_done_" .. tostring(os.time()) .. "_" .. QUIET.counter .. ".txt"
+    local full = inner .. ' & echo x> "' .. win_path(done) .. '"'
+    if QUIET.hidden ~= false and QUIET.hidden_run(QUIET.comspec(), '/c ' .. full) then
+        if QUIET.wait_until(function() return file_exists(done) end, max_ms or 4000) then
+            pcall(os.remove, done)
+            return true
+        end
+    end
+    QUIET.windows = QUIET.windows + 1
+    pcall(QUIET.real_execute, 'cmd /c ' .. full) -- visible, but it finishes before it returns
+    local ok = file_exists(done)
+    if ok then pcall(os.remove, done) end
+    return ok
+end
+
+-- Creates a folder (and its parents). Nothing is started when it already exists.
+function QUIET.make_dir(path)
+    if QUIET.dir_exists(path) then return true end
+    local win = win_path(path)
+    if QUIET.hidden ~= false and QUIET.hidden_run(QUIET.comspec(), '/c mkdir "' .. win .. '"') then
+        if QUIET.wait_until(function() return QUIET.dir_exists(path) end, 2500) then return true end
+    end
+    QUIET.windows = QUIET.windows + 1
+    pcall(QUIET.real_execute, 'if not exist "' .. win .. '" mkdir "' .. win .. '"')
+    return QUIET.dir_exists(path)
+end
+
+function QUIET.base_name(entry)
+    local name = tostring(entry or ""):gsub("[/\\]+$", ""):match("([^/\\]+)$")
+    return name
+end
+
+-- Reads a listing through a Live Editor function (silent). nil = not available / not trusted.
+function QUIET.api_list(fn_name, trusted, path, extra)
+    local fn = rawget(_G, fn_name)
+    if not trusted or type(fn) ~= "function" then return nil end
+    local ok, res = pcall(fn, win_path(path), extra)
+    if not ok or type(res) ~= "table" then return nil end
+    local names = {}
+    for _, entry in ipairs(res) do
+        local name = QUIET.base_name(entry)
+        if name and name ~= "." and name ~= ".." then names[#names + 1] = name end
+    end
+    return names
+end
+
+-- Names via "dir" (a program is started: hidden when possible).
+function QUIET.shell_list(dir_command)
+    QUIET.counter = QUIET.counter + 1
+    local temp_dir = os.getenv("TEMP") or os.getenv("TMP") or "."
+    local out = temp_dir .. "/fc26_list_" .. tostring(os.time()) .. "_" .. QUIET.counter .. ".txt"
+    QUIET.run_and_wait(string.format('%s > "%s" 2>nul', dir_command, win_path(out)), 4000)
+    local names = {}
+    local tf = io.open(out, "r")
+    if tf then
+        for line in tf:lines() do
+            local name = trim(line)
+            if name ~= "" then names[#names + 1] = name end
+        end
+        tf:close()
+        pcall(os.remove, out)
+    end
+    return names
+end
+
+-- Sub-folder names of a folder; newest_first only matters for the "dir" fallback (the API gives no dates, so names
+-- are sorted descending, which is newest first for the date-stamped export folders).
+function QUIET.list_dirs(path, newest_first)
+    if not QUIET.dir_exists(path) then return {} end -- nothing to list: no need to ask Windows
+    local names = QUIET.api_list("getDirectoryList", QUIET.dir_api, path)
+    if names then
+        if newest_first then table.sort(names, function(a, b) return a > b end) end
+        return names
+    end
+    return QUIET.shell_list(string.format('dir /b /ad%s "%s"', newest_first and " /o:-d" or "", win_path(path)))
+end
+
+-- File names (with the given extension, e.g. ".json") in a folder.
+function QUIET.list_files(path, extension)
+    if not QUIET.dir_exists(path) then return {} end
+    local names = QUIET.api_list("getFileList", QUIET.file_api, path, "*" .. extension)
+    if not names then
+        names = QUIET.shell_list(string.format('dir /b "%s"', win_path(path .. "/*" .. extension)))
+    end
+    local out = {}
+    for _, name in ipairs(names) do
+        if name:lower():sub(-#extension) == extension then out[#out + 1] = name end
+    end
+    return out
+end
+
+-- Starts a .bat file: hidden when Live Editor allows it, otherwise the old minimized window.
+function QUIET.run_bat(bat_path)
+    local win = win_path(bat_path)
+    if QUIET.hidden ~= false and QUIET.hidden_run(QUIET.comspec(), '/c "' .. win .. '"') then return true, true end
+    QUIET.windows = QUIET.windows + 1
+    pcall(QUIET.real_execute, 'start /min "" cmd /c "' .. win .. '"')
+    return true, false
+end
+
+-- One-time check of what this Live Editor can do. Costs nothing when it cannot do anything special.
+function QUIET.probe(folder)
+    QUIET.make_dir(folder)
+    local marker = folder .. "/quiet_probe.txt"
+    local f = io.open(marker, "wb")
+    if f then f:write("probe") f:close() end
+
+    if QUIET.hidden == nil and type(rawget(_G, "shellExecute")) == "function" then
+        local test = folder .. "/quiet_hidden_test.txt"
+        pcall(os.remove, test)
+        if QUIET.hidden_run(QUIET.comspec(), '/c echo ok> "' .. win_path(test) .. '"') then
+            QUIET.hidden = QUIET.wait_until(function() return file_exists(test) end, 2500)
+        else
+            QUIET.hidden = false
+        end
+        pcall(os.remove, test)
+    elseif QUIET.hidden == nil then
+        QUIET.hidden = false
+    end
+
+    local dirs = QUIET.api_list("getDirectoryList", true, folder)
+    if dirs then
+        for _, name in ipairs(dirs) do
+            if name:lower() == "outbox" then QUIET.dir_api = true end
+        end
+    end
+    local files = QUIET.api_list("getFileList", true, folder, "*.txt")
+    if files then
+        for _, name in ipairs(files) do
+            if name:lower() == "quiet_probe.txt" then QUIET.file_api = true end
+        end
+    end
+    pcall(os.remove, marker)
+end
+
+function QUIET.describe()
+    return string.format("hidden program start: %s | folder listing: %s / %s | visible windows opened so far: %d",
+        QUIET.hidden and "yes" or "no (Live Editor has no working shellExecute)",
+        QUIET.dir_api and "Live Editor function" or "dir command",
+        QUIET.file_api and "Live Editor function" or "dir command", QUIET.windows)
+end
+
+-- Answer the Atlas exporter's "create this folder" commands here (nothing is started when the folder exists).
+-- Everything else goes to the real os.execute unchanged.
+os.execute = function(command, ...)
+    if type(command) == "string" then
+        local path = command:match('^if not exist "([^"]+)" mkdir "[^"]+"$')
+            or command:match('^cmd%.exe /C if not exist "([^"]+)" mkdir "[^"]+"$')
+        if path then
+            if QUIET.make_dir(path) then return true, "exit", 0 end
+            return nil, "exit", 1
+        end
+    end
+    return QUIET.real_execute(command, ...)
+end
+-- END quiet_exec
+
+-- Folders are only created when they are really missing (the first run on a PC); see the quiet_exec block above.
 pcall(function()
-    os.execute('if not exist "' .. win_path(COMMUNITY_ROOT) .. '" mkdir "' .. win_path(COMMUNITY_ROOT) .. '"')
-    os.execute('if not exist "' .. win_path(EXPORT_ROOT) .. '" mkdir "' .. win_path(EXPORT_ROOT) .. '"')
-    os.execute('if not exist "' .. win_path(MATCH_STATS_ROOT) .. '" mkdir "' .. win_path(MATCH_STATS_ROOT) .. '"')
-    os.execute('if not exist "' .. win_path(OUTBOX_DIR) .. '" mkdir "' .. win_path(OUTBOX_DIR) .. '"')
+    QUIET.make_dir(OUTBOX_DIR)
+    QUIET.make_dir(EXPORT_ROOT)
+    QUIET.make_dir(MATCH_STATS_ROOT)
+    QUIET.probe(COMMUNITY_ROOT)
 end)
 
 local function log_monitor(msg)
@@ -101,6 +326,8 @@ local function log_monitor(msg)
         end
     end)
 end
+
+log_monitor("Quiet mode - " .. QUIET.describe())
 
 local function is_positive_id(value)
     local number = tonumber(value)
@@ -143,7 +370,8 @@ end
 
 -- Strictly determines whether a competition is a regular league match
 local function is_league_competition(comp_name)
-    local c = tostring(comp_name or ""):lower()
+    -- "Championship" is a league; it must not trip the "champions" (Champions League) test below
+    local c = tostring(comp_name or ""):lower():gsub("championship", "league")
     if c:find("cup") or c:find("trophy") or c:find("shield") or c:find("fa") or c:find("uefa") or c:find("champions") or c:find("conference") or c:find("europa") then
         return false
     end
@@ -850,22 +1078,43 @@ end
 
 -- ---------------------------------------------------------------------------
 -- Reliable delivery to the bridge ("outbox").
--- Each payload is written to Documents\FC26 Export\outbox and a small .bat posts
--- it to the bridge on this PC. The .bat only deletes the file after the bridge
--- answers HTTP 200, and writes the HTTP code to bridge_send_log.txt. Anything
--- still in the outbox (bridge was closed, firewall hiccup...) is retried every
--- 30 s and picked up again the next time the script starts.
+-- Every payload is saved as a small .json file in Documents\FC26 Export\outbox (written under a temporary name and
+-- renamed, so nobody ever reads half a file). The PC bridge reads that folder itself, deletes each file once it has
+-- stored it, and refreshes bridge_watching.txt every few seconds so this script knows it is doing so: then no program
+-- is started at all. If a file is still there after a while (older bridge, bridge not running yet) ONE sender posts
+-- everything that is waiting in a single batch (hidden where Live Editor allows it). Files are only deleted after the
+-- bridge answered; whatever is left is retried every 30 s and picked up again the next time the script starts.
 -- ---------------------------------------------------------------------------
 local SEND_LOG = COMMUNITY_ROOT .. "/bridge_send_log.txt"
+local WATCH_FILE = COMMUNITY_ROOT .. "/bridge_watching.txt"
+local SENDER_LOCK = COMMUNITY_ROOT .. "/sender.lock"
 local OUTBOX_RETRY_SECONDS = 30
 local OUTBOX_MAX_ATTEMPTS = 40
 local OUTBOX_MAX_AGE_SECONDS = 7 * 24 * 3600
+local SENDER_DEBOUNCE_SECONDS = 2        -- a burst of payloads is collected first and goes out in one batch
+local BRIDGE_GRACE_SECONDS = 20          -- the bridge reads the folder itself; our sender only starts if it does not
+local WATCH_FRESH_SECONDS = 20
+local SENDER_LOCK_STALE_SECONDS = 180
+local SENDER_PROOF_SECONDS = 15          -- a hidden sender that leaves no trace in the log by then did not start
 
+-- BEGIN sender_bat (this exact text is also checked by tests/lua/test_transfer_logic.lua)
 local SENDER_BAT = [[
 @echo off
-set "J=@@JSON@@"
+set "OUT=@@OUTBOX@@"
 set "L=@@LOG@@"
-set "ID=@@ID@@"
+set "LOCK=@@LOCK@@"
+>"%LOCK%" echo %date% %time%
+>>"%L%" echo %date% %time% [sender] started
+for /f "usebackq delims=" %%N in (`dir /b /o:n "%OUT%\*.json" 2^>NUL`) do (
+  call :send "%OUT%\%%N" "%%~nN"
+  if errorlevel 1 goto :done
+)
+:done
+del "%LOCK%" >nul 2>&1
+(goto) 2>nul & del "%~f0" >nul 2>&1 & exit
+:send
+set "J=%~1"
+set "ID=%~2"
 set "CODE=000"
 call :try http://127.0.0.1:5050
 if not "%CODE%"=="200" ping -n 2 127.0.0.1 >nul
@@ -874,7 +1123,8 @@ if not "%CODE%"=="200" call :try http://127.0.0.1:8080
 if not "%CODE%"=="200" call :psfallback
 >>"%L%" echo %date% %time% [%ID%] HTTP %CODE%
 if "%CODE%"=="200" del "%J%" >nul 2>&1
-(goto) 2>nul & del "%~f0" >nul 2>&1 & exit
+if "%CODE%"=="200" exit /b 0
+exit /b 1
 :try
 for /f "usebackq delims=" %%C in (`curl.exe -s -o NUL -w "%%{http_code}" -m 6 -X POST -H "Content-Type: application/json; charset=utf-8" --data-binary @"%J%" %1 2^>NUL`) do set "CODE=%%C"
 exit /b
@@ -882,30 +1132,75 @@ exit /b
 for /f "usebackq delims=" %%C in (`powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:5050 -Method Post -ContentType 'application/json; charset=utf-8' -InFile '%J%' -TimeoutSec 6).StatusCode } catch { 0 }" 2^>NUL`) do set "CODE=%%C"
 exit /b
 ]]
+-- END sender_bat
 
-local outbox_pending = {} -- json path -> { id = , tries = , last_try = }
+local outbox_pending = {} -- json path -> { id = , tries = , queued_at = , last_try = }
+local outbox_serial = 0
+local sender_state = { last_launch = 0, seq = 0, hidden = false, log_size = 0, checked = true }
 
-local function launch_outbox_sender(json_path, id)
+local function file_size(path)
+    local f = io.open(path, "rb")
+    if not f then return 0 end
+    local size = f:seek("end") or 0
+    f:close()
+    return size
+end
+
+-- true while the bridge is reading the outbox folder itself (it refreshes bridge_watching.txt every few seconds)
+local function bridge_is_watching()
+    local f = io.open(WATCH_FILE, "r")
+    if not f then return false end
+    local text = f:read("*a") or ""
+    f:close()
+    local stamp = tonumber(text:match("%d+"))
+    return stamp ~= nil and math.abs(os.time() - stamp) <= WATCH_FRESH_SECONDS
+end
+
+local function sender_busy()
+    return file_exists(SENDER_LOCK) and (os.time() - sender_state.last_launch) < SENDER_LOCK_STALE_SECONDS
+end
+
+-- Starts ONE sender that posts every file waiting in the outbox. Returns true when it was started.
+local function launch_outbox_sender()
     local temp_dir = os.getenv("TEMP") or os.getenv("TMP") or "."
-    local bat_path = temp_dir .. "/fc26_send_" .. id .. ".bat"
+    sender_state.seq = sender_state.seq + 1
+    local bat_path = temp_dir .. "/fc26_send_" .. tostring(os.time()) .. "_" .. sender_state.seq .. ".bat"
     local body = SENDER_BAT
-    body = body:gsub("@@JSON@@", function() return win_path(json_path) end)
+    body = body:gsub("@@OUTBOX@@", function() return win_path(OUTBOX_DIR) end)
     body = body:gsub("@@LOG@@", function() return win_path(SEND_LOG) end)
-    body = body:gsub("@@ID@@", function() return id end)
+    body = body:gsub("@@LOCK@@", function() return win_path(SENDER_LOCK) end)
     local bf = io.open(bat_path, "w")
     if not bf then return false end
     bf:write(body)
     bf:close()
-    os.execute('start /min "" cmd /c "' .. win_path(bat_path) .. '"')
-    return true
+    sender_state.log_size = file_size(SEND_LOG)
+    local started, hidden = QUIET.run_bat(bat_path)
+    sender_state.last_launch = os.time()
+    sender_state.hidden = hidden
+    sender_state.checked = not hidden -- a hidden start is verified below
+    return started
 end
 
 local function track_outbox_file(json_path, id)
-    outbox_pending[json_path] = outbox_pending[json_path] or { id = id, tries = 0, last_try = 0 }
-    local entry = outbox_pending[json_path]
-    entry.tries = entry.tries + 1
-    entry.last_try = os.time()
-    return launch_outbox_sender(json_path, id)
+    outbox_pending[json_path] = outbox_pending[json_path] or { id = id, tries = 0, queued_at = os.time(), last_try = 0 }
+    return true
+end
+
+local function write_outbox_file(json_path, payload)
+    -- written under a temporary name first, so the bridge never reads half a payload
+    local tmp_path = json_path .. ".tmp"
+    local jf = io.open(tmp_path, "wb")
+    if jf then
+        jf:write(payload)
+        jf:close()
+        if os.rename(tmp_path, json_path) then return true end
+        pcall(os.remove, tmp_path)
+    end
+    jf = io.open(json_path, "wb")
+    if not jf then return false end
+    jf:write(payload)
+    jf:close()
+    return true
 end
 
 local function send_payload_to_bridge(payload, log_label)
@@ -918,76 +1213,98 @@ local function send_payload_to_bridge(payload, log_label)
             return
         end
 
-        -- Several payloads are often sent within the same second (a transfer window): never reuse a file name,
-        -- or the later payload would overwrite the earlier one before it was delivered.
-        local stamp, serial = tostring(os.time()), math.random(1000, 9999)
+        -- Several payloads are often saved within the same second (a transfer window): the running number keeps their
+        -- file names unique and in order, so a later payload never overwrites an earlier one before it is delivered.
+        local stamp = tostring(os.time())
         local id, json_path
         repeat
-            id = stamp .. "_" .. tostring(serial)
+            outbox_serial = outbox_serial % 999999 + 1
+            id = stamp .. "_" .. string.format("%06d", outbox_serial)
             json_path = OUTBOX_DIR .. "/" .. id .. ".json"
-            serial = serial + 1
         until not file_exists(json_path) and not outbox_pending[json_path]
-        local jf = io.open(json_path, "wb")
-        if not jf then
+        if not write_outbox_file(json_path, payload) then
             log_monitor("Cannot write " .. json_path .. " - payload not sent")
             return
         end
-        jf:write(payload)
-        jf:close()
 
-        if track_outbox_file(json_path, id) then
-            log_monitor("Queued for bridge [" .. id .. "]: " .. tostring(log_label) .. "  (result is written to bridge_send_log.txt)")
-        else
-            log_monitor("Could not start the sender for [" .. id .. "] - will retry")
-        end
+        track_outbox_file(json_path, id)
+        log_monitor("Queued for bridge [" .. id .. "]: " .. tostring(log_label) .. "  (result is written to bridge_send_log.txt)")
     end, debug.traceback)
     if not ok then
         log_monitor("Error in send_payload_to_bridge: " .. tostring(err))
     end
 end
 
--- Re-send anything the bridge has not acknowledged yet. Cheap: no process is started unless something is waiting.
+-- Every 2 s: forget what was delivered, and start the sender when something is still waiting after its grace period.
 local function service_outbox()
     local now = os.time()
+
+    -- A hidden sender must leave a trace in the log (its "started" line). If it did not, hidden start does not work here:
+    -- from now on the visible one is used, so nothing is ever left undelivered.
+    if not sender_state.checked and now - sender_state.last_launch >= SENDER_PROOF_SECONDS then
+        sender_state.checked = true
+        if file_size(SEND_LOG) <= sender_state.log_size and not file_exists(SENDER_LOCK) then
+            QUIET.hidden = false
+            log_monitor("The hidden sender left no trace - using the visible one from now on")
+        end
+    end
+
+    local watching = nil
+    local due = false
     for json_path, entry in pairs(outbox_pending) do
         if not file_exists(json_path) then
-            outbox_pending[json_path] = nil -- delivered (the .bat deleted it)
+            outbox_pending[json_path] = nil -- delivered (the bridge or the sender deleted it)
         elseif entry.tries >= OUTBOX_MAX_ATTEMPTS then
             -- leave the file in the outbox; it is adopted again on the next script start
             outbox_pending[json_path] = nil
-        elseif now - entry.last_try >= OUTBOX_RETRY_SECONDS then
+        else
+            local wait
+            if entry.tries == 0 then
+                if watching == nil then watching = bridge_is_watching() end
+                wait = watching and BRIDGE_GRACE_SECONDS or SENDER_DEBOUNCE_SECONDS
+            else
+                wait = OUTBOX_RETRY_SECONDS
+            end
+            if now - math.max(entry.queued_at, entry.last_try) >= wait then due = true end
+        end
+    end
+    if not due or sender_busy() then return end
+
+    if launch_outbox_sender() then
+        local count = 0
+        for _, entry in pairs(outbox_pending) do
             entry.tries = entry.tries + 1
             entry.last_try = now
-            launch_outbox_sender(json_path, entry.id)
-            log_monitor("Retrying undelivered payload [" .. entry.id .. "] (attempt " .. entry.tries .. ")")
+            count = count + 1
         end
+        log_monitor("Sending " .. count .. " waiting payload(s) to the bridge in one batch" ..
+            (sender_state.hidden and " (hidden)" or ""))
+    else
+        log_monitor("Could not start the sender - will retry")
     end
 end
 
 -- On startup: pick up payloads that were never delivered last time (bridge was not running).
 local function adopt_outbox_leftovers()
-    local temp_dir = os.getenv("TEMP") or os.getenv("TMP") or "."
-    local list_file = temp_dir .. "/fc26_outbox_" .. tostring(os.time()) .. ".txt"
-    pcall(os.execute, string.format('cmd /c dir /b "%s" > "%s" 2>nul', win_path(OUTBOX_DIR .. "/*.json"), win_path(list_file)))
-    local lf = io.open(list_file, "r")
-    if not lf then return 0 end
+    if bridge_is_watching() then
+        -- the bridge reads the folder itself, including files left by an earlier session
+        log_monitor("The bridge is reading the outbox folder itself - nothing to pick up here")
+        return 0
+    end
     local adopted = 0
     local now = os.time()
-    for line in lf:lines() do
-        local name = trim(line)
+    for _, name in ipairs(QUIET.list_files(OUTBOX_DIR, ".json")) do
         local ts = tonumber(name:match("^(%d+)_%d+%.json$"))
         if ts then
             local path = OUTBOX_DIR .. "/" .. name
             if now - ts > OUTBOX_MAX_AGE_SECONDS then
                 pcall(os.remove, path)
             elseif not outbox_pending[path] then
-                outbox_pending[path] = { id = name:gsub("%.json$", ""), tries = 0, last_try = 0 }
+                outbox_pending[path] = { id = (name:gsub("%.json$", "")), tries = 0, queued_at = now, last_try = 0 }
                 adopted = adopted + 1
             end
         end
     end
-    lf:close()
-    pcall(os.remove, list_file)
     if adopted > 0 then
         log_monitor("Found " .. adopted .. " undelivered payload(s) from an earlier session - sending now")
     end
@@ -997,6 +1314,7 @@ end
 -- ---------------------------------------------------------------------------
 -- Project Atlas MatchStats export folders (Documents\FC26 Export\MatchStats\ready)
 -- ---------------------------------------------------------------------------
+-- BEGIN atlas_lookup (this exact block is also run by tests/lua/test_transfer_logic.lua)
 _G["FC26_ATLAS_USED"] = _G["FC26_ATLAS_USED"] or {}
 local ATLAS_MARKERS = { "MATCH_READY", "READY_FOR_MANUAL_ZIP_AND_UPLOAD.txt" }
 
@@ -1012,37 +1330,59 @@ end
 
 -- Folder names, newest first.
 local function list_atlas_folders()
-    local ready_dir = MATCH_STATS_ROOT .. "/ready"
-    local temp_dir = os.getenv("TEMP") or os.getenv("TMP") or "."
-    local temp_file = temp_dir .. "/atlas_folders_" .. tostring(os.time()) .. ".txt"
-    pcall(os.execute, string.format('cmd /c dir /b /ad /o:-d "%s" > "%s" 2>nul', win_path(ready_dir), win_path(temp_file)))
-    local names = {}
-    local tf = io.open(temp_file, "r")
-    if tf then
-        for line in tf:lines() do
-            local name = trim(line)
-            if name ~= "" then names[#names + 1] = name end
-        end
-        tf:close()
-        pcall(os.remove, temp_file)
-    end
-    return names
+    return QUIET.list_dirs(MATCH_STATS_ROOT .. "/ready", true)
 end
+
+-- The Atlas exporter says itself which folder it published last (no folder lookup needed).
+local function last_export_folder()
+    local result = rawget(_G, "FC26_EXPORT_MATCH_STATS_LAST_EXPORT_RESULT")
+    if type(result) == "table" and result.success == true and type(result.ready_dir) == "string" and result.ready_dir ~= "" then
+        local path = (result.ready_dir:gsub("\\", "/")):gsub("/+$", "")
+        local name = path:match("([^/]+)$")
+        if name then return name, path end
+    end
+    return nil, nil
+end
+
+local SCRIPT_START_STAMP = os.date("%Y%m%d_%H%M%S")
+local ATLAS_LISTING_AFTER_SECONDS = 12   -- only look at the folder itself when the exporter has not reported one by then
+local ATLAS_LISTING_EVERY_SECONDS = 8
+local last_atlas_listing = 0
 
 -- The newest export that has not been attached to a match yet and is completely written.
 -- include_used = true (manual "sync latest") accepts the newest export even if it was used before.
-local function find_atlas_folder(include_used)
+-- waited = seconds the match has been waiting (the folder listing is only a fallback, so it starts after a while).
+local function find_atlas_folder(include_used, waited)
     local used = _G["FC26_ATLAS_USED"]
+
+    local name, path = last_export_folder()
+    if name and (include_used or not used[name]) and atlas_folder_is_ready(path) then
+        return name, path, { name }
+    end
+
+    local now = os.time()
+    if not include_used then
+        if (waited or 0) < ATLAS_LISTING_AFTER_SECONDS or now - last_atlas_listing < ATLAS_LISTING_EVERY_SECONDS then
+            return nil, nil, nil
+        end
+        last_atlas_listing = now
+    end
     local names = list_atlas_folders()
-    for _, name in ipairs(names) do
-        if include_used or not used[name] then
-            local path = MATCH_STATS_ROOT .. "/ready/" .. name
-            if atlas_folder_is_ready(path) then return name, path, names end
+    for _, folder in ipairs(names) do
+        if not include_used and not used[folder] then
+            -- export folders are named ..._YYYYMMDD_HHMMSS_...: one made before this script started belongs to an earlier match
+            local stamp = folder:match("(%d%d%d%d%d%d%d%d_%d%d%d%d%d%d)")
+            if stamp and stamp < SCRIPT_START_STAMP then used[folder] = true end
+        end
+        if include_used or not used[folder] then
+            local folder_path = MATCH_STATS_ROOT .. "/ready/" .. folder
+            if atlas_folder_is_ready(folder_path) then return folder, folder_path, names end
             return nil, nil, names -- newest export is still being written: wait for it, do not fall back to an older one
         end
     end
     return nil, nil, names
 end
+-- END atlas_lookup
 
 local function percent_value(v)
     local n = to_num(v, 0)
@@ -1055,60 +1395,197 @@ local function truthy_flag(v)
     return s == "true" or s == "1" or s == "yes"
 end
 
-local function try_read_atlas_match_stats(managed_team_id, is_home, goals_against, folder_path)
-    local participants = parse_simple_csv(folder_path .. "/16_match_participants_wide.csv")
-    local teams = parse_simple_csv(folder_path .. "/18_match_teams_wide.csv")
-    if not participants or not teams or #participants == 0 or #teams == 0 then
-        return nil
+local function read_table_rows(table_name, fields)
+    local rows = {}
+    pcall(function()
+        if type(GetDBTableRows) == "function" then
+            local raw = GetDBTableRows(table_name)
+            if type(raw) == "table" then
+                for _, rr in ipairs(raw) do
+                    local row = {}
+                    for _, f in ipairs(fields) do
+                        local v = rr[f]
+                        if v == nil then
+                            for k, val in pairs(rr) do
+                                if tostring(k):lower() == f then v = val break end
+                            end
+                        end
+                        if type(v) == "table" then v = v.value end
+                        row[f] = v
+                    end
+                    rows[#rows + 1] = row
+                end
+            end
+        end
+    end)
+    if #rows == 0 then
+        pcall(function()
+            if LE and LE.db then
+                local t = LE.db:GetTable(table_name)
+                if t then
+                    local r = t:GetFirstRecord()
+                    while r and r > 0 do
+                        local row = {}
+                        for _, f in ipairs(fields) do row[f] = t:GetRecordFieldValue(r, f) end
+                        rows[#rows + 1] = row
+                        r = t:GetNextValidRecord()
+                    end
+                end
+            end
+        end)
+    end
+    return rows
+end
+
+-- BEGIN match_logic (this exact block is also run by tests/lua/test_transfer_logic.lua)
+-- Who played, who replaced whom and the numbers of one finished match. Nothing in this block touches the game, so the
+-- tests run it as it is. It needs jstr, to_int, to_num, percent_value and truthy_flag from above.
+
+-- The game keeps a record of every club's last match: one row per player { id, minutes, pos = position id,
+-- sub = came on as a substitute }. A replacement can be told from it, because the substitute's minutes plus the
+-- minutes of the player he replaced add up to the length of the match, and he takes over the same position.
+-- Returns the pairs { minute, out = row, ["in"] = row }, the minute marks per player id and the match length used.
+local function pair_substitutions(history)
+    local starters, subs, counts = {}, {}, {}
+    for _, h in ipairs(history) do
+        if (h.minutes or 0) > 0 then
+            if h.sub then
+                subs[#subs + 1] = h
+            else
+                starters[#starters + 1] = h
+                counts[h.minutes] = (counts[h.minutes] or 0) + 1
+            end
+        end
     end
 
-    -- Which team index (0 or 1) is the managed club? Match the export against the current squad.
-    local squad_pids = get_current_squad_details(managed_team_id)
+    -- Players who stayed on all game share one number (90, or 120 after extra time): the most common one.
+    local full, most = 0, 0
+    for minutes, n in pairs(counts) do
+        if n > most or (n == most and minutes > full) then full, most = minutes, n end
+    end
+    local outgoing = {}
+    for _, s in ipairs(starters) do
+        if s.minutes < full then outgoing[#outgoing + 1] = s end
+    end
+
+    local best = { score = -1, list = {}, length = full }
+    if #subs > 0 and #subs <= 8 and #outgoing > 0 then
+        for length = full, full + 12 do      -- stoppage time is not part of the 90 the starters are capped at
+            local used, current = {}, {}
+            local found = { score = 0, list = {} }
+            local function search(i, score)
+                if i > #subs then
+                    if score > found.score then
+                        found.score = score
+                        found.list = {}
+                        for k, v in ipairs(current) do found.list[k] = v end
+                    end
+                    return
+                end
+                local s = subs[i]
+                for oi, o in ipairs(outgoing) do
+                    if not used[oi] then
+                        local diff = math.abs(s.minutes + o.minutes - length)
+                        if diff <= 1 then
+                            local same = (s.pos == nil or o.pos == nil or s.pos == o.pos)
+                            used[oi] = true
+                            current[#current + 1] = { sub = s, out = o }
+                            search(i + 1, score + 100 - diff - (same and 0 or 2))
+                            current[#current] = nil
+                            used[oi] = nil
+                        end
+                    end
+                end
+                search(i + 1, score)         -- this substitute replaced nobody that can be identified
+            end
+            search(1, 0)
+            if found.score > best.score then best = { score = found.score, list = found.list, length = length } end
+        end
+    end
+
+    local marks, pairs_out = {}, {}
+    local function mark(id)
+        marks[id] = marks[id] or {}
+        return marks[id]
+    end
+    for _, p in ipairs(best.list) do
+        pairs_out[#pairs_out + 1] = { minute = p.out.minutes, out = p.out, ["in"] = p.sub }
+        mark(p.sub.id).in_minute = p.out.minutes
+    end
+    for _, o in ipairs(outgoing) do mark(o.id).out_minute = o.minutes end   -- also a sending-off or an injury
+    for _, s in ipairs(subs) do
+        if not (marks[s.id] and marks[s.id].in_minute) and best.length > 0 then
+            mark(s.id).in_minute = math.max(1, best.length - s.minutes)
+        end
+    end
+    table.sort(pairs_out, function(a, b)
+        if a.minute == b.minute then return a.out.id < b.out.id end
+        return a.minute < b.minute
+    end)
+    return pairs_out, marks, best.length
+end
+
+-- Is the game's last-match record really about the match in the export? The same players must appear in both.
+-- exported_ids: set of the club's players in the export (string ids), or nil when there is no export.
+local function lineup_matches_export(history, exported_ids)
+    local played, hit, exported = 0, 0, 0
+    for _ in pairs(exported_ids or {}) do exported = exported + 1 end
+    for _, h in ipairs(history) do
+        if (h.minutes or 0) > 0 then
+            played = played + 1
+            if exported_ids and exported_ids[tostring(h.id)] then hit = hit + 1 end
+        end
+    end
+    if played < 11 then return false end
+    if exported == 0 then return true end
+    return hit / played >= 0.7 and hit / exported >= 0.7
+end
+
+local function team_row_for(teams, idx)
+    for _, t in ipairs(teams) do
+        if t.team_index ~= nil and tonumber(t.team_index) == idx then return t end
+    end
+    return teams[idx + 1] or teams[1]
+end
+
+-- Reads the two Atlas CSV files (already parsed into rows) for the club's side of the match.
+-- ctx: squad (set of player ids that belong to the club), is_home, goals_against, player_name(id) for blank names.
+local function analyse_atlas_export(participants, teams, ctx)
+    local squad = ctx.squad or {}
     local count0, count1 = 0, 0
     for _, p in ipairs(participants) do
         local pid = tonumber(p.player_id) or 0
-        local tid = tonumber(p.team_index) or 0
-        if squad_pids[pid] ~= nil then
-            if tid == 0 then count0 = count0 + 1 else count1 = count1 + 1 end
+        if squad[pid] ~= nil then
+            if (tonumber(p.team_index) or 0) == 0 then count0 = count0 + 1 else count1 = count1 + 1 end
         end
     end
+    local managed_idx = ctx.is_home and 0 or 1
+    if count0 > count1 then managed_idx = 0 elseif count1 > count0 then managed_idx = 1 end
+    local opp_idx = (managed_idx == 0) and 1 or 0
 
-    local managed_team_idx = is_home and 0 or 1
-    if count0 > count1 then managed_team_idx = 0
-    elseif count1 > count0 then managed_team_idx = 1 end
-    local opp_team_idx = (managed_team_idx == 0) and 1 or 0
+    local function name_of(p)
+        local n = p.player_name
+        if n ~= nil and n ~= "" then return n end
+        if ctx.player_name then return ctx.player_name(tonumber(p.player_id) or 0) end
+        return "Player"
+    end
 
-    -- Man of the match from the engine, else best rating
-    local motm_player = ""
-    local highest_rating = -1.0
+    -- Man of the match: the game's own flag (either team can win it), else the best rating of the match.
+    local motm_row
     for _, p in ipairs(participants) do
-        local name = p.player_name or ""
-        if name ~= "" then
-            if truthy_flag(p.man_of_the_match) then
-                motm_player = name
-                break
-            end
-            local r = to_num(p.game_rating, 6.0)
-            if r > highest_rating then
-                highest_rating = r
-                motm_player = name
-            end
+        if truthy_flag(p.man_of_the_match) then motm_row = p break end
+    end
+    if not motm_row then
+        local highest = -1.0
+        for _, p in ipairs(participants) do
+            local r = to_num(p.game_rating, 0)
+            if r > highest then highest, motm_row = r, p end
         end
     end
-
-    local m_team_row = teams[managed_team_idx + 1] or teams[1]
-    local o_team_row = teams[opp_team_idx + 1] or teams[2] or teams[1]
-
-    local shots_f = to_int(tonumber(m_team_row.shots) or tonumber(m_team_row.shots_on_target) or 0)
-    local shots_a = to_int(tonumber(o_team_row.shots) or tonumber(o_team_row.shots_on_target) or 0)
-    local xg_f = to_num(m_team_row.npk_expected_goals, 0.0)
-    local xg_a = to_num(o_team_row.npk_expected_goals, 0.0)
-    local passes_f = to_num(m_team_row.passes, 0)
-    local passes_a = to_num(o_team_row.passes, 0)
-    local pass_acc = to_int(percent_value(m_team_row.pass_accuracy_pct_derived))
-    local poss = to_int(percent_value(m_team_row.possession ~= "" and m_team_row.possession or m_team_row.possession_pct))
-    if poss <= 0 and (passes_f + passes_a) > 0 then
-        poss = math.floor((passes_f / (passes_f + passes_a)) * 100)
+    local motm_name, motm_is_opponent = "", false
+    if motm_row then
+        motm_name = name_of(motm_row)
+        motm_is_opponent = (tonumber(motm_row.team_index) or 0) ~= managed_idx
     end
 
     local max_minutes = 0
@@ -1117,32 +1594,40 @@ local function try_read_atlas_match_stats(managed_team_id, is_home, goals_agains
         if m > max_minutes then max_minutes = m end
     end
 
-    local player_perfs = {}
-    local goal_details = {}
-    local goal_players = {}
-    local total_goals = 0
+    -- Team numbers come from the club's own row (found by its team_index, not by its position in the file).
+    local m_row = team_row_for(teams, managed_idx)
+    local o_row = team_row_for(teams, opp_idx)
+    local passes_f = to_num(m_row.passes, 0)
+    local passes_a = to_num(o_row.passes, 0)
+    local possession = to_int(percent_value(
+        (m_row.possession ~= nil and m_row.possession ~= "") and m_row.possession or m_row.possession_pct))
+    local possession_estimated = false
+    if possession <= 0 then
+        -- The exporter has no possession figure: the share of all passes is the closest thing it records.
+        possession_estimated = true
+        if passes_f + passes_a > 0 then
+            possession = math.max(25, math.min(75, math.floor(passes_f / (passes_f + passes_a) * 100 + 0.5)))
+        else
+            possession = 50
+        end
+    end
 
+    local goals_against = ctx.goals_against or 0
+    local rows = {}
     for _, p in ipairs(participants) do
-        local p_idx = tonumber(p.team_index) or 0
         local minutes = tonumber(p.minutes_played)
         -- The export can list the whole matchday squad: players who never came on did not play.
         local played = not (max_minutes > 0 and minutes ~= nil and minutes <= 0)
-        if p_idx == managed_team_idx and played then
-            local p_name = (p.player_name and p.player_name ~= "") and p.player_name or "Player"
-            local p_id = p.player_id or ""
-            local p_goals = to_int(tonumber(p.goals_derived) or tonumber(p.npk_goals) or 0)
-            local p_assists = to_int(p.assists, 0)
-            local p_rating = to_num(p.game_rating, 6.5)
-            local p_passes = to_int(p.passes, 0)
-            local p_pacc = to_int(percent_value(p.pass_accuracy_pct_derived))
-            local p_shots = to_int(tonumber(p.shots) or p_goals)
-            local sot = to_num(p.shots_on_target, 0)
-            local p_sacc = 0
-            if p_shots > 0 and sot > 0 then p_sacc = math.min(100, math.floor((sot / p_shots) * 100)) end
-            local p_tackles = to_int(p.tackles, 0)
-            local p_tpct
+        if (tonumber(p.team_index) or 0) == managed_idx and played then
+            local goals = to_int(tonumber(p.goals_derived) or tonumber(p.npk_goals) or 0)
+            local shots = to_int(tonumber(p.shots) or goals)
+            local on_target = to_num(p.shots_on_target, 0)
+            local shot_acc = 0
+            if shots > 0 and on_target > 0 then shot_acc = math.min(100, math.floor((on_target / shots) * 100)) end
+            local tackles = to_int(p.tackles, 0)
+            local tackle_pct
             if tonumber(p.stand_tackle_success_pct_derived) then
-                p_tpct = to_int(percent_value(p.stand_tackle_success_pct_derived))
+                tackle_pct = to_int(percent_value(p.stand_tackle_success_pct_derived))
             else
                 -- The exporter leaves that column blank for a player with no stand tackles (slide tackles only):
                 -- use all tackles won / attempted instead of reporting 100%.
@@ -1151,55 +1636,375 @@ local function try_read_atlas_match_stats(managed_team_id, is_home, goals_agains
                     attempts = to_num(p.stand_tackles, 0) + to_num(p.slide_tackles, 0)
                     won = to_num(p.stand_tackles_won, 0) + to_num(p.slide_tackles_won, 0)
                 else
-                    attempts = p_tackles
-                    won = to_num(p.tackles_completed, p_tackles)
+                    attempts = tackles
+                    won = to_num(p.tackles_completed, tackles)
                 end
-                p_tpct = (attempts > 0) and math.min(100, math.floor((won / attempts) * 100)) or 0
+                tackle_pct = (attempts > 0) and math.min(100, math.floor((won / attempts) * 100)) or 0
             end
-            local p_interceptions = to_int(p.interceptions, 0)
-            local is_m = (p_name == motm_player) or truthy_flag(p.man_of_the_match)
-            local yc = to_num(p.yellow_card_events, 0) > 0
-            local rc = to_num(p.red_dismissals, 0) > 0
-            local cs = (goals_against == 0)
-
-            player_perfs[#player_perfs + 1] = string.format(
-                '{"playerId": "%s", "playerName": "%s", "rating": %.1f, "goals": %d, "assists": %d, "passes": %d, "passAccuracy": %d, "shots": %d, "shotAccuracy": %d, "tackles": %d, "tacklePercentage": %d, "interceptions": %d, "cleanSheet": %s, "yellowCard": %s, "redCard": %s, "isMotm": %s}',
-                jstr(p_id), jstr(p_name), p_rating, p_goals, p_assists, p_passes, p_pacc, p_shots, p_sacc,
-                p_tackles, p_tpct, p_interceptions,
-                cs and "true" or "false", yc and "true" or "false", rc and "true" or "false", is_m and "true" or "false")
-
-            for _ = 1, p_goals do
-                goal_players[#goal_players + 1] = p_name
-                total_goals = total_goals + 1
-            end
+            rows[#rows + 1] = {
+                id = tostring(p.player_id or ""),
+                name = name_of(p),
+                minutes = minutes,
+                rating = to_num(p.game_rating, 6.5),
+                goals = goals,
+                assists = to_int(p.assists, 0),
+                passes = to_int(p.passes, 0),
+                pass_acc = to_int(percent_value(p.pass_accuracy_pct_derived)),
+                shots = shots,
+                shot_acc = shot_acc,
+                saves = to_int(tonumber(p.saves) or 0),
+                penalty_saves = to_int(tonumber(p.penalty_saves) or 0),
+                faced = to_num(p.shots_against, 0),
+                tackles = tackles,
+                tackle_pct = tackle_pct,
+                interceptions = to_int(p.interceptions, 0),
+                yellow = to_num(p.yellow_card_events, 0) > 0,
+                red = to_num(p.red_dismissals, 0) > 0,
+                clean_sheet = (goals_against == 0),
+                motm = (p == motm_row)
+            }
         end
     end
 
-    -- The export has no goal minutes, so spread them evenly over the match (flagged as estimated).
-    for k, name in ipairs(goal_players) do
-        local minute = math.max(1, math.min(90, math.floor(90 * k / (total_goals + 1))))
-        goal_details[#goal_details + 1] = string.format(
-            '{"playerName": "%s", "minute": %d, "isOpponent": false, "minuteEstimated": true}', jstr(name), minute)
-    end
-
-    local m_shootout = to_int(m_team_row.shootout_goals, 0)
-    local o_shootout = to_int(o_team_row.shootout_goals, 0)
+    local m_shootout = to_int(m_row.shootout_goals, 0)
+    local o_shootout = to_int(o_row.shootout_goals, 0)
     if m_shootout >= 255 or m_shootout < 0 then m_shootout = 0 end
     if o_shootout >= 255 or o_shootout < 0 then o_shootout = 0 end
 
     return {
-        motm = motm_player,
-        shots_for = shots_f,
-        shots_against = shots_a,
-        xg_for = xg_f,
-        xg_against = xg_a,
-        possession = poss,
-        passing_accuracy = pass_acc,
-        player_performances = player_perfs,
-        goal_details = goal_details,
+        managed_idx = managed_idx,
+        rows = rows,
+        motm = motm_name,
+        motm_is_opponent = motm_is_opponent,
+        shots_for = to_int(tonumber(m_row.shots) or tonumber(m_row.shots_on_target) or 0),
+        shots_against = to_int(tonumber(o_row.shots) or tonumber(o_row.shots_on_target) or 0),
+        shots_on_target_against = to_int(tonumber(o_row.shots_on_target) or 0),
+        xg_for = to_num(m_row.npk_expected_goals, 0.0),
+        xg_against = to_num(o_row.npk_expected_goals, 0.0),
+        possession = possession,
+        possession_estimated = possession_estimated,
+        passing_accuracy = to_int(percent_value(m_row.pass_accuracy_pct_derived)),
+        goals_against = goals_against,
         max_minutes = max_minutes,
         m_shootout = m_shootout,
         o_shootout = o_shootout
+    }
+end
+
+-- Adds what the game's own last-match record knows to the export's rows: the players the export missed (a player
+-- who joined on loan, say), who played which position, and every substitution. Returns the list of substitutions.
+-- opts: player_name(id) and rating_for(id) (both optional).
+local function apply_lineup(analysis, history, opts)
+    opts = opts or {}
+    local by_id = {}
+    for _, r in ipairs(analysis.rows) do by_id[r.id] = r end
+    local pairs_out, marks = pair_substitutions(history)
+    analysis.added = {}
+
+    for _, h in ipairs(history) do
+        if (h.minutes or 0) > 0 then
+            local key = tostring(h.id)
+            local r = by_id[key]
+            if not r then
+                r = {
+                    id = key,
+                    name = opts.player_name and opts.player_name(h.id) or ("Player " .. key),
+                    minutes = h.minutes,
+                    rating = opts.rating_for and opts.rating_for(h.id) or 0,
+                    goals = 0, assists = 0, passes = 0, pass_acc = 0, shots = 0, shot_acc = 0,
+                    saves = 0, penalty_saves = 0, faced = 0, tackles = 0, tackle_pct = 0, interceptions = 0,
+                    yellow = false, red = false, clean_sheet = (analysis.goals_against or 0) == 0,
+                    motm = false, from_history = true
+                }
+                analysis.rows[#analysis.rows + 1] = r
+                by_id[key] = r
+                analysis.added[#analysis.added + 1] = r.name
+            end
+            r.pos = h.pos
+            local m = marks[h.id]
+            if m then r.in_minute, r.out_minute = m.in_minute, m.out_minute end
+        end
+    end
+
+    -- Starters first, then the substitutes in the order they came on.
+    local ordered, bench = {}, {}
+    for _, r in ipairs(analysis.rows) do
+        if r.in_minute then bench[#bench + 1] = r else ordered[#ordered + 1] = r end
+    end
+    table.sort(bench, function(a, b)
+        if a.in_minute == b.in_minute then return a.id < b.id end
+        return a.in_minute < b.in_minute
+    end)
+    for _, r in ipairs(bench) do ordered[#ordered + 1] = r end
+    analysis.rows = ordered
+
+    local subs = {}
+    for _, p in ipairs(pairs_out) do
+        local out_row, in_row = by_id[tostring(p.out.id)], by_id[tostring(p["in"].id)]
+        if out_row and in_row then
+            subs[#subs + 1] = {
+                minute = p.minute,
+                out_id = out_row.id, out_name = out_row.name,
+                in_id = in_row.id, in_name = in_row.name
+            }
+        end
+    end
+    return subs
+end
+
+-- The export has no saves for a goalkeeper whose column is empty: shots on target that were not goals were saved.
+local function estimate_keeper_saves(analysis, goals_against)
+    local total = 0
+    for _, r in ipairs(analysis.rows) do total = total + (r.saves or 0) end
+    local saved = (analysis.shots_on_target_against or 0) - (goals_against or 0)
+    if total > 0 or saved <= 0 then return false end
+    local keeper
+    for _, r in ipairs(analysis.rows) do
+        if r.pos == 0 and (not keeper or (r.minutes or 0) > (keeper.minutes or 0)) then keeper = r end
+    end
+    if not keeper then
+        for _, r in ipairs(analysis.rows) do
+            if (r.faced or 0) > 0 and (not keeper or r.faced > keeper.faced) then keeper = r end
+        end
+    end
+    if not keeper then return false end
+    keeper.saves = saved
+    return true
+end
+
+local function format_performance(r)
+    local extra = ""
+    if r.in_minute then extra = extra .. string.format(', "subInMinute": %d', r.in_minute) end
+    if r.out_minute then extra = extra .. string.format(', "subOutMinute": %d', r.out_minute) end
+    return string.format(
+        '{"playerId": "%s", "playerName": "%s", "rating": %.1f, "goals": %d, "assists": %d, "passes": %d, "passAccuracy": %d, "shots": %d, "shotAccuracy": %d, "saves": %d, "penaltySaves": %d, "tackles": %d, "tacklePercentage": %d, "interceptions": %d, "cleanSheet": %s, "yellowCard": %s, "redCard": %s, "isMotm": %s%s}',
+        jstr(r.id), jstr(r.name), r.rating or 0, r.goals or 0, r.assists or 0, r.passes or 0, r.pass_acc or 0,
+        r.shots or 0, r.shot_acc or 0, r.saves or 0, r.penalty_saves or 0, r.tackles or 0, r.tackle_pct or 0,
+        r.interceptions or 0,
+        r.clean_sheet and "true" or "false", r.yellow and "true" or "false", r.red and "true" or "false",
+        r.motm and "true" or "false", extra)
+end
+
+local function format_substitution(s)
+    return string.format(
+        '{"minute": %d, "playerOutName": "%s", "playerInName": "%s", "playerOutId": "%s", "playerInId": "%s"}',
+        s.minute, jstr(s.out_name), jstr(s.in_name), jstr(s.out_id), jstr(s.in_id))
+end
+-- END match_logic
+
+-- BEGIN league_table (this exact block is also run by tests/lua/test_transfer_logic.lua)
+-- The league table worked out from the season's fixtures, because the position stored in the database is only
+-- refreshed now and then. fixtures/standings are the lists read_valid_fixtures() / read_valid_standings() return.
+-- Only results up to max_date_raw count, so a match that is reported late still gets the position it had.
+local function build_league_table(fixtures, standings, comp_obj_id, max_date_raw)
+    local by_team, rows = {}, {}
+    local pending_that_day = 0
+    local function team(tid)
+        local t = by_team[tid]
+        if not t then
+            t = { team_id = tid, played = 0, won = 0, drawn = 0, lost = 0, gf = 0, ga = 0, pts = 0 }
+            by_team[tid] = t
+            rows[#rows + 1] = t
+        end
+        return t
+    end
+    for _, f in ipairs(fixtures) do
+        if f.competition_object_id == comp_obj_id then
+            local h = standings[f.home_standing_index]
+            local a = standings[f.away_standing_index]
+            if h and a and (h.team_id or 0) > 0 and (a.team_id or 0) > 0 then
+                local ht, at = team(h.team_id), team(a.team_id)   -- every club is listed, even before its first game
+                local in_time = (max_date_raw == nil) or ((f.date_raw or 0) <= max_date_raw)
+                if f.completed and in_time then
+                    local hs, as = tonumber(f.home_score) or -1, tonumber(f.away_score) or -1
+                    if hs >= 0 and hs < 60 and as >= 0 and as < 60 then
+                        ht.played, at.played = ht.played + 1, at.played + 1
+                        ht.gf, ht.ga = ht.gf + hs, ht.ga + as
+                        at.gf, at.ga = at.gf + as, at.ga + hs
+                        if hs > as then
+                            ht.won, ht.pts, at.lost = ht.won + 1, ht.pts + 3, at.lost + 1
+                        elseif hs < as then
+                            at.won, at.pts, ht.lost = at.won + 1, at.pts + 3, ht.lost + 1
+                        else
+                            ht.drawn, at.drawn = ht.drawn + 1, at.drawn + 1
+                            ht.pts, at.pts = ht.pts + 1, at.pts + 1
+                        end
+                    end
+                elseif (not f.completed) and max_date_raw ~= nil and f.date_raw == max_date_raw then
+                    pending_that_day = pending_that_day + 1
+                end
+            end
+        end
+    end
+    table.sort(rows, function(x, y)
+        if x.pts ~= y.pts then return x.pts > y.pts end
+        local xd, yd = x.gf - x.ga, y.gf - y.ga
+        if xd ~= yd then return xd > yd end
+        if x.gf ~= y.gf then return x.gf > y.gf end
+        return x.team_id < y.team_id
+    end)
+    local position = {}
+    for i, t in ipairs(rows) do position[t.team_id] = i end
+    return { rows = rows, position = position, pending_that_day = pending_that_day }
+end
+
+-- The league the club plays in: the match's own competition when it is a league match, otherwise the league the
+-- club has played most matches in.
+local function pick_league_comp(fixtures, match, is_league)
+    if match and (match.compobjid or 0) > 0 and is_league(match.competition) then return match.compobjid end
+    local counts, best, best_n = {}, nil, 0
+    for _, f in ipairs(fixtures or {}) do
+        if (f.compobjid or 0) > 0 and is_league(f.competition) then
+            counts[f.compobjid] = (counts[f.compobjid] or 0) + 1
+            if counts[f.compobjid] > best_n then best, best_n = f.compobjid, counts[f.compobjid] end
+        end
+    end
+    return best
+end
+-- END league_table
+
+-- The game's record of the club's last match, one row per player: { id, minutes, pos, sub }.
+-- playerfact bit 8 marks a player who came on as a substitute.
+local function read_lineup(team_id)
+    local rows = {}
+    for _, r in ipairs(read_table_rows("career_playerlastmatchhistory",
+        { "playerid", "teamid", "minsplayed", "position", "playerfact" })) do
+        if (tonumber(r.teamid) or 0) == team_id then
+            local pid = tonumber(r.playerid) or 0
+            if pid > 0 then
+                local fact = tonumber(r.playerfact) or 0
+                rows[#rows + 1] = {
+                    id = pid,
+                    minutes = tonumber(r.minsplayed) or 0,
+                    pos = tonumber(r.position),
+                    sub = (math.floor(fact / 8) % 2) == 1
+                }
+            end
+        end
+    end
+    return rows
+end
+
+-- The game's own match rating for a player on a given day (career_playermatchratinghistory), loaded on first use.
+local function make_rating_lookup(date_raw)
+    local loaded, by_player = false, {}
+    return function(pid)
+        if not loaded then
+            loaded = true
+            for _, r in ipairs(read_table_rows("career_playermatchratinghistory", { "playerid", "rating", "date" })) do
+                if date_raw and tonumber(r.date) == tonumber(date_raw) then
+                    by_player[tonumber(r.playerid) or 0] = tonumber(r.rating)
+                end
+            end
+        end
+        local v = by_player[pid]
+        if not v then return 0 end
+        if v > 10 then v = v / 10 end
+        return math.floor(v * 10 + 0.5) / 10
+    end
+end
+
+-- Position in the club's league as it stood on the day of `match`, from the season's results.
+-- Returns nil when it cannot be worked out, else { position, clubs, ready } (ready = all of that day's league
+-- matches are in, so the position is final).
+local function live_league_position(managed_team_id, match, remembered_comp)
+    local comp = pick_league_comp({}, match, is_league_competition) or remembered_comp
+    if not comp or comp <= 0 then return nil end
+    local table_now = build_league_table(read_valid_fixtures(), read_valid_standings(), comp, tonumber(match.date_raw))
+    local pos = table_now.position[managed_team_id]
+    if not pos or #table_now.rows < 2 then return nil end
+    return { position = pos, clubs = #table_now.rows, ready = (table_now.pending_that_day == 0) }
+end
+
+local function try_read_atlas_match_stats(managed_team_id, is_home, goals_against, folder_path, history, match)
+    local participants = parse_simple_csv(folder_path .. "/16_match_participants_wide.csv")
+    local teams = parse_simple_csv(folder_path .. "/18_match_teams_wide.csv")
+    if not participants or not teams or #participants == 0 or #teams == 0 then
+        return nil
+    end
+
+    -- Which team index (0 or 1) is the managed club? Match the export against the current squad.
+    local squad = get_current_squad_details(managed_team_id)
+    local function analyse(known)
+        return analyse_atlas_export(participants, teams, {
+            squad = known, is_home = is_home, goals_against = goals_against, player_name = safe_player_name
+        })
+    end
+    local analysis = analyse(squad)
+
+    -- The game's last-match record tells who replaced whom and who played besides the players the export lists
+    -- (a player on loan, say). It is only trusted when it is about the same players as the export.
+    local usable = false
+    local substitutions = {}
+    history = history or {}
+    if #history > 0 then
+        local function exported_ids(a)
+            local set = {}
+            for _, r in ipairs(a.rows) do set[r.id] = true end
+            return set
+        end
+        if lineup_matches_export(history, exported_ids(analysis)) then
+            usable = true
+        else
+            -- maybe the squad list missed a loaned-in player and the wrong side was picked
+            local wider = {}
+            for k, v in pairs(squad) do wider[k] = v end
+            for _, h in ipairs(history) do
+                if (h.minutes or 0) > 0 and wider[h.id] == nil then wider[h.id] = true end
+            end
+            local again = analyse(wider)
+            if lineup_matches_export(history, exported_ids(again)) then
+                analysis, usable = again, true
+            end
+        end
+        if usable then
+            substitutions = apply_lineup(analysis, history, {
+                player_name = safe_player_name,
+                rating_for = make_rating_lookup(match and match.date_raw)
+            })
+            if #analysis.added > 0 then
+                log_monitor("Players the export left out were added from the game's own record: " .. table.concat(analysis.added, ", "))
+            end
+        else
+            log_monitor("The game's last-match record is about different players than this export - substitutions are not sent")
+        end
+    end
+    if estimate_keeper_saves(analysis, goals_against) then
+        log_monitor("The export has no saves: the goalkeeper's saves are worked out from shots on target")
+    end
+
+    local player_perfs, goal_players, goal_details = {}, {}, {}
+    for _, r in ipairs(analysis.rows) do
+        player_perfs[#player_perfs + 1] = format_performance(r)
+        for _ = 1, (r.goals or 0) do goal_players[#goal_players + 1] = r.name end
+    end
+
+    -- The export has no goal minutes, so spread them evenly over the match (flagged as estimated).
+    for k, name in ipairs(goal_players) do
+        local minute = math.max(1, math.min(90, math.floor(90 * k / (#goal_players + 1))))
+        goal_details[#goal_details + 1] = string.format(
+            '{"playerName": "%s", "minute": %d, "isOpponent": false, "minuteEstimated": true}', jstr(name), minute)
+    end
+
+    local subs_json = {}
+    for _, s in ipairs(substitutions) do subs_json[#subs_json + 1] = format_substitution(s) end
+
+    return {
+        motm = analysis.motm,
+        motm_is_opponent = analysis.motm_is_opponent,
+        shots_for = analysis.shots_for,
+        shots_against = analysis.shots_against,
+        xg_for = analysis.xg_for,
+        xg_against = analysis.xg_against,
+        possession = analysis.possession,
+        possession_estimated = analysis.possession_estimated,
+        passing_accuracy = analysis.passing_accuracy,
+        player_performances = player_perfs,
+        goal_details = goal_details,
+        substitutions = subs_json,
+        max_minutes = analysis.max_minutes,
+        m_shootout = analysis.m_shootout,
+        o_shootout = analysis.o_shootout
     }
 end
 
@@ -1228,8 +2033,18 @@ local function beam_match_to_bridge(latest_match, managed_team_id, pre_match_cpi
         local is_playoff = lowComp:find("play%-?off") or lowComp:find("promotion") or lowStage:find("play%-?off")
         local is_league = is_league_competition(rawCompName)
 
-        -- 1. Real league position (also records the primary league name in state)
-        local leaguePos = get_real_league_position(managed_team_id)
+        -- 1. League position worked out from the season's results. The position stored in the database is only
+        --    refreshed now and then (it can stay at the pre-season value), so it is not used.
+        --    get_real_league_position still records the primary league's name in the state.
+        get_real_league_position(managed_team_id)
+        local league_info = nil
+        local lok, l_or_err = pcall(live_league_position, managed_team_id, latest_match, state and state.league_comp_id)
+        if lok then
+            league_info = l_or_err
+        else
+            log_monitor("League table could not be worked out (" .. tostring(l_or_err) .. ")")
+        end
+        local leaguePos = league_info and league_info.position or 0
 
         -- Rule: a playoff match is still reported under the primary domestic league
         local compName = rawCompName
@@ -1240,9 +2055,15 @@ local function beam_match_to_bridge(latest_match, managed_team_id, pre_match_cpi
         local stage = latest_match.stage or "Matchday 1"
 
         -- 2. Real Atlas export for this match (if the exporter produced one)
+        local lineup_history = {}
+        do
+            local hok, h_or_err = pcall(read_lineup, managed_team_id)
+            if hok and type(h_or_err) == "table" then lineup_history = h_or_err end
+        end
         local atlasStats = nil
         if atlas_folder_path then
-            local aok, a_or_err = pcall(try_read_atlas_match_stats, managed_team_id, isHome, ga, atlas_folder_path)
+            local aok, a_or_err = pcall(try_read_atlas_match_stats, managed_team_id, isHome, ga, atlas_folder_path,
+                lineup_history, latest_match)
             if aok then
                 atlasStats = a_or_err
             else
@@ -1293,6 +2114,9 @@ local function beam_match_to_bridge(latest_match, managed_team_id, pre_match_cpi
         local shotsFor, shotsAgainst, poss, passAcc = 0, 0, 50, 82
         local xG, xGA = 0.0, 0.0
         local detailSource = "estimated"
+        local substitutionJson = {}
+        local motmIsOpponent = false
+        local possessionEstimated = true
 
         if atlasStats and #atlasStats.player_performances > 0 then
             detailSource = "atlas"
@@ -1305,6 +2129,9 @@ local function beam_match_to_bridge(latest_match, managed_team_id, pre_match_cpi
             xGA = atlasStats.xg_against
             playerPerfs = atlasStats.player_performances
             goalDetails = atlasStats.goal_details
+            substitutionJson = atlasStats.substitutions
+            motmIsOpponent = atlasStats.motm_is_opponent
+            possessionEstimated = atlasStats.possession_estimated
 
             for j = 1, ga do
                 local minute = math.max(1, math.min(90, math.floor(90 * j / (ga + 1))))
@@ -1339,9 +2166,36 @@ local function beam_match_to_bridge(latest_match, managed_team_id, pre_match_cpi
                 end
             end
 
+            -- Who actually played comes from the game's record of the last match; the current squad is only used
+            -- when that record is missing (it lists whoever is in the squad now, not who played).
             local match_participants = {}
-            for _, sp in ipairs(starters) do match_participants[#match_participants + 1] = sp end
-            for s_idx = 1, math.min(#subs, 5) do match_participants[#match_participants + 1] = subs[s_idx] end
+            if lineup_matches_export(lineup_history, nil) then
+                local pair_list, marks = pair_substitutions(lineup_history)
+                for _, h in ipairs(lineup_history) do
+                    if (h.minutes or 0) > 0 then
+                        local m = marks[h.id] or {}
+                        match_participants[#match_participants + 1] = {
+                            id = h.id, name = safe_player_name(h.id), position = safe_position_name(h.pos),
+                            in_minute = m.in_minute, out_minute = m.out_minute
+                        }
+                    end
+                end
+                table.sort(match_participants, function(a, b)
+                    local ai, bi = a.in_minute or 0, b.in_minute or 0
+                    if ai ~= bi then return ai < bi end
+                    return a.id < b.id
+                end)
+                for _, pr in ipairs(pair_list) do
+                    substitutionJson[#substitutionJson + 1] = format_substitution({
+                        minute = pr.minute,
+                        out_id = tostring(pr.out.id), out_name = safe_player_name(pr.out.id),
+                        in_id = tostring(pr["in"].id), in_name = safe_player_name(pr["in"].id)
+                    })
+                end
+            else
+                for _, sp in ipairs(starters) do match_participants[#match_participants + 1] = sp end
+                for s_idx = 1, math.min(#subs, 5) do match_participants[#match_participants + 1] = subs[s_idx] end
+            end
 
             if #real_scorers == 0 and gf > 0 then
                 for _, sp in ipairs(starters) do
@@ -1389,10 +2243,12 @@ local function beam_match_to_bridge(latest_match, managed_team_id, pre_match_cpi
 
                 local goalsHere = d.g
                 if goalsHere == 0 and isScorer then goalsHere = 1 end
-                playerPerfs[#playerPerfs + 1] = string.format(
-                    '{"playerId": "%s", "playerName": "%s", "rating": %.1f, "goals": %d, "assists": %d, "passes": 0, "passAccuracy": 0, "shots": %d, "shotAccuracy": 0, "tackles": 0, "tacklePercentage": 0, "interceptions": 0, "cleanSheet": %s, "yellowCard": %s, "redCard": %s, "isMotm": false}',
-                    jstr(p.id), jstr(p.name), pRating, goalsHere, d.a, (goalsHere > 0) and (goalsHere * 2) or 0,
-                    (ga == 0) and "true" or "false", (d.y > 0) and "true" or "false", (d.r > 0) and "true" or "false")
+                playerPerfs[#playerPerfs + 1] = format_performance({
+                    id = p.id, name = p.name, rating = pRating, goals = goalsHere, assists = d.a,
+                    shots = (goalsHere > 0) and (goalsHere * 2) or 0,
+                    clean_sheet = (ga == 0), yellow = (d.y > 0), red = (d.r > 0), motm = false,
+                    in_minute = p.in_minute, out_minute = p.out_minute
+                })
             end
 
             if topPlayer == "" then
@@ -1429,10 +2285,13 @@ local function beam_match_to_bridge(latest_match, managed_team_id, pre_match_cpi
             string.format('"expectedGoals": %.2f', to_num(xG)),
             string.format('"expectedGoalsAgainst": %.2f', to_num(xGA)),
             string.format('"motmName": "%s"', jstr(topPlayer)),
+            string.format('"possessionEstimated": %s', possessionEstimated and "true" or "false"),
+            string.format('"motmIsOpponent": %s', motmIsOpponent and "true" or "false"),
             string.format('"leaguePosition": %s', (leaguePos > 0) and tostring(to_int(leaguePos)) or "null"),
             string.format('"detailSource": "%s"', detailSource),
             string.format('"fixtureKey": "%s"', jstr(fixture_key(latest_match))),
             '"playerPerformances": [' .. table.concat(playerPerfs, ",") .. "]",
+            '"substitutions": [' .. table.concat(substitutionJson, ",") .. "]",
             '"goalDetails": [' .. table.concat(goalDetails, ",") .. "]"
         }
         local payload = "{\n  " .. table.concat(parts, ",\n  ") .. "\n}"
@@ -1734,48 +2593,6 @@ end
 -- Reads a small career table into plain { field = value } rows. GetDBTableRows comes first because it gives real
 -- column names and text columns (the names in career_managerhistory); record-by-record access is the fallback.
 -- Only ask for columns that exist: Live Editor logs "no field X" for a missing one.
-local function read_table_rows(table_name, fields)
-    local rows = {}
-    pcall(function()
-        if type(GetDBTableRows) == "function" then
-            local raw = GetDBTableRows(table_name)
-            if type(raw) == "table" then
-                for _, rr in ipairs(raw) do
-                    local row = {}
-                    for _, f in ipairs(fields) do
-                        local v = rr[f]
-                        if v == nil then
-                            for k, val in pairs(rr) do
-                                if tostring(k):lower() == f then v = val break end
-                            end
-                        end
-                        if type(v) == "table" then v = v.value end
-                        row[f] = v
-                    end
-                    rows[#rows + 1] = row
-                end
-            end
-        end
-    end)
-    if #rows == 0 then
-        pcall(function()
-            if LE and LE.db then
-                local t = LE.db:GetTable(table_name)
-                if t then
-                    local r = t:GetFirstRecord()
-                    while r and r > 0 do
-                        local row = {}
-                        for _, f in ipairs(fields) do row[f] = t:GetRecordFieldValue(r, f) end
-                        rows[#rows + 1] = row
-                        r = t:GetNextValidRecord()
-                    end
-                end
-            end
-        end)
-    end
-    return rows
-end
-
 -- Players in the club's youth academy right now (career_youthplayers). A player who leaves this list and joins the
 -- first team was promoted, not bought.
 local function read_youth_set()
@@ -2491,8 +3308,14 @@ end
 local baseline_squad, baseline_all_teams = get_managed_squad_state(managed_team_id)
 
 -- Existing Atlas exports belong to earlier matches: never attach them to a new one.
-local baseline_atlas = list_atlas_folders()
-for _, name in ipairs(baseline_atlas) do _G["FC26_ATLAS_USED"][name] = true end
+-- (No folder listing here: the exporter's own report is marked as used, and a folder found later by looking at the
+-- folder is judged by the date in its name, see find_atlas_folder.)
+local atlas_seen_before = false
+do
+    local reported = last_export_folder()
+    if reported then _G["FC26_ATLAS_USED"][reported] = true end
+    atlas_seen_before = reported ~= nil or QUIET.dir_exists(MATCH_STATS_ROOT .. "/ready")
+end
 
 state = {
     active = true,
@@ -2506,7 +3329,7 @@ state = {
     squad = baseline_squad,
     all_player_teams = baseline_all_teams,
     pending_matches = {},
-    atlas_seen = (#baseline_atlas > 0)
+    atlas_seen = atlas_seen_before
 }
 _G["FC26_AUTO_CAPTURE_STATE"] = state
 
@@ -2528,6 +3351,8 @@ local ATLAS_WAIT_SECONDS = 30           -- an export has been seen on this PC be
 local ATLAS_WAIT_SECONDS_EXPORTER = 45  -- the Atlas exporter is running: its snapshot + match export takes a while
 local ATLAS_WAIT_SECONDS_IDLE = 10      -- no exporter and no export ever seen: do not hold matches back for long
 local ATLAS_POLL_SECONDS = 4
+local LEAGUE_WAIT_SECONDS = 20         -- the other results of the match day are still coming in
+local LEAGUE_CHECK_SECONDS = 3
 
 local SCRIPT_DIR = ""
 do
@@ -2553,20 +3378,8 @@ end
 -- trusted. Besides that folder, look where Live Editor scripts usually are: its working folder and lua\scripts, and
 -- the FC26-LE folder on the Desktop (also when Windows keeps the Desktop in OneDrive), Downloads and Documents.
 local function list_subdirs(path)
-    local temp_dir = os.getenv("TEMP") or os.getenv("TMP") or "."
-    local temp_file = temp_dir .. "/fc26_dirs_" .. tostring(os.time()) .. ".txt"
-    pcall(os.execute, string.format('cmd /c dir /b /ad "%s" > "%s" 2>nul', win_path(path), win_path(temp_file)))
-    local names = {}
-    local tf = io.open(temp_file, "r")
-    if tf then
-        for line in tf:lines() do
-            local name = trim(line)
-            if name ~= "" then names[#names + 1] = name end
-        end
-        tf:close()
-        pcall(os.remove, temp_file)
-    end
-    return names
+    if not QUIET.dir_exists(path) then return {} end -- most of these folders do not exist: no need to ask Windows
+    return QUIET.list_dirs(path, false)
 end
 
 local function script_search_dirs()
@@ -2587,18 +3400,6 @@ local function script_search_dirs()
     add("") -- Live Editor's working folder
     add("lua\\scripts")
     add("scripts")
-    pcall(function()
-        local p = io.popen("cd")
-        if p then
-            local cwd = trim(p:read("*l"))
-            p:close()
-            if cwd ~= "" then
-                add(cwd)
-                add(cwd .. "\\lua\\scripts")
-                add(cwd .. "\\scripts")
-            end
-        end
-    end)
 
     local roots = {}
     for _, var in ipairs({ "OneDrive", "OneDriveConsumer", "OneDriveCommercial" }) do
@@ -2705,6 +3506,10 @@ local function check_for_new_completed_match()
     local current_fixtures = get_all_managed_fixtures(state.managed_team_id)
     local queued_any = false
 
+    -- remember which competition is the club's league (used to work out the table after a cup match too)
+    local league_comp = pick_league_comp(current_fixtures, nil, is_league_competition)
+    if league_comp then state.league_comp_id = league_comp end
+
     for idx, f in ipairs(current_fixtures) do
         local key = fixture_key(f)
         if f.completed and not state.completed_ids[key] then
@@ -2738,8 +3543,13 @@ local function service_pending_matches()
 
     if now - item.last_atlas_check >= ATLAS_POLL_SECONDS then
         item.last_atlas_check = now
-        atlas_name, atlas_path, atlas_names = find_atlas_folder(false)
+        atlas_name, atlas_path, atlas_names = find_atlas_folder(false, waited)
         if atlas_names and #atlas_names > 0 then state.atlas_seen = true end
+        if atlas_path then item.atlas_found = { atlas_name, atlas_path, atlas_names } end
+    end
+    -- the export found on an earlier tick still counts while the match waits for the rest of the day's results
+    if not atlas_path and item.atlas_found then
+        atlas_name, atlas_path, atlas_names = item.atlas_found[1], item.atlas_found[2], item.atlas_found[3]
     end
 
     local limit = ATLAS_WAIT_SECONDS_IDLE
@@ -2749,6 +3559,23 @@ local function service_pending_matches()
         limit = ATLAS_WAIT_SECONDS
     end
     if not atlas_path and waited < limit then return end
+
+    -- The league position is worked out from the results, so the other matches of the day must be in first.
+    if (item.league_checked_at or 0) == 0 or now - item.league_checked_at >= LEAGUE_CHECK_SECONDS then
+        item.league_checked_at = now
+        local ok_l, info = pcall(live_league_position, state.managed_team_id, item.fixture, state.league_comp_id)
+        if ok_l and info and not info.ready then
+            item.league_waiting_since = item.league_waiting_since or now
+            if now - item.league_waiting_since < LEAGUE_WAIT_SECONDS then
+                item.league_pending = true
+                return
+            end
+            log_monitor("The other results of the match day are still missing - the league position is sent as it stands")
+        end
+        item.league_pending = false
+    elseif item.league_pending then
+        return
+    end
 
     table.remove(state.pending_matches, 1)
     if atlas_name then
@@ -2836,6 +3663,8 @@ function FC26_AutoCapture_Status()
     print("Club: " .. tostring(state.managed_team_name) .. " (ID " .. tostring(state.managed_team_id) .. ")")
     print("Matches waiting for Atlas stats: " .. tostring(#state.pending_matches))
     print("Payloads not yet acknowledged by the bridge: " .. tostring(pending_out))
+    print("Bridge reads the outbox folder itself: " .. tostring(bridge_is_watching()))
+    print("Quiet mode - " .. QUIET.describe())
     print("Atlas exporter running: " .. tostring(atlas_exporter_active()) .. " | export folder seen: " .. tostring(state.atlas_seen))
     local f = io.open(SEND_LOG, "r")
     if f then
