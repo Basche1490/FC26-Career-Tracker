@@ -394,7 +394,7 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
                 // Match stats chips
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     // Possession is only shown when it is a real figure: the game's export has none, and a guess is wrong.
-                    if (match.possession > 0 && !match.possessionEstimated && !match.statsEstimated) {
+                    if (match.hasTrustedPossession) {
                         Text("Poss: ${match.possession}%", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("•", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -552,7 +552,7 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
     // Possession is optional: empty means unknown (an estimated figure from an import is not shown for editing)
     var possession by remember {
         mutableStateOf(
-            if (initialMatch != null && initialMatch.possession > 0 && !initialMatch.possessionEstimated && !initialMatch.statsEstimated)
+            if (initialMatch != null && initialMatch.hasTrustedPossession)
                 initialMatch.possession.toString() else ""
         )
     }
@@ -1022,6 +1022,7 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                             motmIsOpponent = initialMatch != null && initialMatch.motmIsOpponent &&
                                 motmSearchQuery == initialMatch.motmName,
                             possessionEstimated = false,
+                            possessionConfirmed = (possession.toIntOrNull() ?: 0) > 0,
                             playerPerformances = finalPerformances,
                             // Editing a match must not throw away what the game recorded: scorers and substitutions
                             goalDetails = initialMatch?.goalDetails ?: emptyList(),

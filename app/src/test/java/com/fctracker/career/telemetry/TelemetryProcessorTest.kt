@@ -296,6 +296,21 @@ class TelemetryProcessorTest {
     }
 
     @Test
+    fun aPlayerWhoCameInAndWentOutLater_isListedInBothDirections() {
+        val signed = run(AppState(players = squad(5)), event(transfer("Star Striker", "In (Permanent)", fee = 5.0, date = "2026-01-15")))
+        val loanedOut = run(signed.state, event(transfer("Star Striker", "Out (Loan)", fee = 0.0, date = "2026-01-22"), time = 2000))
+        val deals = loanedOut.state.transfers.filter { it.playerName == "Star Striker" }
+        assertEquals(2, deals.size)
+        assertEquals(1, deals.count { it.isIncomingDeal() })
+        assertEquals(1, deals.count { !it.isIncomingDeal() })
+        // the squad follows the latest move
+        assertTrue(loanedOut.state.players.first { it.name == "Star Striker" }.isLoanedOut)
+        // and both moves raised an alert
+        assertEquals(1, signed.notices.size)
+        assertEquals(1, loanedOut.notices.size)
+    }
+
+    @Test
     fun incomingAndOutgoingDealsAreTold() {
         fun t(type: String) = com.fctracker.career.TransferLog(type = type).isIncomingDeal()
         assertTrue(listOf("In (Permanent)", "In (Loan)", "Promoted In", "Free Agent Sign", "Bought").all { t(it) })

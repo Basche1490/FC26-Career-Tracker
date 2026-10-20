@@ -465,6 +465,7 @@ object TelemetryProcessor {
                 motmName = motm,
                 motmIsOpponent = motmIsOpponent,
                 possessionEstimated = false,
+                possessionConfirmed = possession > 0,
                 leaguePosition = leaguePos,
                 opponentCrestUrl = crestUrlFor(opponent),
                 playerPerformances = finalPerf,

@@ -651,6 +651,20 @@ do
     check(R.describe_departure(461483, ctx).date == "2027-08-05", "an older loan keeps its real start day")
     ctx.contracts[461483] = { signon = 0, date = "2026-07-01", changed = "2030-01-01" }
     check(R.describe_departure(461483, ctx).date == "2028-08-09", "a loan start in the future is not trusted")
+    -- a player who came in and later went out is described in BOTH directions, with keys that cannot clash, so the app
+    -- lists him under Transfers In and under Transfers Out
+    do
+        local c2 = ctx_with({ contracts = { [462884] = { signon = 155000, date = "2028-07-14", changed = "2028-07-14" } },
+                              info = { [462884] = { join_days = 2 } }, loans_out = {}, all_links = { [462884] = 1808 } })
+        local came = R.describe_arrival(462884, c2)
+        local sold = R.describe_departure(462884, c2)
+        check(came.type == "In (Permanent)" and sold.type == "Out (Permanent)" and came.key ~= sold.key,
+            "Ebner: signed and later sold gives an arrival and a departure with different keys", came.key .. " / " .. sold.key)
+        c2.loans_out = { [462884] = 236 }
+        local loaned = R.describe_departure(462884, c2)
+        check(loaned.type == "Out (Loan)" and loaned.key ~= came.key and loaned.key ~= sold.key,
+            "Ebner: signed and later loaned out is a third, separate record", loaned.key)
+    end
     -- a join date outside the season is not used as the sale day
     DATES[4] = "2027-01-01"
     check(R.describe_departure(73049, ctx).date == "2028-08-09", "an untrusted join date falls back to today")

@@ -72,4 +72,19 @@ class MatchLabelsTest {
         assertEquals("", goalMinuteLabel(GoalDetail(minute = 23, minuteEstimated = true)))
         assertEquals("", goalMinuteLabel(GoalDetail(minute = null)))
     }
+
+    @Test
+    fun possessionIsOnlyShownWhenItIsATrustedFigure() {
+        val live = match.copy(id = "live-1795000000", possession = 62)
+        // an automatic match saved by an earlier version may hold a pass-count guess that is not flagged: hidden
+        assertFalse(live.hasTrustedPossession)
+        assertFalse(live.copy(possessionEstimated = true).hasTrustedPossession)
+        // once a number is typed in (or the game gave one) it counts
+        assertTrue(live.copy(possessionConfirmed = true).hasTrustedPossession)
+        assertFalse(live.copy(possessionConfirmed = true, statsEstimated = true).hasTrustedPossession)
+        // a match entered by hand has always been the person's own figure
+        assertTrue(match.copy(id = "5f0c2c1e-6d0e-4a38-a0a0-1e2f3a4b5c6d", possession = 55).hasTrustedPossession)
+        // no figure at all
+        assertFalse(match.copy(id = "5f0c2c1e-6d0e-4a38-a0a0-1e2f3a4b5c6d", possession = 0).hasTrustedPossession)
+    }
 }

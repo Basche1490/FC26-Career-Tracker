@@ -585,6 +585,13 @@ fun PlayerRowDark(player: Player, onClick: () -> Unit = {}) {
                         }
                     }
                 }
+                if (player.isRegen && !player.regenOriginalName.isNullOrBlank()) {
+                    Text(
+                        text = "Regen of ${player.regenOriginalName}",
+                        fontSize = 10.sp,
+                        color = Color(0xFFE9D5FF)
+                    )
+                }
                 Text(
                     text = "${player.primaryPosition} • Age ${player.age}",
                     fontSize = 10.sp,

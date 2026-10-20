@@ -109,6 +109,8 @@ data class Player(
     val isLoanedOut: Boolean = false,
     val isLoanedIn: Boolean = false,
     val isRegen: Boolean = false,
+    /** For a regen: the real player he is based on (his picture comes from that player's card). Null when not set. */
+    val regenOriginalName: String? = null,
     val isPromoted: Boolean = false,
     val promotedSeasonYear: Int? = null,
     val status: String = "Active"
@@ -226,6 +228,8 @@ data class MatchResult(
     val motmIsOpponent: Boolean = false,
     /** True when [possession] is a guess from the pass counts: the game's export has no possession figure. */
     val possessionEstimated: Boolean = false,
+    /** True when [possession] was typed in by a person or given by the game itself (see [hasTrustedPossession]). */
+    val possessionConfirmed: Boolean = false,
     val playerPerformances: List<PlayerPerformance> = emptyList(),
     val goalDetails: List<GoalDetail> = emptyList(),
     val substitutions: List<Substitution> = emptyList(),
@@ -235,6 +239,15 @@ data class MatchResult(
      */
     val statsEstimated: Boolean = false
 ) {
+    /**
+     * Whether [possession] is a figure worth showing. The game's export has none, and an automatic match saved by an
+     * earlier version may hold a pass-count guess without saying so (its id starts with "live-"); such a figure only
+     * counts once it is confirmed. A match entered by hand, or one whose number was typed in later, is trusted.
+     */
+    val hasTrustedPossession: Boolean
+        get() = possession > 0 && !possessionEstimated && !statsEstimated &&
+            (possessionConfirmed || !id.startsWith("live-"))
+
     val resultBadge: String
         get() = when {
             goalsFor > goalsAgainst -> "W"

@@ -52,6 +52,37 @@ private fun searchEafcPlayers(query: String, allPlayers: List<com.fctracker.care
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+/**
+ * The nickname to save. The app shows the nickname before the Full Name, so a nickname that is only the common name of
+ * a regen template (copied in by an older version, or by picking the template in this dialog) must go as soon as the
+ * regen is given a name of its own; otherwise the corrected name never shows and "reverts" to the template's name.
+ * Any other nickname the person typed is kept.
+ */
+internal fun nicknameToKeep(
+    isRegen: Boolean,
+    typedName: String,
+    typedNickname: String,
+    old: Player?,
+    pickedTemplate: com.fctracker.career.EafcPlayer?,
+    allEafcPlayers: List<com.fctracker.career.EafcPlayer>
+): String? {
+    val nickname = typedNickname.trim()
+    if (nickname.isEmpty()) return null
+    val name = typedName.trim()
+    if (isRegen) {
+        // picked in this dialog
+        if (pickedTemplate != null && pickedTemplate.commonName.isNotBlank() &&
+            nickname.equals(pickedTemplate.commonName, ignoreCase = true) &&
+            !name.equals(pickedTemplate.name, ignoreCase = true) && !name.equals(pickedTemplate.commonName, ignoreCase = true)
+        ) return null
+        // copied in earlier and left untouched since: the name was corrected, the nickname is the template's
+        if (old != null && old.isRegen && name != old.name.trim() && nickname == old.nickname?.trim() &&
+            allEafcPlayers.any { it.commonName.equals(nickname, ignoreCase = true) && !it.name.equals(name, ignoreCase = true) }
+        ) return null
+    }
+    return typedNickname.takeIf { it.isNotBlank() }
+}
+
 @Composable
 fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: List<com.fctracker.career.EafcPlayer> = emptyList(), onDismiss: () -> Unit, onUpdate: (Player) -> Unit, onDelete: (() -> Unit)? = null) {
     var name by remember { mutableStateOf(player?.name ?: "") }
@@ -223,24 +254,25 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                     OutlinedTextField(value = wageK, onValueChange = { wageK = it }, label = { Text("Weekly Wage (€K)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
                 }
 
-                var regenSearchText by remember { mutableStateOf(if (isRegen && name.isNotBlank()) name else "") }
+                // The original player a regen is based on. It is saved with the player: it starts from what was saved
+                // (blank when nothing was), never from the regen's own name.
+                var regenSearchText by remember { mutableStateOf(player?.regenOriginalName.orEmpty()) }
+                // The template picked in this dialog, so the card's name is not overridden by the template's common name
+                var pickedTemplate by remember { mutableStateOf<com.fctracker.career.EafcPlayer?>(null) }
+                // The suggestions only open while typing, not when the dialog opens with the saved original player
+                var regenListOpen by remember { mutableStateOf(false) }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(
                         checked = isRegen,
-                        onCheckedChange = {
-                            isRegen = it
-                            if (it && regenSearchText.isBlank()) {
-                                regenSearchText = name
-                            }
-                        }
+                        onCheckedChange = { isRegen = it }
                     )
                     Text("Is Regen", color = Color.White)
                 }
 
                 if (isRegen) {
-                    val filteredRegens = remember(regenSearchText, allEafcPlayers) {
-                        if (regenSearchText.trim().isNotEmpty()) {
+                    val filteredRegens = remember(regenSearchText, allEafcPlayers, regenListOpen) {
+                        if (regenListOpen && regenSearchText.trim().isNotEmpty()) {
                             searchEafcPlayers(regenSearchText, allEafcPlayers)
                         } else emptyList()
                     }
@@ -249,14 +281,16 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                             value = regenSearchText,
                             onValueChange = {
                                 regenSearchText = it
+                                regenListOpen = true
                             },
                             label = { Text("Search Original Player / Regen Template") },
                             placeholder = { Text("Type player name (e.g. Messi, Haaland, Modric)") },
+                            supportingText = { Text("The real player this regen is based on. It is saved with the player; the Full Name above stays the regen's own name.") },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
                             trailingIcon = {
                                 if (regenSearchText.isNotEmpty()) {
-                                    IconButton(onClick = { regenSearchText = "" }) {
+                                    IconButton(onClick = { regenSearchText = ""; pickedTemplate = null; regenListOpen = false }) {
                                         Icon(Icons.Default.Close, contentDescription = "Clear")
                                     }
                                 }
@@ -279,6 +313,8 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                                                 .fillMaxWidth()
                                                 .clickable {
                                                     regenSearchText = displayName
+                                                    regenListOpen = false
+                                                    pickedTemplate = p
                                                     // Editing an existing player: the regen template only lends its picture.
                                                     // Adding a new player: it fills in the whole card.
                                                     if (player == null) {
@@ -435,13 +471,8 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                         val startingEdited = player != null && startingOverall != player.startingOverall.toString()
                         val keptOverall = if (player == null || startingEdited) startingOverall.toIntOrNull() ?: 60 else player.overall
                         val keptPotential = if (player == null) overall.toIntOrNull() ?: 60 else maxOf(player.potential, keptOverall)
-                        // Older versions copied the regen template's common name into the nickname, and the app shows
-                        // the nickname before the Full Name. When the name is corrected on such a regen, that leftover
-                        // nickname is dropped so the corrected name is the one that shows.
-                        val leftoverTemplateNickname = player != null && player.isRegen && name.trim() != player.name.trim() &&
-                            nickname.isNotBlank() && nickname == player.nickname &&
-                            allEafcPlayers.any { it.commonName.equals(nickname, ignoreCase = true) && !it.name.equals(name.trim(), ignoreCase = true) }
-                        val savedNickname = if (leftoverTemplateNickname) null else nickname.takeIf { it.isNotBlank() }
+                        val savedNickname = nicknameToKeep(isRegen, name, nickname, player, pickedTemplate, allEafcPlayers)
+                        val savedOriginal = if (isRegen) regenSearchText.trim().takeIf { it.isNotEmpty() } else null
                         val newPlayer = player?.copy(
                             name = name.trim(),
                             nickname = savedNickname,
@@ -466,12 +497,13 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                             weakFoot = weakFoot.toIntOrNull() ?: 3,
                             headshotUrl = headshotUrl,
                             isRegen = isRegen,
+                            regenOriginalName = savedOriginal,
                             isAcademy = if (isRetired) false else isAcademyPlayer,
                             isStartingXI = if (isRetired) false else player.isStartingXI,
                             status = status
                         ) ?: Player(
-                            name = name,
-                            nickname = nickname.takeIf { it.isNotBlank() },
+                            name = name.trim(),
+                            nickname = savedNickname,
                             primaryPosition = primaryPosition,
                             secondaryPosition = secondaryPosition.takeIf { it.isNotBlank() },
                             tertiaryPosition = tertiaryPosition.takeIf { it.isNotBlank() },
@@ -489,6 +521,7 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                             weakFoot = weakFoot.toIntOrNull() ?: 3,
                             headshotUrl = headshotUrl,
                             isRegen = isRegen,
+                            regenOriginalName = savedOriginal,
                             isAcademy = isAcademyPlayer,
                             status = status
                         )
