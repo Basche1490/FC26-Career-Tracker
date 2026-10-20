@@ -208,7 +208,7 @@ function Targets($Source, $Remembered, $User, $Drive, $Extra = @()) {
 }
 $script:ChooseCalls = 0
 $script:FolderCalls = 0
-$script:ChooseHook = { param($q, $o) $script:ChooseCalls++; return $script:ChooseAnswer }
+$script:ChooseHook = { param($q, $o) $script:ChooseCalls++; $script:ChooseOptions = @($o); return $script:ChooseAnswer }
 $script:FolderHook = { param($q) $script:FolderCalls++; return $script:FolderAnswer }
 $script:ChooseAnswer = 0
 $script:FolderAnswer = $null
@@ -269,11 +269,12 @@ Check 'targets.prefers_the_one_with_the_script' ($t.Dirs.Count -eq 1 -and $t.Dir
 
 # two Live Editors, nothing to tell them apart: ask
 $h8 = Join-Path $work 'h-eight'
-New-LiveEditor (Join-Path $h8 'Documents/LE-a')
 New-LiveEditor (Join-Path $h8 'Documents/LE-b')
-$script:ChooseAnswer = 1
+New-LiveEditor (Join-Path $h8 'Documents/LE-a')
+$script:ChooseAnswer = 1   # the list is alphabetical, so the second entry is LE-b whatever order the disk lists them in
 $c0 = $script:ChooseCalls
 $t = Targets $source @() @((Join-Path $h8 'Documents')) @()
+Check 'targets.options_are_alphabetical' ((Names $script:ChooseOptions) -eq 'LE-a,LE-b') (Names $script:ChooseOptions)
 Check 'targets.asks_when_unclear' ($script:ChooseCalls -eq ($c0 + 1) -and $t.Dirs.Count -eq 1 -and $t.Dirs[0] -like '*LE-b/lua/scripts') ($t.Dirs -join ' ; ')
 $script:ChooseAnswer = -1
 $script:FolderAnswer = Join-Path $le1 'lua'

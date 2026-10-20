@@ -167,8 +167,14 @@ function Resolve-ScriptsDir([string]$Root) {
     return $null
 }
 
+# Sub-folders in alphabetical order, so the search (and a list shown to the person) never depends on how the disk
+# happens to enumerate them.
 function Get-SubDirs([string]$Dir) {
-    try { return @([IO.Directory]::GetDirectories($Dir)) } catch { return @() }
+    try {
+        $dirs = [IO.Directory]::GetDirectories($Dir)
+        [Array]::Sort($dirs, [StringComparer]::OrdinalIgnoreCase)
+        return @($dirs)
+    } catch { return @() }
 }
 
 # Looks for the project next to the launcher: its own folder, the folder above it, and one level of folders in
@@ -332,7 +338,7 @@ function Find-ScriptTargets {
     $roots = @(@($UserRoots) + @($ExtraRoots) | Where-Object { $_ })
     $found = @(Search-Directories -Roots $roots -MaxDepth 4 -Match $le)
     if ($found.Count -eq 0) { $found = @(Search-Directories -Roots $DriveRoots -MaxDepth 3 -Match $le) }
-    $found = @($found | Select-Object -Unique)
+    $found = @($found | Select-Object -Unique | Sort-Object)
 
     if ($found.Count -gt 1) {
         $has = @($found | Where-Object { Test-Path -LiteralPath (Join-Path (Get-ScriptsDirOf $_) 'FC26_Auto_Capture.lua') -PathType Leaf })
