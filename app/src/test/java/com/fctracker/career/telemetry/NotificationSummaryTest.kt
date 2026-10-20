@@ -34,4 +34,13 @@ class NotificationSummaryTest {
         assertEquals("transfers", deals.route)
         assertTrue(deals.isTransfer)
     }
+
+    @Test
+    fun aSummaryOnlyCountsWhatIsWanted() {
+        val many = (1..5).map { match(it) } + (1..4).map { deal(it) }
+        val wanted = NoticeFilter.filter(many, NotificationPrefs(matches = false))
+        val summary = NotificationHelper.summarise(wanted).single()
+        assertEquals("4 transfers", summary.message)
+        assertEquals("transfers", summary.route)
+    }
 }

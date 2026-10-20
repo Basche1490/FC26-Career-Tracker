@@ -33,6 +33,8 @@ import com.fctracker.career.ui.screens.SeasonSummaryScreen
 import com.fctracker.career.ui.screens.CareerSummaryScreen
 import com.fctracker.career.ui.screens.AssistantScreen
 import com.fctracker.career.ui.screens.SettingsScreen
+import com.fctracker.career.ui.screens.ConnectionScreen
+import com.fctracker.career.ui.screens.SetupGuideScreen
 import com.fctracker.career.ui.screens.AppDrawer
 import com.fctracker.career.ui.theme.FCTheme
 import kotlinx.coroutines.launch
@@ -125,12 +127,17 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
             if (!route.isNullOrBlank() && state.isOnboarded) {
                 try {
                     drawerState.close()
-                    navController.navigate(route) {
-                        popUpTo(navController.graph.startDestinationId) {
-                            saveState = true
+                    if (route == "connection" || route == "setup") {
+                        // Opened from a status pill on some screen: stack it on top, so Back returns to that screen.
+                        navController.navigate(route) { launchSingleTop = true }
+                    } else {
+                        navController.navigate(route) {
+                            popUpTo(navController.graph.startDestinationId) {
+                                saveState = true
+                            }
+                            launchSingleTop = true
+                            restoreState = true
                         }
-                        launchSingleTop = true
-                        restoreState = true
                     }
                 } catch (e: Exception) {
                     try {
@@ -207,6 +214,19 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
                 composable("season_summary") { SeasonSummaryScreen(viewModel) { scope.launch { drawerState.open() } } }
                 composable("career_summary") { CareerSummaryScreen(viewModel) { scope.launch { drawerState.open() } } }
                 composable("assistant") { AssistantScreen(viewModel) { scope.launch { drawerState.open() } } }
+                composable("connection") {
+                    ConnectionScreen(
+                        viewModel,
+                        onOpenSetup = { scope.launch { navController.navigate("setup") } }
+                    ) { scope.launch { drawerState.open() } }
+                }
+                composable("setup") {
+                    SetupGuideScreen(viewModel) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate("dashboard") { launchSingleTop = true }
+                        }
+                    }
+                }
                 composable("settings") { SettingsScreen(viewModel) { scope.launch { drawerState.open() } } }
             }
         }

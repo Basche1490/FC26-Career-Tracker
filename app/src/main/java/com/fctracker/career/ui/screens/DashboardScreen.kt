@@ -47,6 +47,14 @@ fun DashboardScreen(viewModel: MainViewModel, onNavigate: (String) -> Unit, onMe
     androidx.compose.runtime.LaunchedEffect(Unit) {
         viewModel.fetchLiveTelemetry()
     }
+    // Right after a new career was set up the live-sync guide opens once; the person can skip it.
+    val setupPrompt by viewModel.setupPrompt.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(setupPrompt) {
+        if (setupPrompt) {
+            viewModel.consumeSetupPrompt()
+            onNavigate("setup")
+        }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -58,9 +66,12 @@ fun DashboardScreen(viewModel: MainViewModel, onNavigate: (String) -> Unit, onMe
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
         ) {
-            HeroBanner(state, onMenuClick, { 
-                if (it == -1) viewModel.endSeason() else viewModel.setViewingSeasonYear(it) 
-            })
+            HeroBanner(
+                state = state,
+                onMenuClick = onMenuClick,
+                onSeasonSelected = { if (it == -1) viewModel.endSeason() else viewModel.setViewingSeasonYear(it) },
+                pill = { StatusPill(viewModel) }
+            )
             
             LazyColumn(
                 modifier = Modifier
@@ -76,7 +87,7 @@ fun DashboardScreen(viewModel: MainViewModel, onNavigate: (String) -> Unit, onMe
                 item { SquadSummaryStats(state) }
                 item { TopProspectsWidget(state) }
                 item { ObjectivesWidget(state, viewModel) }
-                item { LiveTelemetryWidget(state, viewModel) }
+                item { LiveTelemetryWidget(state, viewModel, onOpenConnection = { onNavigate("connection") }, onOpenSetup = { onNavigate("setup") }) }
                 item { QuickNavigationGrid(onNavigate) }
                 item { Spacer(Modifier.height(80.dp)) }
             }
@@ -86,7 +97,7 @@ fun DashboardScreen(viewModel: MainViewModel, onNavigate: (String) -> Unit, onMe
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HeroBanner(state: AppState, onMenuClick: () -> Unit, onSeasonSelected: (Int?) -> Unit) {
+fun HeroBanner(state: AppState, onMenuClick: () -> Unit, onSeasonSelected: (Int?) -> Unit, pill: @Composable () -> Unit = {}) {
     var seasonExpanded by remember { mutableStateOf(false) }
     var showNewSeasonDialog by remember { mutableStateOf(false) }
     
@@ -194,6 +205,8 @@ fun HeroBanner(state: AppState, onMenuClick: () -> Unit, onSeasonSelected: (Int?
                     Icon(Icons.Default.Menu, "Menu", tint = MaterialTheme.colorScheme.primary)
                 }
 
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                pill()
                 Box {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -237,6 +250,7 @@ fun HeroBanner(state: AppState, onMenuClick: () -> Unit, onSeasonSelected: (Int?
                             }
                         )
                     }
+                }
                 }
             }
 
@@ -892,13 +906,16 @@ fun DarkCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() 
 }
 
 
+/**
+ * The live feed card: one status line (the pill, in words) and the last few events. Everything about the connection
+ * itself (address, Find my PC, checks) lives on the PC Connection screen, one tap away.
+ */
 @Composable
-fun LiveTelemetryWidget(state: AppState, viewModel: MainViewModel) {
-    var showConfigDialog by remember { mutableStateOf(false) }
-    var bridgeUrlInput by remember(state.telemetryServerUrl) { mutableStateOf(state.telemetryServerUrl) }
-
-    var connectionTestMsg by remember { mutableStateOf<String?>(null) }
-    var isTestingConnection by remember { mutableStateOf(false) }
+fun LiveTelemetryWidget(state: AppState, viewModel: MainViewModel, onOpenConnection: () -> Unit, onOpenSetup: () -> Unit) {
+    val health by viewModel.health.collectAsState()
+    val contact by viewModel.contact.collectAsState()
+    var refreshing by remember { mutableStateOf(false) }
+    val neverSetUp = !contact.everConnected && !contact.reachable
 
     DarkCard(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -906,68 +923,52 @@ fun LiveTelemetryWidget(state: AppState, viewModel: MainViewModel) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Live Telemetry Feed", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    val isOnline = state.bridgeConnectionStatus.startsWith("Online") || state.bridgeConnectionStatus.startsWith("Connected")
-                    val statusDotColor = if (isOnline) Color(0xFF10B981) else if (state.bridgeConnectionStatus == "Not Checked") Color(0xFF94A3B8) else Color(0xFFEF4444)
-                    Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(statusDotColor))
-                    Text(
-                        state.bridgeConnectionStatus,
-                        fontSize = 9.sp,
-                        color = statusDotColor,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1
-                    )
-                }
-                Text(
-                    "PC Bridge: ${state.telemetryServerUrl}",
-                    fontSize = 10.sp,
-                    color = MaterialTheme.colorScheme.primary,
-                    maxLines = 1
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Live feed", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground)
+                StatusPill(health.level, health.pill, onClick = onOpenConnection)
+            }
+            androidx.compose.material3.IconButton(
+                onClick = {
+                    refreshing = true
+                    viewModel.recheckConnection { refreshing = false }
+                },
+                enabled = !refreshing,
+                modifier = Modifier.size(32.dp)
+            ) {
+                androidx.compose.material3.Icon(
+                    androidx.compose.material.icons.Icons.Default.Refresh,
+                    contentDescription = "Check the connection now",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                androidx.compose.material3.IconButton(
-                    onClick = { showConfigDialog = true },
-                    modifier = Modifier.size(28.dp)
-                ) {
-                    androidx.compose.material3.Icon(
-                        androidx.compose.material.icons.Icons.Default.Settings,
-                        contentDescription = "Configure Bridge",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
-                    )
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            if (health.level == com.fctracker.career.telemetry.Level.LIVE) health.detail else health.headline,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (health.level != com.fctracker.career.telemetry.Level.LIVE && health.detail.isNotBlank()) {
+            Spacer(Modifier.height(2.dp))
+            Text(health.detail, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (neverSetUp) {
+                Button(onClick = onOpenSetup, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)) {
+                    Text("Set up live sync", fontSize = 12.sp)
                 }
-                androidx.compose.material3.IconButton(
-                    onClick = { viewModel.fetchLiveTelemetry() },
-                    modifier = Modifier.size(28.dp)
-                ) {
-                    androidx.compose.material3.Icon(
-                        androidx.compose.material.icons.Icons.Default.Refresh,
-                        contentDescription = "Refresh",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp)
-                    )
+                androidx.compose.material3.TextButton(onClick = onOpenConnection) { Text("Enter address", fontSize = 12.sp) }
+            } else {
+                androidx.compose.material3.TextButton(onClick = onOpenConnection) {
+                    Text(if (health.level == com.fctracker.career.telemetry.Level.LIVE) "Details" else "Fix this", fontSize = 12.sp)
                 }
             }
         }
-        Spacer(Modifier.height(12.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (state.liveEvents.isEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        "No live events yet. Start the bridge on your PC (Start_Bridge.bat) and play matches in EA FC!",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 11.sp
-                    )
-                    Text(
-                        "Tap the gear icon above to verify PC IP address or test transmission.",
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
-                        fontSize = 10.sp
-                    )
-                }
-            } else {
+        if (state.liveEvents.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 state.liveEvents.take(3).forEach { ev ->
                     Row(
                         modifier = Modifier
@@ -985,105 +986,12 @@ fun LiveTelemetryWidget(state: AppState, viewModel: MainViewModel) {
                         )
                         Spacer(Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(ev.title, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                            Text(ev.title, fontSize = 12.sp, color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Medium)
                             Text(ev.message, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
             }
         }
-    }
-
-    if (showConfigDialog) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { showConfigDialog = false },
-            title = { Text("Telemetry Bridge Setup", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        "Direct local connection to your PC bridge (Start_Bridge.bat). Ensure both your PC and phone are on the same Wi-Fi.",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    OutlinedTextField(
-                        value = bridgeUrlInput,
-                        onValueChange = { bridgeUrlInput = it },
-                        label = { Text("Bridge IP & Port") },
-                        placeholder = { Text("http://192.168.2.24:5050") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        OutlinedButton(
-                            onClick = {
-                                isTestingConnection = true
-                                connectionTestMsg = "Pinging bridge..."
-                                viewModel.updateTelemetryServerUrl(bridgeUrlInput.trim())
-                                viewModel.testBridgeConnection { success, msg ->
-                                    isTestingConnection = false
-                                    connectionTestMsg = msg
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(if (isTestingConnection) "Testing..." else "Ping Bridge", fontSize = 12.sp)
-                        }
-
-                        OutlinedButton(
-                            onClick = {
-                                viewModel.injectTestMatchEvent()
-                                connectionTestMsg = "✅ Test match injected! Check Recent Matches."
-                            },
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text("Simulate Match", fontSize = 12.sp)
-                        }
-                    }
-
-                    if (connectionTestMsg != null) {
-                        Text(
-                            connectionTestMsg!!,
-                            fontSize = 11.sp,
-                            color = if (connectionTestMsg!!.startsWith("✅")) Color(0xFF10B981) else Color(0xFFEF4444),
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-                            .padding(10.dp)
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("💡 VPN Notice:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFFFBBF24))
-                            Text(
-                                "If your phone is on a VPN, enable 'LAN / Local Network Bypass' in your VPN app so your phone can reach your computer's local Wi-Fi IP address.",
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    viewModel.updateTelemetryServerUrl(bridgeUrlInput.trim())
-                    viewModel.fetchLiveTelemetry()
-                    showConfigDialog = false
-                }) {
-                    Text("Save & Connect")
-                }
-            },
-            dismissButton = {
-                androidx.compose.material3.TextButton(onClick = { showConfigDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
     }
 }

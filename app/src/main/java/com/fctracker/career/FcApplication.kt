@@ -25,7 +25,7 @@ class FcApplication : Application() {
 
     val playerDatabase: PlayerDatabase by lazy { PlayerDatabase(this) }
 
-    val telemetry: TelemetrySync by lazy { TelemetrySync(this, store, playerDatabase) }
+    val telemetry: TelemetrySync by lazy { TelemetrySync(this, store, playerDatabase, syncPrefs) }
 
     val syncPrefs: SyncPrefs by lazy { SyncPrefs(this) }
 }

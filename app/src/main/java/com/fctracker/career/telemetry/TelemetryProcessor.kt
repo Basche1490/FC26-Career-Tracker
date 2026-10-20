@@ -69,6 +69,8 @@ object TelemetryProcessor {
         val transfers = state.transfers.toMutableList()
         val matches = state.recentMatches.toMutableList()
         var squad = state.players.toMutableList()
+        var academy = state.academyPlayers
+        var careerDate = state.careerDate
         var injuries = state.activeInjuries
         val notices = mutableListOf<TelemetryNotice>()
         var hasNew = false
@@ -158,6 +160,20 @@ object TelemetryProcessor {
                             if (alert) notices.add(TelemetryNotice(evTitle, evMessage, "squad", false))
                         }
                     }
+                    "squad" -> {
+                        // Contract and loan end dates, straight from the game. Stored quietly: no live-event row, no alert.
+                        val report = SquadReport.parse(data)
+                        val applied = SquadReport.apply(squad, academy, report)
+                        if (applied.changed) {
+                            squad = applied.squad.toMutableList()
+                            academy = applied.academy
+                            hasNew = true
+                        }
+                        if (report.careerDate != null && report.careerDate != careerDate) {
+                            careerDate = report.careerDate   // the newest report wins: a reloaded older save moves it back
+                            hasNew = true
+                        }
+                    }
                     // Any other structured payload (for example a snapshot) is ignored, as before.
                 }
             } else if (trimmedMessage.isNotEmpty()) {
@@ -190,7 +206,9 @@ object TelemetryProcessor {
                 transfers = transfers,
                 recentMatches = matches,
                 activeInjuries = injuries,
-                players = squad
+                players = squad,
+                academyPlayers = academy,
+                careerDate = careerDate
             ),
             notices
         )

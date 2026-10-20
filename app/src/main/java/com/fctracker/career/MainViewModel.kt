@@ -12,7 +12,10 @@ import androidx.lifecycle.viewModelScope
 import com.fctracker.career.data.CareerStore
 import com.fctracker.career.data.PlayerDatabase
 import com.google.gson.Gson
+import com.fctracker.career.telemetry.Contact
+import com.fctracker.career.telemetry.Health
 import com.fctracker.career.telemetry.LiveSyncService
+import com.fctracker.career.telemetry.NotificationPrefs
 import com.fctracker.career.telemetry.TelemetrySync
 
 
@@ -36,10 +39,75 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         _pendingRoute.value = null
     }
 
-    fun updateTelemetryServerUrl(url: String) {
+    /** Saves the bridge address and asks the bridge right away; [onDone] is called when its answer (or its silence) is in. */
+    fun saveBridgeAddress(url: String, onDone: (() -> Unit)? = null) {
         val normalized = TelemetrySync.normalizeBridgeUrl(url)
-        _state.value = _state.value.copy(telemetryServerUrl = normalized)
-        persistData()
+        if (normalized != _state.value.telemetryServerUrl) {
+            _state.value = _state.value.copy(telemetryServerUrl = normalized)
+            persistData()
+            sync.addressChanged()
+        }
+        recheckConnection { onDone?.invoke() }
+    }
+
+    fun updateTelemetryServerUrl(url: String) {
+        saveBridgeAddress(url)
+    }
+
+    // -- connection health (the status pill, the Connection screen and the setup guide) ---------------
+
+    /** One answer to "is everything working?": Live, Check or Offline, with the Phone / Bridge / Script steps behind it. */
+    val health: StateFlow<Health> = sync.health
+
+    /** The raw contact with the bridge: its address, whether it answered, and its own health report. */
+    val contact: StateFlow<Contact> = sync.contact
+
+    /** Asks the bridge again right now (the "Check again" / retry button). */
+    fun recheckConnection(onDone: ((Boolean) -> Unit)? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = sync.poll(notify = true)
+            if (onDone != null) withContext(Dispatchers.Main) { onDone(ok) }
+        }
+    }
+
+    /** The "Re-send last match" button: the capture script sends its latest match again. */
+    fun resendLastMatch(onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = sync.resendLatestMatch()
+            withContext(Dispatchers.Main) { onResult(result.ok, result.message) }
+        }
+    }
+
+    /** "Find my PC": looks for the bridge on the phone's Wi-Fi network. */
+    fun findMyPc(onResult: (TelemetrySync.FindResult) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = sync.findMyPc()
+            withContext(Dispatchers.Main) { onResult(result) }
+        }
+    }
+
+    // -- device-level settings: which alerts, and the first-run guide ----------------------------------
+
+    val notificationPrefs: StateFlow<NotificationPrefs> = app.syncPrefs.notificationPrefsFlow
+
+    fun setNotificationPrefs(prefs: NotificationPrefs) {
+        app.syncPrefs.notificationPrefs = prefs
+    }
+
+    /** True once the first-run setup guide was finished or skipped. */
+    val setupGuideDone: StateFlow<Boolean> = app.syncPrefs.setupGuideDoneFlow
+
+    fun setSetupGuideDone(done: Boolean) {
+        app.syncPrefs.setupGuideDone = done
+    }
+
+    private val _setupPrompt = MutableStateFlow(false)
+
+    /** True right after a new career was set up and the guide has not been finished: the Dashboard opens it once. */
+    val setupPrompt: StateFlow<Boolean> = _setupPrompt.asStateFlow()
+
+    fun consumeSetupPrompt() {
+        _setupPrompt.value = false
     }
     
     // -- live telemetry ------------------------------------------------------------------------------
@@ -225,6 +293,7 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
             initializeGameData(isExistingTeam, clubName)
         }
         persistData()
+        if (!app.syncPrefs.setupGuideDone) _setupPrompt.value = true
     }
     var allEafcPlayers: List<EafcPlayer> = emptyList()
         private set

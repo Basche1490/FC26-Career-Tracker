@@ -77,7 +77,7 @@ print("=========================================================================
 if postCode == "200" then
     print(" [OK] The bridge accepted the test match. It should appear in your phone app within ~10 seconds.")
 elseif readCode == "no answer" or readCode == "000" then
-    print(" [FAIL] Nothing is listening on port 5050. Start Start_Bridge.bat (or Start_Bridge_Python.bat) first.")
+    print(" [FAIL] Nothing is listening on port 5050. Run FC26_Launcher.bat first.")
 else
     print(" [FAIL] The bridge answered GET with HTTP " .. readCode .. " but POST with HTTP " .. postCode .. ".")
     print("        403 = request refused (writes are only accepted from this PC), 413 = too large, 400 = bad request.")

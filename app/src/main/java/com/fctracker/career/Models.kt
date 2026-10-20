@@ -113,7 +113,21 @@ data class Player(
     val regenOriginalName: String? = null,
     val isPromoted: Boolean = false,
     val promotedSeasonYear: Int? = null,
-    val status: String = "Active"
+    val status: String = "Active",
+    /**
+     * What the game itself says (reported by the capture script on the PC, never guessed). Null until the first report
+     * after the player was added. [contractEnd] is the last day of the contract as yyyy-MM-dd.
+     */
+    val contractEnd: String? = null,
+    /** "in" = on loan to this club, "out" = on loan from this club; null when not on loan (or not reported yet). */
+    val loanDirection: String? = null,
+    /** The other club of the loan: where the player came from ("in") or went to ("out"). Blank when the game has none. */
+    val loanClub: String? = null,
+    /** The day the loan ends, yyyy-MM-dd; null when the game gave none. */
+    val loanEnd: String? = null,
+    val loanOptionToBuy: Boolean = false,
+    /** The game's own id for this player, remembered from a squad report so a renamed player is still recognised. */
+    val gamePlayerId: Int? = null
 ) {
     val displayName: String get() = when {
         !customDisplayName.isNullOrBlank() -> customDisplayName
@@ -427,5 +441,7 @@ data class AppState(
     val liveEvents: List<LiveEvent> = emptyList(),
     val telemetryServerUrl: String = "http://192.168.2.24:5050",
     val bridgeConnectionStatus: String = "Not Checked",
-    val bridgeEventCount: Int = 0
+    val bridgeEventCount: Int = 0,
+    /** The game's date (yyyy-MM-dd) as of the last squad report from the PC. Contract and loan time left is worked out against it. */
+    val careerDate: String? = null
 )

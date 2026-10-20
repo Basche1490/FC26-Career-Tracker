@@ -116,9 +116,12 @@ object NotificationHelper {
         }
     }
 
-    /** Shows what the processor produced: up to [MAX_SEPARATE_ALERTS] alerts one by one, more as a single summary. */
-    fun showAll(context: Context, notices: List<TelemetryNotice>) {
-        for (notice in summarise(notices)) show(context, notice)
+    /**
+     * Shows what the processor produced: up to [MAX_SEPARATE_ALERTS] alerts one by one, more as a single summary.
+     * Kinds of alert the person switched off in Settings are dropped first, so a summary only counts what is wanted.
+     */
+    fun showAll(context: Context, notices: List<TelemetryNotice>, prefs: NotificationPrefs = NotificationPrefs()) {
+        for (notice in summarise(NoticeFilter.filter(notices, prefs))) show(context, notice)
     }
 
     /** The "Send test alert" button in Settings. */

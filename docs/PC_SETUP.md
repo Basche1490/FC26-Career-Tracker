@@ -6,27 +6,97 @@ The app can fill in your career by itself while you play. Two small things run o
 2. **A capture script** (`live-editor-scripts/`) that runs inside FC Live Editor and sends every finished match
    and every transfer to the bridge.
 
-Phone and PC must be on the same Wi-Fi network.
+Phone and PC must be on the same Wi-Fi network. One file sets up the PC side: `FC26_Launcher.bat`.
 
-## 1. Start the bridge
+## Quick start (about three minutes)
 
-Double-click `pc-bridge/Start_Bridge.bat` (PowerShell engine) or `pc-bridge/Start_Bridge_Python.bat`
-(needs Python). Keep the window open while you play. It prints your PC's address, for example
-`http://192.168.1.20:5050`. Type that address into the app under **Settings → Live Telemetry**, then press
-**Test connection**.
+1. **On the PC:** download `FC26-PC-Tools.zip` from the **Latest build** release of this repository
+   (*Releases → Latest build*), unzip it anywhere, and double-click **`FC26_Launcher.bat`**.
+   Windows may ask once for permission (the shield window): say **Yes**. That is the firewall rule that lets your phone in.
+2. **On the phone:** open the app, menu → **PC Connection** → **Find my PC**. (The app's **Set up live sync** guide walks
+   through these same steps and ticks each one off as it works.)
+3. **In FC Live Editor:** load your career, open the **Lua Scripts** tab, pick **`FC26_Auto_Capture.lua`** and press **Execute**.
 
-If Windows answers with HTTP 503, run `Start_Bridge.bat` as administrator once, or use the Python version.
+Then play. After each match press **Advance** to reach the Career Hub: the match appears in the app by itself.
 
-## 2. Start the capture script
+The small coloured pill at the top of the app shows whether this is working: green *Live*, amber *Check* (something to fix,
+tap it to see what), red *Down*, grey *Not set up*.
 
-Open FC Live Editor, load your Career Mode save, and run `live-editor-scripts/FC26_Auto_Capture.lua`.
+## 1. The launcher
+
+`FC26_Launcher.bat` is the only file you need to start. Run it again any time: it fixes what is missing and updates what is old.
+It does these things, and tells you plainly what it did:
+
+1. **Finds the files.** The bridge and the Live Editor scripts can be in different folders than the launcher, and Live Editor can be
+   anywhere (Desktop, Documents, another drive). The launcher looks next to itself first, then in Desktop, Downloads, Documents
+   (also when they are in OneDrive) and, if still needed, on your fixed drives. If it finds several copies it takes the newest
+   bridge; if it finds several Live Editors it takes the one that already has the capture script, then the one with "26" in its name,
+   and only otherwise asks you. If it finds nothing it opens a folder picker: choose the Live Editor folder (the one that contains
+   the `lua` folder). It remembers the answer in `%APPDATA%\FC26Tracker\launcher.json`.
+2. **Installs the capture scripts** (`FC26_Auto_Capture.lua` and `FC26_AutoCapture_v1.1.1.lua`) into Live Editor's `lua\scripts`
+   folder. A changed script is replaced and the previous one kept as `.bak`; a newer script that is already there is never overwritten.
+   Scripts of earlier versions in that folder (`telemetry_sync.lua`, `telemetry_auto_loop.lua` and so on) are renamed to `.old`,
+   never deleted, because they would otherwise run next to the new one.
+3. **Lets your phone in.** It adds one Windows Firewall rule, "EA FC Telemetry Bridge", for port 5050 and the local network only,
+   after asking Windows once. It does **not** change your network profile (Public/Private).
+4. **Starts the bridge in the background, with no window.** It uses Python when a working Python 3 is installed, otherwise the built-in
+   PowerShell version (which needs one more permission, an HTTP reservation, asked in the same single prompt). If a bridge is already
+   running it is kept; if it is older than the files, it is restarted. The bridge's output goes to
+   `%APPDATA%\FC26Tracker\bridge.log` and `bridge-errors.log`.
+5. **Prints the address** to type into the phone, and the next steps. The window then waits for **Enter** so you can read it; if
+   anything goes wrong the window stays open instead of vanishing.
+
+Options (type them after the file name in a command prompt, or ignore them):
+
+| Command | Does |
+| --- | --- |
+| `FC26_Launcher.bat status` | Shows what the bridge sees: phone, script, versions, folders. |
+| `FC26_Launcher.bat stop` | Stops the bridge. |
+| `FC26_Launcher.bat reset` | Forgets the remembered folders, then runs normally. |
+| `FC26_Launcher.bat nopause` | Does not wait for Enter at the end. |
+
+The bridge does not start with Windows: run the launcher when you sit down to play. (Closing the launcher window does not stop
+the bridge; use `stop`, or restart the PC.)
+
+If Live Editor was open when the scripts were installed, restart it once so it lists them.
+
+### If the launcher says something is wrong
+
+| It says | What to do |
+| --- | --- |
+| The bridge files were not found | Run it from the unzipped folder, or point the folder picker at `pc-bridge`. |
+| No Live Editor folder was chosen | Run it again and pick the folder that contains `lua`, or copy the two `.lua` files into Live Editor's `lua\scripts` yourself. |
+| Something that is not this bridge is using port 5050 | Close that program, then run the launcher again. |
+| An old bridge could not be stopped | It was started as administrator (for example by an older `Start_Bridge.bat`). Close its window, run the launcher again. |
+| The permission was not given | Run the launcher again and choose **Yes** when Windows asks. |
+| The bridge did not start | The lines under it are the bridge's own message; `%APPDATA%\FC26Tracker\bridge-errors.log` has more. |
+
+## 2. Checking that it all works (PC Connection)
+
+In the app, menu → **PC Connection** shows the whole path, from phone to bridge to script, each step ticked or marked with what to do:
+
+- **Self check on the PC:** the bridge looks at itself every time you open the screen or press **Check again**: export folder, outbox,
+  capture script (running? which version? is it new enough?), match statistics (is the Project Atlas exporter running?), undelivered
+  reports, last match received, phone connection, network address. Every problem comes with one sentence saying how to fix it.
+  The same list is on the PC at `http://localhost:5050` in a browser.
+- **Versions:** app, bridge and script. If the script is older than the bridge needs (`2.8.0`), the screen says to update it (run the launcher again).
+- **Re-send last match:** asks the capture script to send the newest finished match again, for example when the phone missed it
+  or you cleared it. The screen tells you what happened (sent, nothing to send, script not running).
+- **PC address:** shows the saved address and **Find my PC**, which looks for the bridge on your Wi-Fi. A VPN on the phone can hide the PC; the screen says so.
+- **Testing** (collapsed): *Test match* and *Test transfer* put a made-up match or transfer into the app so you can see how it looks and
+  that alerts work, without touching the bridge. Delete them afterwards.
+
+## 3. The capture script
+
+Open FC Live Editor, load your Career Mode save, and run `FC26_Auto_Capture.lua` (the launcher put it in `lua\scripts`).
 It watches your club every 2 seconds and sends:
 
 - every finished match, with real line-ups, ratings, scorers, man of the match and league position
 - every transfer (permanent and loan, in and out) as it happens, as far as the game stores it (see
   "What the game stores about transfers" below)
+- once per start and after every match, the squad's **contract end dates and loan details**, read from the game (see "Contracts and loans in the Squad")
 
-Keep these two files together in the same Live Editor scripts folder:
+The folder `live-editor-scripts` holds exactly two scripts. Keep them together in the same Live Editor scripts folder (the launcher does this):
 
 | File | Purpose |
 | --- | --- |
@@ -55,20 +125,29 @@ When a match ends, `FC26_Auto_Capture.lua` waits up to 45 seconds for the Atlas 
 are included. If none arrive, the match is sent from the game database and the app marks its player stats as
 *estimated*.
 
-`FC26_MatchStatsExport.lua` and `FC26_Snapshot.lua` are the complete original exporters that are built into
-`FC26_AutoCapture_v1.1.1.lua`. Only use them on their own if you want the raw exports; never run them at the
-same time as `FC26_AutoCapture_v1.1.1.lua`.
+Older scripts are kept in `live-editor-scripts/legacy/` and are not needed any more:
 
-Other scripts:
-
-| File | Purpose |
+| File | Replaced by |
 | --- | --- |
-| `telemetry_auto_loop.lua` | Starts `FC26_Auto_Capture.lua` for you. |
-| `telemetry_sync.lua` | The older all-in-one script. It stands down by itself while `FC26_Auto_Capture.lua` runs. |
-| `FC26_Probe.lua` | Read-only report of what the game stores about transfers, loans and finances (see step 5). |
-| `send_latest_match.lua` | Sends your latest match in one click. |
-| `telemetry_test_connection.lua` | Checks that the bridge is reachable and prints what is wrong if it is not. |
-| `telemetry_sender_v2.lua` | Small sender used by older setups. |
+| `telemetry_auto_loop.lua`, `telemetry_sync.lua`, `telemetry_sender_v2.lua` | `FC26_Auto_Capture.lua` (run it directly). |
+| `send_latest_match.lua` | **Re-send last match** on the app's PC Connection screen. |
+| `telemetry_test_connection.lua` | The **Self check** on the PC Connection screen. |
+| `FC26_MatchStatsExport.lua`, `FC26_Snapshot.lua` | Built into `FC26_AutoCapture_v1.1.1.lua`. Only use them on their own if you want the raw exports, and never at the same time as the exporter. |
+
+`live-editor-scripts/tools/FC26_Probe.lua` is an optional read-only report (see step 6).
+
+## Contracts and loans in the Squad
+
+The Squad screen shows each player's **contract end** and, for players on loan, **who he is on loan from or to and until when**. These
+are the game's own values, not estimates:
+
+- The contract runs to **30 June** of the year the game stores for the player (`contractvaliduntil`); the app calculates the time left
+  from the game's own date (the career date the script reports, or the date of your newest match), never from today's date on your phone.
+- Loans come from the game's loan table. A loan with no known end date is shown without one.
+- Colours: contracts end in under 6 months = red, under 12 months = amber; loans end in under 1 month = red, under 3 months = amber.
+  **Needs attention** at the top of the Squad lists exactly those players, soonest first.
+- If the script has not reported yet, or the player was added by hand, the app shows nothing rather than guessing. Open a player's edit
+  dialog: the **From the game** section says what the game reported and when.
 
 ## What the game stores about transfers
 
@@ -116,7 +195,7 @@ that the two belong together or how much cash changed hands, so the fees show as
 season's biggest signing or sale, whose fee the game does keep). Put the real amounts in `manual_transfers.csv` or edit
 the entries in the app.
 
-## 3. Playing matches
+## 4. Playing matches
 
 When a match finishes, click **Advance** on the post-match summary to return to the Career Central Hub. EA FC
 only writes results and player stats to the career database once you reach the Hub. Back on the Hub the match
@@ -154,7 +233,7 @@ If the Live Editor script is not running, the bridge reports the match itself fr
 seconds after an export appears before doing so, so that the script's own (richer) report normally arrives first;
 the second report is then recognised as a duplicate and dropped. **Restart the bridge after updating it.**
 
-## 4. Sending things by hand
+## 5. Sending things by hand
 
 Type these in the Live Editor Lua console while `FC26_Auto_Capture.lua` runs:
 
@@ -165,8 +244,9 @@ FC26_AutoCapture_SyncTransfers()           -- send this season's transfers again
 FC26_BeamTransfer(name, type, fee, club)   -- send any transfer by hand
 ```
 
-`pc-bridge/Send_Test_Match.bat` and `Send_Test_Transfer.bat` send a fake match or transfer so you can check the
-whole chain without opening the game.
+To check the whole chain without opening the game, use **Test match** / **Test transfer** under *Testing* on the PC Connection screen
+(they only go into the app), or the older `pc-bridge/legacy/Send_Test_Match.bat` and `Send_Test_Transfer.bat`, which send a fake match
+or transfer through the bridge to the phone.
 
 ### No flashing command windows
 
@@ -192,19 +272,31 @@ opened so far. If windows still appear, send that line.
 
 ### Phone alerts
 
-The app shows an alert when a new match arrives in the match log and when a transfer is recorded (a single alert
-for each, or one summary when many arrive at once). Alerts only appear for events from the last 24 hours, so
-installing the app later does not announce old matches. They are raised when the app fetches from the bridge:
-about every 10 seconds while the app is open, and in the background while "Keep syncing in the background" in
-Settings is on (a small "Live sync" notice then stays in the notification area; swiping the app away from recent
-apps stops it). In **Settings** the app shows whether Android is allowing its alerts; **Send test alert** shows
-one at once, and **Notification settings** jumps to the page where they can be switched on. Android 13 and later ask for permission the first time the app
-opens. After updating the app the alert channel is replaced by a fresh one ("Match & transfer alerts"), so an
-earlier choice to silence or block the old channel does not carry over.
+The app shows an alert when a new match arrives in the match log, when a transfer is recorded and when one of your players is
+injured (a single alert for each, or one summary when many arrive at once). Alerts only appear for events from the last 24 hours, so
+installing the app later does not announce old matches. They are raised when the app fetches from the bridge: about every 10 seconds
+while the app is open, and in the background while **Keep syncing in the background** (Settings, *Live sync with your PC*) is on. A small
+"Live sync" notice then stays in the notification area; swiping the app away from recent apps stops it.
 
-## 5. Checking what the game really stores (the probe)
+In **Settings → Notifications**:
 
-`live-editor-scripts/FC26_Probe.lua` only reads. Run it with a career loaded, wait for "Probe finished" in the
+- **Matches**, **Transfers** and **Injuries** switch each kind of alert on or off for this phone. The data is still saved when an alert is off.
+- The card says whether Android is allowing the app's alerts at all. **Send test alert** shows one at once; **Android settings** opens the
+  page where notifications can be allowed again if they were blocked.
+- Tapping an alert opens the matching screen (Matches, Transfers or Squad).
+
+Android 13 and later ask for permission the first time the app opens. After updating the app the alert channel is replaced by a fresh
+one ("Match & transfer alerts"), so an earlier choice to silence or block the old channel does not carry over.
+
+### Estimated statistics
+
+A match whose player statistics could not be read from the Project Atlas exporter is sent from the game database instead, and the app
+marks it with an **Estimated** chip on the match card (tap it to see what that means and to edit the match). In the match history,
+the **Estimated** filter shows only those matches. Matches with real statistics carry no mark.
+
+## 6. Checking what the game really stores (the probe)
+
+`live-editor-scripts/tools/FC26_Probe.lua` only reads (copy it into Live Editor's scripts folder to run it). Run it with a career loaded, wait for "Probe finished" in the
 console, then open `Documents\FC26 Export\FC26_probe_<date>_<time>.txt`. It lists what the game records about
 transfers, loans, joining dates, manager history and club finances. Live Editor prints many "no field" errors
 while it runs; that is expected, because the probe tries several possible column names.
@@ -223,7 +315,7 @@ deals are sent again only if `beamed_transfers.txt` or `auto_capture_state.lua` 
 ## If something does not arrive
 
 - The capture script sends to the **bridge**, and the app fetches from the bridge. The bridge must be running
-  (step 1) while the script runs. The app does not need to be open at that moment: the bridge keeps the latest
+  (run `FC26_Launcher.bat`) while the script runs. The app does not need to be open at that moment: the bridge keeps the latest
   100 events and the app picks them up the next time it checks. Opening the app alone is not enough.
 - Delivery log: `Documents\FC26 Export\bridge_send_log.txt`. One line per attempt with the bridge's answer
   (200 = delivered). Anything undelivered is kept in `Documents\FC26 Export\outbox` and retried every 30 seconds,
@@ -238,7 +330,7 @@ deals are sent again only if `beamed_transfers.txt` or `auto_capture_state.lua` 
   fee, but it cannot know that an old entry with a different day is the same deal.
 - After updating to script version 2.5, the current season's transfers are sent once more with corrected types,
   dates and fees; the keys of the earlier versions are not reused.
-- Run `telemetry_test_connection.lua`.
+- Open **PC Connection** in the app (menu) and press **Check again**: it names the step that is broken. The same self check is at `http://localhost:5050` on the PC.
 - The bridge window prints a line for every request, every duplicate it ignored and every payload it refused.
 
 ## What the bridge handles for you
@@ -250,10 +342,23 @@ deals are sent again only if `beamed_transfers.txt` or `auto_capture_state.lua` 
 
 ## Security
 
-- Your phone has read-only access: it only fetches `/events`.
-- Anything that writes (the Live Editor scripts, the dashboard test buttons, Clear) must come from this same PC.
+- Your phone can **read** the bridge's news (`/events`) and its health report (`/status`, which holds the folder paths, the script
+  version and the club name), and it can ask for the last match to be sent again (`/resend`). It cannot change anything else.
+- Anything else that writes (the Live Editor scripts, the test buttons, Clear) must come from this same PC.
   Writes from other devices on your network are refused (HTTP 403).
-- The Windows firewall rule created by `Start_Bridge.bat` only allows devices on your local subnet.
+- The Windows firewall rule created by `FC26_Launcher.bat` ("EA FC Telemetry Bridge") only allows devices on your local subnet, on port 5050.
+  The launcher never changes your network profile. To remove the rule: `netsh advfirewall firewall delete rule name="EA FC Telemetry Bridge"`
+  in an administrator command prompt.
+- The launcher installs files only into Live Editor's scripts folder and its own `%APPDATA%\FC26Tracker` folder. It renames old scripts
+  instead of deleting them, and the only thing it asks Windows to do as administrator is the firewall rule (and, for the PowerShell
+  bridge, the HTTP reservation for port 5050).
 - Web pages in a browser cannot send data to the bridge (no CORS, Host and Origin checks).
-- Anyone on your local network can still **read** `/events` if they know the address. Do not run the bridge on
+- Anyone on your local network can still **read** `/events` and `/status` if they know the address. Do not run the bridge on
   shared or public Wi-Fi.
+
+## Without the launcher
+
+You can do the launcher's work by hand: copy the two `.lua` files from `live-editor-scripts` into Live Editor's `lua\scripts` folder, then
+start the bridge with `pc-bridge/legacy/Start_Bridge.bat` (PowerShell engine; asks for administrator rights) or
+`pc-bridge/legacy/Start_Bridge_Python.bat` (needs Python 3). Those two keep a window open while you play. `Start_Bridge.bat` also adds the
+firewall rule and switches a Public network to Private; the Python starter does neither, so the phone may need the firewall opened by hand.

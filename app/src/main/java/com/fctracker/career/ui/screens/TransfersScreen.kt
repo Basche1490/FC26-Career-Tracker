@@ -36,6 +36,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.fctracker.career.MainViewModel
 import com.fctracker.career.AppState
+import com.fctracker.career.insights.TransferInsights
+import com.fctracker.career.insights.TransferSummary
+import com.fctracker.career.insights.TransferWindow
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,6 +70,7 @@ fun TransfersScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                     }
                 },
                 actions = {
+                    StatusPill(viewModel)
                     IconButton(
                         onClick = {
                             viewModel.fetchLiveTelemetry()
@@ -144,6 +150,11 @@ fun TransferMarketTab(
 ) {
     var transferFilter by remember { mutableStateOf("All Types") }
     var filterExpanded by remember { mutableStateOf(false) }
+    var windowKey by remember { mutableStateOf<String?>(null) }
+    var profilePlayer by remember { mutableStateOf<com.fctracker.career.Player?>(null) }
+    val windows = remember(displayTransfers) { TransferInsights.windows(displayTransfers) }
+    val activeWindow = windows.firstOrNull { it.key == windowKey }
+    val windowLogs = activeWindow?.logs ?: displayTransfers
     val filterOptions = listOf("All Types", "In (Permanent)", "Out (Permanent)", "In (Loan)", "Out (Loan)", "Free Agent Sign", "Retirement")
     
     Box(modifier = Modifier.fillMaxSize()) {
@@ -221,12 +232,23 @@ fun TransferMarketTab(
             
             Spacer(modifier = Modifier.height(12.dp))
             
-            val filteredTransfers = remember(displayTransfers, transferFilter) {
-                if (transferFilter == "All Types") displayTransfers
-                else displayTransfers.filter { it.type.equals(transferFilter, ignoreCase = true) }
+            val filteredTransfers = remember(windowLogs, transferFilter) {
+                if (transferFilter == "All Types") windowLogs
+                else windowLogs.filter { it.type.equals(transferFilter, ignoreCase = true) }
             }
 
             LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (displayTransfers.isNotEmpty()) {
+                    item {
+                        TransferSummaryCard(
+                            summary = TransferInsights.summarise(windowLogs),
+                            windows = windows,
+                            selectedKey = activeWindow?.key,
+                            currency = state.currencySymbol,
+                            onSelect = { windowKey = it }
+                        )
+                    }
+                }
                 if (filteredTransfers.isEmpty()) {
                     item {
                         Box(
@@ -246,14 +268,14 @@ fun TransferMarketTab(
                     val outgoingDeals = filteredTransfers.filterNot { it.isIncomingDeal() }
                     if (incomingDeals.isNotEmpty()) {
                         item { TransferSectionHeader("Transfers In", incomingDeals.size, Color(0xFF42A5F5)) }
-                        items(incomingDeals) { log -> TransferLogRow(log, state, viewModel, onEditTransfer) }
+                        items(incomingDeals) { log -> TransferLogRow(log, state, viewModel, onEditTransfer, onOpenPlayer = { profilePlayer = it }) }
                     }
                     if (outgoingDeals.isNotEmpty()) {
                         item {
                             if (incomingDeals.isNotEmpty()) Spacer(Modifier.height(8.dp))
                             TransferSectionHeader("Transfers Out", outgoingDeals.size, Color(0xFF4CAF50))
                         }
-                        items(outgoingDeals) { log -> TransferLogRow(log, state, viewModel, onEditTransfer) }
+                        items(outgoingDeals) { log -> TransferLogRow(log, state, viewModel, onEditTransfer, onOpenPlayer = { profilePlayer = it }) }
                     }
                 }
                 item { Spacer(Modifier.height(80.dp)) }
@@ -275,6 +297,10 @@ fun TransferMarketTab(
                 containerColor = MaterialTheme.colorScheme.primary
             )
         }
+
+        profilePlayer?.let { p ->
+            DetailedPlayerStatsModal(state = state, player = p, onDismiss = { profilePlayer = null })
+        }
     }
 }
 
@@ -295,7 +321,8 @@ private fun TransferLogRow(
     log: com.fctracker.career.TransferLog,
     state: AppState,
     viewModel: com.fctracker.career.MainViewModel,
-    onEditTransfer: (com.fctracker.career.TransferLog) -> Unit
+    onEditTransfer: (com.fctracker.career.TransferLog) -> Unit,
+    onOpenPlayer: (com.fctracker.career.Player) -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -307,10 +334,19 @@ private fun TransferLogRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         val resolvedHeadshot = resolvePlayerHeadshotUrl(log.playerName, state, viewModel)
+        // A player who is in the squad has a profile: his picture opens it (a thin ring shows that it can be tapped).
+        val squadPlayer = (state.players + state.academyPlayers).firstOrNull {
+            it.name.equals(log.playerName.trim(), true) || it.displayName.equals(log.playerName.trim(), true)
+        }
         TransferPlayerHeadshot(
             playerName = log.playerName,
             headshotUrl = resolvedHeadshot,
-            modifier = Modifier.size(40.dp)
+            modifier = if (squadPlayer != null) {
+                Modifier
+                    .size(40.dp)
+                    .border(1.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f), androidx.compose.foundation.shape.CircleShape)
+                    .clickable { onOpenPlayer(squadPlayer) }
+            } else Modifier.size(40.dp)
         )
         Spacer(modifier = Modifier.width(12.dp))
         val isIncoming = log.isIncomingDeal()
@@ -1182,5 +1218,64 @@ fun RecordDealCard(title: String, log: com.fctracker.career.TransferLog, state: 
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SummaryFigure(label: String, value: String, color: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = color)
+    }
+}
+
+/**
+ * Money spent and received, and the number of deals, for one transfer window (or for everything). Fees the game does
+ * not store are not in the totals: the card says how many there are, so the totals are never read as complete.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TransferSummaryCard(
+    summary: TransferSummary,
+    windows: List<TransferWindow>,
+    selectedKey: String?,
+    currency: String,
+    onSelect: (String?) -> Unit
+) {
+    DarkCard(modifier = Modifier.fillMaxWidth()) {
+        if (windows.size > 1) {
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(selected = selectedKey == null, onClick = { onSelect(null) }, label = { Text("All", fontSize = 12.sp) })
+                windows.forEach { w ->
+                    FilterChip(selected = selectedKey == w.key, onClick = { onSelect(w.key) }, label = { Text(w.label, fontSize = 12.sp) })
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+        } else if (windows.size == 1) {
+            Text(windows[0].label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(8.dp))
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
+            SummaryFigure("Spent", TransferInsights.money(summary.spent, currency), Color(0xFFF44336))
+            SummaryFigure("Received", TransferInsights.money(summary.received, currency), Color(0xFF4CAF50))
+            SummaryFigure(
+                "Net",
+                TransferInsights.money(summary.net, currency, signed = true),
+                when {
+                    summary.net > 0.0 -> Color(0xFF4CAF50)
+                    summary.net < 0.0 -> Color(0xFFF44336)
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        val parts = mutableListOf("${summary.signings} in", "${summary.departures} out")
+        if (summary.unknownFees > 0) {
+            parts.add("${summary.unknownFees} ${if (summary.unknownFees == 1) "fee" else "fees"} unknown, not counted")
+        }
+        Text(parts.joinToString("  ·  "), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

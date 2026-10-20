@@ -220,6 +220,10 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                         Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.primary)
                     }
                 },
+                actions = {
+                    StatusPill(viewModel)
+                    Spacer(Modifier.width(12.dp))
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                     titleContentColor = MaterialTheme.colorScheme.onBackground
@@ -523,38 +527,38 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
             }
 
             item {
+                val health by viewModel.health.collectAsState()
                 DarkCard(modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Live Telemetry Bridge (PC Connection)", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        val isOnline = state.bridgeConnectionStatus.startsWith("Online") || state.bridgeConnectionStatus.startsWith("Connected")
-                        val statusDotColor = if (isOnline) Color(0xFF10B981) else if (state.bridgeConnectionStatus == "Not Checked") Color(0xFF94A3B8) else Color(0xFFEF4444)
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                            Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(statusDotColor))
-                            Text(
-                                state.bridgeConnectionStatus,
-                                fontSize = 10.sp,
-                                color = statusDotColor,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
+                        Text("Live sync with your PC", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        StatusPill(viewModel)
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        "Direct local connection to your PC bridge (Start_Bridge.bat). Bypasses third-party services.",
+                        if (health.level == com.fctracker.career.telemetry.Level.LIVE) health.detail else health.headline,
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(onClick = { viewModel.navigateToScreen("connection") }, modifier = Modifier.weight(1f)) {
+                            Text("PC Connection", fontSize = 12.sp)
+                        }
+                        OutlinedButton(onClick = { viewModel.navigateToScreen("setup") }, modifier = Modifier.weight(1f)) {
+                            Text("Setup guide", fontSize = 12.sp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                             Text("Keep syncing in the background", fontSize = 13.sp, color = Color.White, fontWeight = FontWeight.Medium)
                             Text(
                                 "Shows a small \"Live sync\" notification so match and transfer alerts still arrive while the app is in the background. Swiping the app away from recent apps stops syncing and removes the notification. For best results, keep the phone on the same Wi-Fi and exclude this app from battery optimisation.",
@@ -564,25 +568,47 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                         }
                         Switch(checked = backgroundSync, onCheckedChange = { viewModel.setBackgroundSync(it) })
                     }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    val alertContext = androidx.compose.ui.platform.LocalContext.current
-                    var alertsAllowed by remember { mutableStateOf(true) }
-                    var alertTestMsg by remember { mutableStateOf<String?>(null) }
-                    // Re-checked while this screen is open, so coming back from Android's settings page updates it.
-                    LaunchedEffect(Unit) {
-                        while (true) {
-                            alertsAllowed = com.fctracker.career.telemetry.NotificationHelper.alertsAllowed(alertContext)
-                            kotlinx.coroutines.delay(1500)
-                        }
+                }
+            }
+
+            item {
+                val prefs by viewModel.notificationPrefs.collectAsState()
+                val alertContext = androidx.compose.ui.platform.LocalContext.current
+                var alertsAllowed by remember { mutableStateOf(true) }
+                var alertTestMsg by remember { mutableStateOf<String?>(null) }
+                // Re-checked while this screen is open, so coming back from Android's settings page updates it.
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        alertsAllowed = com.fctracker.career.telemetry.NotificationHelper.alertsAllowed(alertContext)
+                        kotlinx.coroutines.delay(1500)
                     }
-                    Text("Match & transfer alerts", fontSize = 13.sp, color = Color.White, fontWeight = FontWeight.Medium)
-                    Text(
-                        if (alertsAllowed) "On: this phone shows an alert for each new match and transfer."
-                        else "Blocked: Android is hiding this app's alerts. Open the notification settings and allow notifications for this app.",
-                        fontSize = 11.sp,
-                        color = if (alertsAllowed) Color(0xFF10B981) else Color(0xFFEF4444)
-                    )
+                }
+                DarkCard(modifier = Modifier.fillMaxWidth()) {
+                    Text("Notifications", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        if (alertsAllowed) "Android allows alerts from this app. Choose which ones you want:"
+                        else "Blocked: Android is hiding this app's alerts. Open the notification settings below and allow notifications for this app.",
+                        fontSize = 12.sp,
+                        color = if (alertsAllowed) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFFEF4444)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    NotificationToggle("Matches", "The final score of each match, as soon as it is played.", prefs.matches) {
+                        viewModel.setNotificationPrefs(prefs.copy(matches = it))
+                    }
+                    NotificationToggle("Transfers", "Signings, sales and loans, when the deal is done.", prefs.transfers) {
+                        viewModel.setNotificationPrefs(prefs.copy(transfers = it))
+                    }
+                    NotificationToggle("Injuries", "A player of yours gets injured, and for how long.", prefs.injuries) {
+                        viewModel.setNotificationPrefs(prefs.copy(injuries = it))
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Tapping an alert opens the matching screen. These switches only affect this phone; the data is still saved when an alert is off.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         OutlinedButton(
                             onClick = {
@@ -601,153 +627,12 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                                 }
                             },
                             modifier = Modifier.weight(1f)
-                        ) { Text("Notification settings", fontSize = 11.sp) }
+                        ) { Text("Android settings", fontSize = 11.sp) }
                     }
-                    if (alertTestMsg != null) {
-                        Text(alertTestMsg!!, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    var bridgeInput by remember(state.telemetryServerUrl) { mutableStateOf(state.telemetryServerUrl) }
-                    var testStatusMsg by remember { mutableStateOf<String?>(null) }
-                    var isTesting by remember { mutableStateOf(false) }
-                    val context = androidx.compose.ui.platform.LocalContext.current
-
-                    OutlinedTextField(
-                        value = bridgeInput,
-                        onValueChange = { bridgeInput = it },
-                        label = { Text("PC Bridge Address") },
-                        placeholder = { Text("http://192.168.2.24:5050") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp)
-                    ) {
-                        Text("Port:", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        
-                        val isPort5050 = bridgeInput.trim().removeSuffix("/").endsWith(":5050")
-                        
-                        androidx.compose.material3.AssistChip(
-                            onClick = {
-                                val clean = bridgeInput.trim().removeSuffix("/")
-                                val baseWithoutPort = if (clean.substringAfter("://", "").contains(":")) clean.substringBeforeLast(":") else clean
-                                bridgeInput = "$baseWithoutPort:5050"
-                            },
-                            label = { Text("5050 (Active)", fontSize = 10.sp) },
-                            colors = androidx.compose.material3.AssistChipDefaults.assistChipColors(
-                                containerColor = if (isPort5050) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
-                            )
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    OutlinedButton(
-                        onClick = {
-                            isTesting = true
-                            testStatusMsg = "Pinging bridge on port 5050..."
-                            viewModel.updateTelemetryServerUrl(bridgeInput.trim())
-                            viewModel.testBridgeConnection { success, msg ->
-                                isTesting = false
-                                testStatusMsg = msg
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (isTesting) "Testing..." else "Test Connection (Port 5050)", fontSize = 12.sp)
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        OutlinedButton(
-                            onClick = {
-                                viewModel.injectTestMatchEvent()
-                                testStatusMsg = "⚽ Test match notification sent! Tap notification to open Matches."
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Simulate Match ⚽", fontSize = 11.sp)
-                        }
-
-                        OutlinedButton(
-                            onClick = {
-                                viewModel.injectTestTransferEvent()
-                                testStatusMsg = "🔄 Test transfer notification sent! Tap notification to open Transfers."
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Simulate Transfer 🔄", fontSize = 11.sp)
-                        }
-                    }
-
-                    if (testStatusMsg != null) {
+                    val testMsg = alertTestMsg
+                    if (testMsg != null) {
                         Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            testStatusMsg!!,
-                            fontSize = 11.sp,
-                            color = if (testStatusMsg!!.startsWith("✅") || testStatusMsg!!.startsWith("⚽") || testStatusMsg!!.startsWith("🔄")) Color(0xFF10B981) else Color(0xFFEF4444),
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-                            .padding(10.dp)
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                "💡 Direct Connection Checklist:",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                "1. Start_Bridge.bat listens on port 5050. Keep its window open while you play.",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                "2. Windows Network Profile: Set your Wi-Fi to 'Private' in Windows Settings if your phone cannot connect.",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                "3. Fully automatic: run FC26_Auto_Capture.lua in FC Live Editor. After a match, click 'Advance' to reach the Career Hub and the match and your transfers sync by themselves.",
-                                fontSize = 11.sp,
-                                color = Color(0xFF10B981),
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                "4. Manual sync: type FC26_AutoCapture_SyncLatest() in the Live Editor console, or use the Web Dashboard (http://localhost:5050).",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                "5. Browser Test: Open http://localhost:5050 on your PC to view the Web Dashboard and click 'Send Test Match'.",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = {
-                                viewModel.updateTelemetryServerUrl(bridgeInput.trim())
-                                viewModel.fetchLiveTelemetry()
-                                android.widget.Toast.makeText(context, "Bridge URL saved & connection requested", android.widget.Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Save & Sync")
-                        }
+                        Text(testMsg, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -851,5 +736,20 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
             }
             item { Spacer(Modifier.height(80.dp)) }
         }
+    }
+}
+
+@Composable
+private fun NotificationToggle(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, fontSize = 13.sp, color = Color.White, fontWeight = FontWeight.Medium)
+            Text(subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }

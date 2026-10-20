@@ -5,9 +5,18 @@ param(
 
 $ErrorActionPreference = "Continue"
 $EventsFile = Join-Path $PSScriptRoot "telemetry_events.json"
+$BridgeVersion = "2.0.0"
+$BridgeProtocol = 2             # what the phone app, this bridge and the Live Editor script have to agree on
+$MinScriptVersion = "2.8.0"     # older capture scripts do not report their health or answer a re-send request
+$ScriptAliveSeconds = 20        # the script writes its heartbeat every 5 seconds
+$PhoneAliveSeconds = 30         # the app asks the bridge for news every 10 seconds
+$ResendMinSeconds = 10          # at most one "re-send the last match" request per this many seconds
+$StartedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$global:PhoneSeen = @{ Time = [long]0; Ip = "" }
+$global:ResendLast = [long]0
 
 Write-Host "===================================================" -ForegroundColor Cyan
-Write-Host " EA SPORTS FC TELEMETRY BRIDGE (Native PowerShell)" -ForegroundColor Yellow
+Write-Host " EA SPORTS FC TELEMETRY BRIDGE $BridgeVersion (Native PowerShell)" -ForegroundColor Yellow
 Write-Host " Direct PC-to-Mobile Connection" -ForegroundColor Green
 Write-Host "===================================================" -ForegroundColor Cyan
 
@@ -512,7 +521,8 @@ try {
     Write-Host " ERROR: Failed to bind to port ${Port}: $_" -ForegroundColor Red
     Write-Host " Please close any other app using that port." -ForegroundColor Yellow
     Write-Host "===================================================" -ForegroundColor Red
-    pause
+    # The launcher starts the bridge with no window (FC26_HIDDEN); waiting for a key there would hang unseen.
+    if (-not $env:FC26_HIDDEN) { pause }
     exit 1
 }
 
@@ -1402,6 +1412,327 @@ function Check-OutboxFolder {
     }
 }
 
+# =========================================================================
+# HEALTH: the self check shown on the bridge page and in the phone app, and the "re-send last match" request.
+#
+# The capture script writes script_status.json (a heartbeat every few seconds) into Documents\FC26 Export. The bridge
+# combines that with what it sees itself (folders, waiting files, when the phone last asked) into one list of checks.
+# =========================================================================
+function ConvertTo-Long {
+    param($Value)
+    $d = ConvertTo-Dbl $Value 0.0
+    if ($d -gt 9e15 -or $d -lt -9e15) { return [long]0 }
+    return [long][Math]::Round($d, [MidpointRounding]::AwayFromZero)
+}
+
+function Get-EpochNow {
+    return [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+}
+
+function Get-VersionParts {
+    param([string]$Text)
+    $m = [regex]::Match([string]$Text, '^\s*v?(\d+)\.(\d+)(?:\.(\d+))?')
+    if (-not $m.Success) { return $null }
+    try {
+        $patch = 0
+        if ($m.Groups[3].Success) { $patch = [int]$m.Groups[3].Value }
+        return @([int]$m.Groups[1].Value, [int]$m.Groups[2].Value, $patch)
+    } catch { return $null }
+}
+
+function Test-VersionAtLeast {
+    param([string]$Have, [string]$Need)
+    $h = Get-VersionParts $Have
+    $n = Get-VersionParts $Need
+    if ($null -eq $h -or $null -eq $n) { return $false }
+    for ($i = 0; $i -lt 3; $i++) {
+        if ($h[$i] -gt $n[$i]) { return $true }
+        if ($h[$i] -lt $n[$i]) { return $false }
+    }
+    return $true
+}
+
+function Format-Span {
+    param([long]$Seconds)
+    if ($Seconds -lt 0) { $Seconds = 0 }
+    if ($Seconds -lt 90) { return "${Seconds}s" }
+    if ($Seconds -lt 5400) { return "$([long][Math]::Floor($Seconds / 60)) min" }
+    if ($Seconds -lt 172800) { return "$([long][Math]::Floor($Seconds / 3600)) h" }
+    return "$([long][Math]::Floor($Seconds / 86400)) days"
+}
+
+function Format-Ago {
+    param([long]$Seconds)
+    return ((Format-Span $Seconds) + " ago")
+}
+
+# The phone (or any other reader that is not this PC) just asked for news.
+function Set-PhoneSeen {
+    param([string]$Ip, $Now = $null)
+    if ($null -eq $Now) { $Now = Get-EpochNow }
+    if ($Ip.StartsWith("::ffff:")) { $Ip = $Ip.Substring(7) }
+    $global:PhoneSeen.Time = [long]$Now
+    $global:PhoneSeen.Ip = $Ip
+}
+
+# The freshest script_status.json found in the export folders, described for the status page.
+function Read-ScriptStatus {
+    param($Roots, [long]$Now)
+    $best = $null
+    foreach ($root in @($Roots)) {
+        $path = Join-Path $root "script_status.json"
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        try {
+            $text = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
+            $data = ConvertFrom-JsonObject $text
+            if ($null -eq $data) { continue }
+            $mtime = (New-Object System.DateTimeOffset ((Get-Item -LiteralPath $path).LastWriteTimeUtc)).ToUnixTimeSeconds()
+        } catch { continue }
+        $stamp = ConvertTo-Long $data.time
+        if ($stamp -le 0) { $stamp = $mtime }
+        if ($null -eq $best -or $stamp -gt $best.Stamp) { $best = @{ Stamp = $stamp; Data = $data; Root = $root } }
+    }
+    if ($null -eq $best) { return [ordered]@{ found = $false } }
+    $data = $best.Data
+    $age = [long][Math]::Max(0, $Now - $best.Stamp)
+    $version = [string]$data.version
+    $resend = $null
+    if ($data.resend -is [System.Management.Automation.PSCustomObject]) {
+        $resend = [ordered]@{
+            id = [string]$data.resend.id
+            time = (ConvertTo-Long $data.resend.time)
+            result = [string]$data.resend.result
+            detail = [string]$data.resend.detail
+        }
+    }
+    return [ordered]@{
+        found = $true
+        folder = [string]$best.Root
+        version = $version
+        protocol = (ConvertTo-Int $data.protocol)
+        time = $best.Stamp
+        ageSeconds = $age
+        alive = ($age -le $ScriptAliveSeconds)
+        versionOk = (Test-VersionAtLeast $version $MinScriptVersion)
+        club = [string]$data.club
+        careerDate = [string]$data.careerDate
+        exporter = ($data.exporter -eq $true)
+        scans = (ConvertTo-Int $data.scans)
+        lastMatch = (ConvertTo-Long $data.lastMatch)
+        lastTransfer = (ConvertTo-Long $data.lastTransfer)
+        lastSquad = (ConvertTo-Long $data.lastSquad)
+        pendingMatches = (ConvertTo-Int $data.pendingMatches)
+        undelivered = (ConvertTo-Int $data.undelivered)
+        resend = $resend
+    }
+}
+
+# How many payload files are waiting in the outbox, how many were refused, and whether the bridge can write there.
+$global:WriteTestCache = @{ Time = [long]0; Root = ""; Ok = $true }
+function Get-OutboxState {
+    param($Roots, [long]$Now)
+    $pending = 0
+    $bad = 0
+    $oldest = [long]0
+    $writable = $true
+    foreach ($root in @($Roots)) {
+        $outbox = Join-Path $root "outbox"
+        if (-not (Test-Path -LiteralPath $outbox)) { continue }
+        foreach ($f in @(Get-ChildItem -LiteralPath $outbox -File -ErrorAction SilentlyContinue)) {
+            $low = $f.Name.ToLower()
+            if ($low.EndsWith(".json")) {
+                $pending++
+                $age = $Now - (New-Object System.DateTimeOffset ($f.LastWriteTimeUtc)).ToUnixTimeSeconds()
+                if ($age -gt $oldest) { $oldest = $age }
+            } elseif ($low.EndsWith(".bad")) {
+                $bad++
+            }
+        }
+        # A real write test, at most every 30 seconds. The file is not a .json, so the outbox watcher ignores it.
+        if (($global:WriteTestCache.Root -ne $outbox) -or (($Now - $global:WriteTestCache.Time) -gt 30)) {
+            $ok = $true
+            $probe = Join-Path $outbox ".bridge_write_test"
+            try {
+                [System.IO.File]::WriteAllText($probe, "ok")
+                Remove-Item -LiteralPath $probe -Force -ErrorAction Stop
+            } catch { $ok = $false }
+            $global:WriteTestCache = @{ Time = [long]$Now; Root = $outbox; Ok = $ok }
+        }
+        $writable = $writable -and $global:WriteTestCache.Ok
+    }
+    return [ordered]@{ pending = $pending; bad = $bad; oldestSeconds = $oldest; writable = $writable }
+}
+
+# When the newest match / transfer / squad report arrived (epoch seconds, 0 = never).
+function Get-EventTimes {
+    $latest = @{ match = [long]0; transfer = [long]0; squad = [long]0 }
+    foreach ($line in @($global:EventList)) {
+        $ev = $null
+        try { $ev = $line | ConvertFrom-Json } catch { $ev = $null }
+        if ($null -eq $ev -or ($ev.message -isnot [string])) { continue }
+        if (-not $ev.message.TrimStart().StartsWith("{")) { continue }
+        $data = ConvertFrom-JsonObject $ev.message
+        if ($null -eq $data) { continue }
+        $kind = [string]$data.dataType
+        if ($latest.ContainsKey($kind)) {
+            $t = ConvertTo-Long $ev.time
+            if ($t -gt $latest[$kind]) { $latest[$kind] = $t }
+        }
+    }
+    return [ordered]@{ count = $global:EventList.Count; lastMatch = $latest.match; lastTransfer = $latest.transfer; lastSquad = $latest.squad }
+}
+
+function New-Check {
+    param([string]$Id, [string]$Label, [string]$State, [string]$Detail, [string]$Fix = "")
+    return [ordered]@{ id = $Id; label = $Label; state = $State; detail = $Detail; fix = $Fix }
+}
+
+# The list shown under "Self check". state: ok | warn | fail | info. "fix" says what to do about a warn or fail.
+function Get-SelfCheck {
+    param($ScriptInfo, $Outbox, $Ev, $Roots, [string]$LocalIp, [long]$Now)
+    $checks = @()
+    $checks += New-Check "bridge" "Bridge" "ok" "Version $BridgeVersion is running on $PcName (port $Port)."
+
+    if (@($Roots).Count -eq 0) {
+        $checks += New-Check "folder" "Export folder" "fail" "Documents\FC26 Export was not found." "Run FC26_Auto_Capture.lua in Live Editor once: it creates the folder."
+    } else {
+        $checks += New-Check "folder" "Export folder" "ok" ([string]@($Roots)[0])
+        if (-not $Outbox.writable) {
+            $checks += New-Check "outbox" "Outbox" "fail" "The bridge cannot write to the outbox folder." "Check that the folder is not read-only and that no program is locking it."
+        } elseif ($Outbox.bad -gt 0) {
+            $checks += New-Check "outbox" "Outbox" "warn" "$($Outbox.bad) file(s) could not be read and were set aside (.bad)." "The script sent something the bridge could not read. Re-run the script; if it keeps happening, send the bridge_send_log.txt file."
+        } elseif ($Outbox.pending -gt 0 -and $Outbox.oldestSeconds -gt 30) {
+            $checks += New-Check "outbox" "Outbox" "warn" "$($Outbox.pending) payload(s) have been waiting for $(Format-Span $Outbox.oldestSeconds)." "Keep this window open: the bridge delivers them. If it stays, restart the bridge."
+        } else {
+            $detail = if ($Outbox.pending -eq 0) { "Empty." } else { "$($Outbox.pending) payload(s) being delivered." }
+            $checks += New-Check "outbox" "Outbox" "ok" $detail
+        }
+    }
+
+    if (-not $ScriptInfo.found) {
+        $checks += New-Check "script" "Capture script" "fail" "No heartbeat from the script yet." "In Live Editor open your career, then Lua Scripts > FC26_Auto_Capture.lua > Execute."
+    } elseif (-not $ScriptInfo.alive) {
+        $checks += New-Check "script" "Capture script" "fail" "Last heard from $(Format-Ago $ScriptInfo.ageSeconds)." "Live Editor was closed or the script stopped. Execute FC26_Auto_Capture.lua again."
+    } else {
+        $clubText = if ($ScriptInfo.club) { " for $($ScriptInfo.club)" } else { "" }
+        $verText = if ($ScriptInfo.version) { $ScriptInfo.version } else { "?" }
+        $checks += New-Check "script" "Capture script" "ok" "Running$clubText, version $verText."
+    }
+
+    if ($ScriptInfo.found) {
+        if (-not $ScriptInfo.versionOk) {
+            $verText = if ($ScriptInfo.version) { $ScriptInfo.version } else { "?" }
+            $checks += New-Check "version" "Script version" "warn" "Script $verText is older than $MinScriptVersion, which this bridge expects." "Run FC26_Launcher.bat to install the current script, then Execute it again in Live Editor."
+        } else {
+            $checks += New-Check "version" "Script version" "ok" "$($ScriptInfo.version) (needs $MinScriptVersion or newer)."
+        }
+        if ($ScriptInfo.alive) {
+            if ($ScriptInfo.exporter) {
+                $checks += New-Check "exporter" "Match statistics" "ok" "The Project Atlas exporter is running."
+            } else {
+                $checks += New-Check "exporter" "Match statistics" "warn" "The Project Atlas exporter is not running, so matches arrive with estimated statistics." "Execute the Project Atlas exporter script in Live Editor too."
+            }
+            if ($ScriptInfo.undelivered -gt 0) {
+                $checks += New-Check "undelivered" "Delivery" "warn" "$($ScriptInfo.undelivered) report(s) not delivered yet." "Keep this window open; the bridge picks them up."
+            }
+        }
+    }
+
+    if ($Ev.lastMatch -gt 0) {
+        $checks += New-Check "matches" "Last match" "info" "Received $(Format-Ago ($Now - $Ev.lastMatch))."
+    } else {
+        $checks += New-Check "matches" "Last match" "info" "No match received yet. Play or sim a match to see one arrive."
+    }
+
+    if ($global:PhoneSeen.Time -le 0) {
+        $checks += New-Check "phone" "Phone" "warn" "The phone has not connected yet." "In the app open PC Connection (in the menu) and enter http://${LocalIp}:${Port}, or tap Find my PC."
+    } elseif (($Now - $global:PhoneSeen.Time) -gt $PhoneAliveSeconds) {
+        $checks += New-Check "phone" "Phone" "warn" "The phone last asked $(Format-Ago ($Now - $global:PhoneSeen.Time)) ($($global:PhoneSeen.Ip))." "Open the app. Phone and PC need to be on the same Wi-Fi."
+    } else {
+        $checks += New-Check "phone" "Phone" "ok" "Connected ($($global:PhoneSeen.Ip)), last asked $(Format-Ago ($Now - $global:PhoneSeen.Time))."
+    }
+
+    if ($LocalIp.StartsWith("127.")) {
+        $checks += New-Check "address" "Network address" "fail" "This PC has no network address." "Connect the PC to the same Wi-Fi or network as the phone."
+    } else {
+        $checks += New-Check "address" "Network address" "ok" "http://${LocalIp}:${Port}"
+    }
+    return $checks
+}
+
+function Get-BridgeStatus {
+    param($Now = $null, $Roots = $null)
+    if ($null -eq $Now) { $Now = Get-EpochNow }
+    $Now = [long]$Now
+    if ($null -eq $Roots) { $Roots = @(Get-AtlasRoots) }
+    $scriptInfo = Read-ScriptStatus $Roots $Now
+    $outbox = Get-OutboxState $Roots $Now
+    $ev = Get-EventTimes
+    $checks = @(Get-SelfCheck $scriptInfo $outbox $ev $Roots $primaryIp $Now)
+    $states = @($checks | ForEach-Object { $_.state })
+    $summary = if ($states -contains "fail") { "fail" } elseif ($states -contains "warn") { "warn" } else { "ok" }
+    $seen = [long]$global:PhoneSeen.Time
+    $phoneAge = if ($seen -gt 0) { $Now - $seen } else { -1 }
+    return [ordered]@{
+        app = "fc26-bridge"
+        now = $Now
+        bridge = [ordered]@{
+            version = $BridgeVersion; protocol = $BridgeProtocol; minScript = $MinScriptVersion; kind = "powershell"
+            name = $PcName; port = $Port; address = "http://${primaryIp}:${Port}"; started = $StartedAt
+        }
+        script = $scriptInfo
+        outbox = $outbox
+        events = $ev
+        phone = [ordered]@{ lastSeen = $seen; ageSeconds = $phoneAge; ip = [string]$global:PhoneSeen.Ip }
+        checks = $checks
+        summary = $summary
+    }
+}
+
+# Asks the capture script to send its latest match again. This is a file the script reads, because the script (not
+# the bridge) knows the match. Returns @{ Code; Reply } where Reply is an object to send back as JSON.
+function Request-Resend {
+    param($Now = $null, $Roots = $null)
+    if ($null -eq $Now) { $Now = Get-EpochNow }
+    $Now = [long]$Now
+    if ($null -eq $Roots) { $Roots = @(Get-AtlasRoots) }
+    $scriptInfo = Read-ScriptStatus $Roots $Now
+    if (-not $scriptInfo.found -or -not $scriptInfo.alive) {
+        return @{ Code = 409; Reply = [ordered]@{ status = "error"; code = "script_not_running"; message = "The capture script is not running, so it cannot send anything. Execute FC26_Auto_Capture.lua in Live Editor first." } }
+    }
+    if (-not $scriptInfo.versionOk) {
+        $verText = if ($scriptInfo.version) { $scriptInfo.version } else { "?" }
+        return @{ Code = 409; Reply = [ordered]@{ status = "error"; code = "script_too_old"; message = "The capture script ($verText) is older than $MinScriptVersion and cannot do this. Install the current script with FC26_Launcher.bat." } }
+    }
+    if (($Now - $global:ResendLast) -lt $ResendMinSeconds) {
+        return @{ Code = 429; Reply = [ordered]@{ status = "error"; code = "too_soon"; message = "A re-send was just requested. Give it a few seconds." } }
+    }
+    $id = "r$Now"
+    $target = Join-Path $scriptInfo.folder "resend_request.json"
+    try {
+        $tmp = "$target.tmp"
+        [System.IO.File]::WriteAllText($tmp, ('{"id":"' + $id + '","time":' + $Now + '}'), (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmp -Destination $target -Force -ErrorAction Stop
+    } catch {
+        return @{ Code = 500; Reply = [ordered]@{ status = "error"; code = "write_failed"; message = "Could not write the request: $($_.Exception.Message)" } }
+    }
+    $global:ResendLast = $Now
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Re-send of the latest match requested [$id]" -ForegroundColor Yellow
+    return @{ Code = 200; Reply = [ordered]@{ status = "requested"; id = $id } }
+}
+
+function Send-Json {
+    param($Response, [int]$Code, $Object)
+    try {
+        $Response.StatusCode = $Code
+        $Response.ContentType = "application/json"
+        $buf = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Object -Depth 8 -Compress))
+        $Response.ContentLength64 = $buf.Length
+        $Response.OutputStream.Write($buf, 0, $buf.Length)
+    } catch {}
+    try { $Response.Close() } catch {}
+}
+
 Import-AtlasState
 
 $asyncResult = $Listener.BeginGetContext($null, $null)
@@ -1451,7 +1782,11 @@ while ($Listener.IsListening) {
                 continue
             }
         } elseif ($method -eq "POST" -or $method -eq "DELETE") {
-            if (-not (Test-LocalClient $Request)) {
+            # The phone's "Re-send last match" button only asks the capture script to send its latest match again
+            # (rate limited, and the bridge drops a duplicate), so it is allowed from the local network. The Host
+            # and Origin checks still keep web pages in a browser out. Every other write stays PC-only.
+            $lanAllowed = ($method -eq "POST" -and $rawPath -eq "/resend")
+            if (-not $lanAllowed -and -not (Test-LocalClient $Request)) {
                 Send-Reject $Response 403 "Writes are only accepted from the PC running the bridge."
                 continue
             }
@@ -1466,6 +1801,12 @@ while ($Listener.IsListening) {
         } else {
             # OPTIONS (CORS preflight), HEAD, PUT and anything else is not supported
             Send-Reject $Response 405 "Method not allowed."
+            continue
+        }
+
+        if ($rawPath -eq "/resend" -and $method -eq "POST") {
+            $resendResult = Request-Resend
+            Send-Json $Response $resendResult.Code $resendResult.Reply
             continue
         }
 
@@ -1578,7 +1919,11 @@ while ($Listener.IsListening) {
             $Response.OutputStream.Write($buffer, 0, $buffer.Length)
             $Response.Close()
         } elseif ($Request.HttpMethod -eq "GET") {
-            if ($rawPath -eq "/events" -or $rawPath -eq "/json" -or $rawPath -eq "/api/telemetry") {
+            $isReaderRoute = @("/events", "/json", "/api/telemetry", "/status", "/api/status") -contains $rawPath
+            if ($isReaderRoute -and -not (Test-LocalClient $Request)) { Set-PhoneSeen $clientIp }
+            if ($rawPath -eq "/status" -or $rawPath -eq "/api/status") {
+                Send-Json $Response 200 (Get-BridgeStatus)
+            } elseif ($rawPath -eq "/events" -or $rawPath -eq "/json" -or $rawPath -eq "/api/telemetry") {
                 $Response.StatusCode = 200
                 $Response.ContentType = "application/json"
                 $jsonArray = "[" + ($global:EventList -join ",") + "]"
@@ -1616,16 +1961,33 @@ while ($Listener.IsListening) {
         .event-item:last-child { border-bottom: none; }
         .event-time { color: #94a3b8; font-size: 11px; font-family: monospace; }
         .status-msg { margin: 10px 0; padding: 8px 12px; border-radius: 6px; font-size: 13px; min-height: 20px; }
+        .check { display: flex; gap: 12px; padding: 10px 0; border-top: 1px solid #334155; }
+        .check:first-child { border-top: 0; }
+        .dot { flex: 0 0 12px; height: 12px; border-radius: 6px; margin-top: 5px; background: #64748b; }
+        .dot.ok { background: #10b981; } .dot.warn { background: #f59e0b; } .dot.fail { background: #ef4444; }
+        .check-label { font-weight: bold; font-size: 14px; }
+        .check-detail { font-size: 13px; color: #cbd5e1; }
+        .check-fix { font-size: 13px; color: #fcd34d; margin-top: 2px; }
+        button:disabled { opacity: .5; cursor: default; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h1>⚽ EA Sports FC Telemetry Bridge</h1>
+        <h1>⚽ EA Sports FC Telemetry Bridge <span style="font-size:13px;color:#94a3b8;font-weight:normal;">v$BridgeVersion (PowerShell)</span></h1>
         <div class="status">🟢 Bridge Active (Listening on Port $Port)</div>
 
         <div class="info">
             <strong>📱 IP Address for Android App:</strong><br>
             <span style="color:#10b981;font-size:16px;font-weight:bold;">http://${primaryIp}:${Port}</span><br>
+        </div>
+
+        <h3>Self check</h3>
+        <div id="summary" style="font-size:15px;font-weight:bold;margin-bottom:8px;">Checking...</div>
+        <div id="checks"></div>
+        <div style="margin:14px 0 20px;">
+            <button id="resendBtn" type="button">Re-send last match</button>
+            <button id="recheckBtn" class="btn-green" type="button">Check again</button>
+            <span id="resendNote" style="font-size:13px;color:#cbd5e1;margin-left:6px;"></span>
         </div>
 
         <div id="statusMsg" class="status-msg"></div>
@@ -1723,8 +2085,56 @@ while ($Listener.IsListening) {
                 });
         }
 
+        // Self check: built with textContent only, because the details can contain club names from the game
+        function checkRow(c) {
+            var r = document.createElement('div'); r.className = 'check';
+            var d = document.createElement('div'); d.className = 'dot ' + (c.state || '');
+            var t = document.createElement('div');
+            var l = document.createElement('div'); l.className = 'check-label'; l.textContent = c.label;
+            var x = document.createElement('div'); x.className = 'check-detail'; x.textContent = c.detail;
+            t.appendChild(l); t.appendChild(x);
+            if (c.fix) { var f = document.createElement('div'); f.className = 'check-fix'; f.textContent = c.fix; t.appendChild(f); }
+            r.appendChild(d); r.appendChild(t);
+            return r;
+        }
+        function refreshStatus() {
+            return fetch('/status').then(function (r) { return r.json(); }).then(function (s) {
+                var box = document.getElementById('checks');
+                box.textContent = '';
+                s.checks.forEach(function (c) { box.appendChild(checkRow(c)); });
+                var sum = document.getElementById('summary');
+                sum.textContent = s.summary === 'ok' ? 'Everything is working.' : s.summary === 'warn' ? 'Working, with something to look at.' : 'Something needs fixing.';
+                sum.style.color = s.summary === 'ok' ? '#10b981' : s.summary === 'warn' ? '#f59e0b' : '#ef4444';
+                return s;
+            }).catch(function () {
+                document.getElementById('summary').textContent = 'The bridge did not answer.';
+            });
+        }
+        document.getElementById('recheckBtn').onclick = refreshStatus;
+        document.getElementById('resendBtn').onclick = function () {
+            var btn = this, note = document.getElementById('resendNote');
+            btn.disabled = true; note.textContent = 'Asking the script...';
+            fetch('/resend', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (reply) {
+                if (reply.status !== 'requested') { note.textContent = reply.message || 'Could not ask.'; btn.disabled = false; return; }
+                var tries = 0;
+                (function poll() {
+                    refreshStatus().then(function (s) {
+                        var rs = s && s.script && s.script.resend;
+                        if (rs && rs.id === reply.id) {
+                            note.textContent = rs.result === 'sent' ? 'Sent: ' + rs.detail : rs.result === 'nothing' ? rs.detail : 'The script could not do it: ' + rs.detail;
+                            btn.disabled = false;
+                        } else if (++tries > 12) {
+                            note.textContent = 'No answer from the script. Is Live Editor still open?'; btn.disabled = false;
+                        } else { setTimeout(poll, 1500); }
+                    });
+                })();
+            }).catch(function () { note.textContent = 'The bridge did not answer.'; btn.disabled = false; });
+        };
+
         updateEvents();
         setInterval(updateEvents, 4000);
+        refreshStatus();
+        setInterval(refreshStatus, 5000);
     </script>
 </body>
 </html>

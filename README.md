@@ -29,14 +29,24 @@ repository (`signing/`) so builds stay updatable. It is meant for sideloading on
 - **Season summary** and **Career summary** with trophies, awards and history
 - **AI assistant** (Google Gemini, Claude, Grok, ChatGPT or any compatible endpoint) with your own API key
 - **Multiple save slots**, notes, encrypted export/import
-- **Live telemetry** from your PC: finished matches and transfers arrive on the phone by themselves, with
-  notifications. Keeps working while the app is in the background (Settings → *Keep syncing in the background*); swiping the app away from recent apps stops it and removes the notification.
+- **Live telemetry** from your PC: finished matches, transfers and injuries arrive on the phone by themselves, with
+  notifications you can switch on and off per kind (Settings → *Notifications*). Keeps working while the app is in the background
+  (Settings → *Keep syncing in the background*); swiping the app away from recent apps stops it and removes the notification.
+- **Connection health**: a small pill at the top of the main screens (*Live*, *Check*, *Down*, *Not set up*) and a **PC Connection** screen with a
+  self check of the phone, bridge and capture script, version check, *Find my PC* and a **Re-send last match** button.
+- **First-run guide** that walks through the PC setup and ticks each step off as it works.
+- **Match history** with filters (competition, season, result, *Estimated*), a form strip and swipe to edit or delete; matches whose
+  statistics are estimated are marked as such.
+- **Transfer windows** (Summer / Winter / In season) with spent, received and net figures; tap a headshot to open the player.
+- **Contract and loan end dates** in the Squad, read from the game, with a *Needs attention* list.
 
 ## PC companion
 
-`pc-bridge/` and `live-editor-scripts/` send data from FC Live Editor to the app. Setup steps are in
-[docs/PC_SETUP.md](docs/PC_SETUP.md). The detailed player statistics come from the Project Atlas exporter
-(`FC26_AutoCapture_v1.1.1.lua`, with `FC26_MatchStatsExport.lua` and `FC26_Snapshot.lua`) by its original author
+`pc-bridge/` and `live-editor-scripts/` send data from FC Live Editor to the app. **One file sets it up:** unzip
+`FC26-PC-Tools.zip` from the **Latest build** release and double-click `FC26_Launcher.bat`. It finds the bridge and Live Editor wherever
+they are, installs the two capture scripts, lets the phone in through the firewall and starts the bridge in the background with no window.
+Setup steps and troubleshooting are in [docs/PC_SETUP.md](docs/PC_SETUP.md). The detailed player statistics come from the Project Atlas
+exporter (`FC26_AutoCapture_v1.1.1.lua`, which has the snapshot and match-statistics exporters built in) by its original author
 on r/seriousfifacareers.
 
 ## What is new
@@ -77,7 +87,9 @@ app/src/main/java/com/fctracker/career/
   ai/                  AiClient
   ui/                  Compose screens and theme
 app/src/test/          unit tests
-pc-bridge/             PC bridge (PowerShell and Python versions) and test senders
-live-editor-scripts/   FC Live Editor Lua scripts
+FC26_Launcher.bat      the one launcher for the PC side (finds, installs, starts)
+pc-bridge/             the PC bridge (PowerShell and Python versions); legacy/ holds the older starters
+live-editor-scripts/   the two FC Live Editor scripts; legacy/ and tools/ hold older scripts and the probe
+tests/                 Lua, bridge (Python + PowerShell) and launcher tests
 docs/                  PC setup guide
 ```

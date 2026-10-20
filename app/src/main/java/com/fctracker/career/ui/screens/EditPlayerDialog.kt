@@ -84,7 +84,7 @@ internal fun nicknameToKeep(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: List<com.fctracker.career.EafcPlayer> = emptyList(), onDismiss: () -> Unit, onUpdate: (Player) -> Unit, onDelete: (() -> Unit)? = null) {
+fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: List<com.fctracker.career.EafcPlayer> = emptyList(), onDismiss: () -> Unit, onUpdate: (Player) -> Unit, onDelete: (() -> Unit)? = null, referenceDate: String? = null) {
     var name by remember { mutableStateOf(player?.name ?: "") }
     var nickname by remember { mutableStateOf(player?.nickname ?: "") }
     var primaryPosition by remember { mutableStateOf(player?.primaryPosition ?: "CM") }
@@ -253,6 +253,9 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                     OutlinedTextField(value = valueM, onValueChange = { valueM = it }, label = { Text("Market Value (€M)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
                     OutlinedTextField(value = wageK, onValueChange = { wageK = it }, label = { Text("Weekly Wage (€K)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
                 }
+
+                // What the game itself says about the contract and any loan (read-only, never typed in).
+                if (player != null) FromTheGameSection(player, referenceDate)
 
                 // The original player a regen is based on. It is saved with the player: it starts from what was saved
                 // (blank when nothing was), never from the regen's own name.

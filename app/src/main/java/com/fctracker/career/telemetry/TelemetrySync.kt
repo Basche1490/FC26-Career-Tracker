@@ -10,18 +10,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.IOException
-import java.net.ConnectException
-import java.net.HttpURLConnection
-import java.net.NoRouteToHostException
-import java.net.SocketTimeoutException
-import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -35,11 +31,39 @@ import java.util.Locale
 class TelemetrySync(
     private val context: Context,
     private val store: CareerStore,
-    private val players: PlayerDatabase
+    private val players: PlayerDatabase,
+    private val prefs: SyncPrefs? = null
 ) {
     private val loopScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val holders = mutableSetOf<String>()
     private var loop: Job? = null
+
+    // What the phone knows about its contact with the PC, and the health answer worked out from it.
+    private val contactFlow = MutableStateFlow(
+        Contact(
+            address = normalizeBridgeUrl(store.state.value.telemetryServerUrl),
+            reachable = false,
+            everConnected = (prefs?.lastConnectedAt ?: 0L) > 0L
+        )
+    )
+    private val healthFlow = MutableStateFlow(HealthModel.evaluate(contactFlow.value))
+    private var lastSavedContact = 0L
+
+    /** The current contact with the bridge (address, reachable, the bridge's health report). */
+    val contact: StateFlow<Contact> get() = contactFlow
+
+    /** One answer to "is everything working?", with the steps behind it. Shown on every screen as a pill. */
+    val health: StateFlow<Health> get() = healthFlow
+
+    private fun publish(contact: Contact) {
+        contactFlow.value = contact
+        healthFlow.value = HealthModel.evaluate(contact)
+    }
+
+    /** The address was changed (typed, or found by "Find my PC"): forget what was known about the old one. */
+    fun addressChanged() {
+        publish(Contact(address = normalizeBridgeUrl(store.state.value.telemetryServerUrl), reachable = false, everConnected = false))
+    }
 
     fun acquire(holder: String) {
         synchronized(holders) {
@@ -77,30 +101,54 @@ class TelemetrySync(
     suspend fun poll(notify: Boolean): Boolean = withContext(Dispatchers.IO) {
         val base = normalizeBridgeUrl(store.state.value.telemetryServerUrl)
         try {
-            val conn = URL("$base/events").openConnection() as HttpURLConnection
-            try {
-                conn.requestMethod = "GET"
-                conn.connectTimeout = 5000
-                conn.readTimeout = 5000
-                val code = conn.responseCode
-                if (code != 200) {
-                    setStatus("HTTP $code", null)
-                    return@withContext false
-                }
-                val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }.trim()
-                val events = parseEvents(body)
-                setStatus("Online (${events.size} events)", events.size)
-                apply(events, notify)
-                true
-            } finally {
-                conn.disconnect()
+            val reply = BridgeClient.get("$base/events", 5000)
+            if (!reply.ok) {
+                if (reply.code != 0) setStatus("HTTP ${reply.code}", null) else setStatus("Offline: ${reply.message}", null)
+                publish(unreachable(base, reply))
+                return@withContext false
             }
+            val events = parseEvents(reply.body.trim())
+            setStatus("Online (${events.size} events)", events.size)
+            apply(events, notify)
+            refreshStatus(base)
+            true
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             setStatus("Offline: ${e.localizedMessage ?: e.javaClass.simpleName}", null)
+            publish(
+                Contact(base, reachable = false, everConnected = contactFlow.value.everConnected,
+                    failKind = BridgeClient.classify(e))
+            )
             false
         }
+    }
+
+    private fun unreachable(base: String, reply: BridgeClient.HttpResult) = Contact(
+        address = base,
+        reachable = false,
+        everConnected = contactFlow.value.everConnected,
+        failKind = reply.failKind,
+        httpCode = reply.code
+    )
+
+    /** Asks the bridge for its health report and publishes it together with "the bridge answered". */
+    private fun refreshStatus(base: String) {
+        val now = System.currentTimeMillis()
+        if (prefs != null && now - lastSavedContact > 60_000L) {
+            lastSavedContact = now
+            prefs.lastConnectedAt = now
+        }
+        val previous = contactFlow.value
+        val fetch = BridgeClient.fetchStatus(base)
+        val status: BridgeStatus?
+        val missing: Boolean
+        when {
+            fetch.result.ok -> { status = fetch.status; missing = fetch.missing }
+            fetch.result.code == 404 -> { status = null; missing = true }
+            else -> { status = previous.status; missing = previous.statusMissing }   // a hiccup: keep the last report
+        }
+        publish(Contact(base, reachable = true, everConnected = true, status = status, statusMissing = missing))
     }
 
     class TestResult(val ok: Boolean, val message: String)
@@ -109,46 +157,76 @@ class TelemetrySync(
     suspend fun testConnection(): TestResult = withContext(Dispatchers.IO) {
         val base = normalizeBridgeUrl(store.state.value.telemetryServerUrl)
         val started = System.currentTimeMillis()
-        try {
-            val conn = URL("$base/events").openConnection() as HttpURLConnection
-            try {
-                conn.requestMethod = "GET"
-                conn.connectTimeout = 5000
-                conn.readTimeout = 5000
-                conn.instanceFollowRedirects = true
-                val code = conn.responseCode
-                val elapsed = System.currentTimeMillis() - started
-                if (code == 200) {
-                    val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }.trim()
-                    val count = try { JSONArray(body).length() } catch (e: Exception) { 0 }
-                    setStatus("Connected (${elapsed}ms, $count queued)", count)
-                    poll(notify = true)
-                    TestResult(true, "✅ Connected! (${elapsed}ms) - $count event(s) in queue.")
-                } else {
-                    val hint = if (code == 503) {
-                        " (Windows HTTP.sys queue unassigned. Run updated Start_Bridge.bat as Admin or use Start_Bridge_Python.bat)"
-                    } else " Check PC bridge window."
-                    setStatus("HTTP $code: $hint", null)
-                    TestResult(false, "Bridge responded with HTTP $code.$hint")
-                }
-            } finally {
-                conn.disconnect()
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            val elapsed = System.currentTimeMillis() - started
-            val port = base.substringAfterLast(":", "5050").substringBefore("/")
-            val detail = when (e) {
-                is ConnectException -> "Connection refused on port $port ($base). Ensure Start_Bridge.bat is open."
-                is SocketTimeoutException -> "Timed out (${elapsed}ms) on port $port. Windows Firewall or Public Wi-Fi profile is blocking incoming connections."
-                is NoRouteToHostException -> "No route to host ($base). Verify your PC's IP and make sure both phone and PC are on the same Wi-Fi network."
-                is IOException -> e.localizedMessage ?: e.javaClass.simpleName
-                else -> e.localizedMessage ?: e.javaClass.simpleName
-            }
-            setStatus("Offline: $detail", null)
-            TestResult(false, "❌ $detail")
+        val reply = BridgeClient.get("$base/events", 5000)
+        val elapsed = System.currentTimeMillis() - started
+        if (reply.ok) {
+            val count = try { JSONArray(reply.body.trim()).length() } catch (e: Exception) { 0 }
+            setStatus("Connected (${elapsed}ms, $count queued)", count)
+            poll(notify = true)
+            return@withContext TestResult(true, "✅ Connected! (${elapsed}ms) - $count event(s) in queue.")
         }
+        publish(unreachable(base, reply))
+        val port = base.substringAfterLast(":", "5050").substringBefore("/")
+        val detail = when {
+            reply.code == 503 ->
+                "Bridge responded with HTTP 503 (Windows HTTP.sys queue unassigned). Run FC26_Launcher.bat again (it picks the right bridge for your PC)"
+            reply.code != 0 -> "Bridge responded with HTTP ${reply.code}. Check PC bridge window."
+            reply.failKind == FailKind.REFUSED -> "Connection refused on port $port ($base). Ensure the bridge window is open."
+            reply.failKind == FailKind.TIMEOUT ->
+                "Timed out (${elapsed}ms) on port $port. Windows Firewall or Public Wi-Fi profile is blocking incoming connections."
+            reply.failKind == FailKind.NO_ROUTE ->
+                "No route to host ($base). Verify your PC's IP and make sure both phone and PC are on the same Wi-Fi network."
+            else -> reply.message
+        }
+        setStatus("Offline: $detail", null)
+        TestResult(false, "❌ $detail")
+    }
+
+    // -- "re-send last match" and "find my PC" ----------------------------------------------------------
+
+    class ActionResult(val ok: Boolean, val message: String)
+
+    /**
+     * The "Re-send last match" button: asks the capture script (through the bridge) to send its latest match again,
+     * then waits a few seconds for the script's own answer so the person sees what happened.
+     */
+    suspend fun resendLatestMatch(): ActionResult = withContext(Dispatchers.IO) {
+        val base = normalizeBridgeUrl(store.state.value.telemetryServerUrl)
+        val asked = BridgeClient.requestResend(base)
+        if (!asked.ok) return@withContext ActionResult(false, asked.message)
+        for (attempt in 1..10) {
+            delay(1500)
+            val fetch = BridgeClient.fetchStatus(base, 4000)
+            val answer = fetch.status?.script?.resend
+            if (answer != null && answer.id == asked.id) {
+                poll(notify = true)   // the re-sent match arrives through the bridge: take it in right away
+                return@withContext when (answer.result) {
+                    "sent" -> ActionResult(true, "The script sent: ${answer.detail}. It shows up in a moment if it was not already in your match list.")
+                    "nothing" -> ActionResult(false, answer.detail.ifBlank { "There is no completed match to send yet." })
+                    else -> ActionResult(false, "The script could not do it: ${answer.detail}")
+                }
+            }
+        }
+        ActionResult(false, "The script did not answer. Is Live Editor still open with the capture script running?")
+    }
+
+    class FindResult(val found: List<BridgeClient.Found>, val message: String)
+
+    /** "Find my PC": looks for the bridge on the phone's own Wi-Fi network. */
+    suspend fun findMyPc(): FindResult = withContext(Dispatchers.IO) {
+        val phoneIp = LocalNetwork.ipv4(context)
+            ?: return@withContext FindResult(emptyList(), "The phone is not on a Wi-Fi network. Join the same Wi-Fi as your PC and try again.")
+        val candidates = BridgeClient.candidates(phoneIp, store.state.value.telemetryServerUrl)
+        if (candidates.isEmpty()) {
+            return@withContext FindResult(emptyList(), "The phone's network ($phoneIp) does not look like a home network. Join the same Wi-Fi as your PC.")
+        }
+        val found = BridgeClient.discover(candidates)
+        if (found.isEmpty()) {
+            FindResult(
+                emptyList(),
+                "No bridge found on $phoneIp's network. Start FC26_Launcher.bat on the PC (and keep its window open), and check that the PC is on the same Wi-Fi."
+            )
+        } else FindResult(found, "")
     }
 
     private fun setStatus(text: String, eventCount: Int?) {
@@ -181,7 +259,7 @@ class TelemetrySync(
             notices = result.notices
             result.state
         }
-        NotificationHelper.showAll(context, notices)
+        NotificationHelper.showAll(context, notices, prefs?.notificationPrefs ?: NotificationPrefs())
     }
 
     companion object {

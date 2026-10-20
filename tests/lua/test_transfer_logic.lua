@@ -4,7 +4,7 @@
 --   1. every script still parses,
 --   2. classify_loans (the block between BEGIN/END markers in FC26_Auto_Capture.lua) reads loans correctly
 --      without a "loaned to" column,
---   3. FC26_Probe.lua runs to the end and writes a readable report, both when the game offers
+--   3. tools/FC26_Probe.lua runs to the end and writes a readable report, both when the game offers
 --      GetDBTableRows and when only record-by-record access exists.
 
 local script_path = (arg and arg[0]) or "tests/lua/test_transfer_logic.lua"
@@ -33,12 +33,28 @@ end
 -- ---------------------------------------------------------------------------------------------------------
 print("1. every script parses")
 for _, name in ipairs({
-    "FC26_Auto_Capture.lua", "FC26_AutoCapture_v1.1.1.lua", "FC26_MatchStatsExport.lua", "FC26_Snapshot.lua",
-    "FC26_Probe.lua", "send_latest_match.lua", "telemetry_auto_loop.lua", "telemetry_sender_v2.lua",
-    "telemetry_sync.lua", "telemetry_test_connection.lua"
+    -- the two scripts people use
+    "FC26_Auto_Capture.lua", "FC26_AutoCapture_v1.1.1.lua",
+    -- optional tool, and the older scripts that are kept in legacy/ (they must still parse)
+    "tools/FC26_Probe.lua",
+    "legacy/FC26_MatchStatsExport.lua", "legacy/FC26_Snapshot.lua", "legacy/send_latest_match.lua",
+    "legacy/telemetry_auto_loop.lua", "legacy/telemetry_sender_v2.lua", "legacy/telemetry_sync.lua",
+    "legacy/telemetry_test_connection.lua"
 }) do
     local f, err = loadfile(scripts .. name)
     check(f ~= nil, name, err)
+end
+
+-- the folder people copy from holds only the two scripts that do the work
+do
+    local listing = io.popen('ls "' .. scripts:gsub("/$", "") .. '"')
+    local names = {}
+    for line in listing:lines() do names[line] = true end
+    listing:close()
+    check(names["FC26_Auto_Capture.lua"] and names["FC26_AutoCapture_v1.1.1.lua"], "the two scripts are in live-editor-scripts/")
+    local lua_files = 0
+    for n in pairs(names) do if n:match("%.lua$") then lua_files = lua_files + 1 end end
+    check(lua_files == 2, "live-editor-scripts/ holds exactly two .lua files (older ones live in legacy/)", tostring(lua_files))
 end
 
 -- ---------------------------------------------------------------------------------------------------------
@@ -482,7 +498,7 @@ local function run_probe(with_api_rows)
     local missing = install_env(build_data(), with_api_rows, out_path)
     local quiet_print = _G.print
     _G.print = function() end
-    local ok, err = pcall(dofile, scripts .. "FC26_Probe.lua")
+    local ok, err = pcall(dofile, scripts .. "tools/FC26_Probe.lua")
     _G.print = quiet_print
     local report = ""
     local f = io.open(out_path, "rb")
@@ -1343,7 +1359,9 @@ do
         for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end -- the bridge read and deleted them
         vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 20)
         tick(handler, clk, 20)
+        for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end -- the squad report that appeared meanwhile is read too
         tick(handler, clk, 20)
+        for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end
         check(#executed == 0, "the bridge read everything: nothing was ever started", table.concat(executed, " | "))
         restore()
     end
@@ -1949,7 +1967,9 @@ do
         local vfs, clk = {}, { t = 1795000000 }
         local fixtures = season()
         local mem, set_fixture = build_memory(fixtures)
-        local spec = { db = build_db(opts.stale_history), vfs = vfs, clock = function() return clk.t end, names = NAMES, teams = TEAMS,
+        local db = build_db(opts.stale_history)
+        if opts.db_extra then opts.db_extra(db) end
+        local spec = { db = db, vfs = vfs, clock = function() return clk.t end, names = NAMES, teams = TEAMS,
                        today = { year = 2028, month = 8, day = 12 }, memory = mem, positions = POSITIONS,
                        comps = { [779] = "EFL Championship", [1856] = "FA Cup" },
                        dirs = { [ROOT] = true, [ROOT .. "/outbox"] = true, [ROOT .. "/Snapshots"] = true, [ROOT .. "/MatchStats"] = true,
@@ -2085,6 +2105,146 @@ do
         check(g.log():find("different players than this export", 1, true) ~= nil, "the log explains why")
         g.close()
     end
+
+    local function payloads_of(vfs, kind)
+        local list = {}
+        for path, text in pairs(vfs) do
+            if path:find("/outbox/", 1, true) and path:sub(-5) == ".json" and text:find('"dataType": "' .. kind .. '"', 1, true) then
+                list[#list + 1] = json_decode(text)
+            end
+        end
+        return list
+    end
+
+    -- D. the script reports its health and sends the real contract and loan end dates of the squad
+    do
+        local g = play({ exporter = true, db_extra = function(db)
+            -- Bravo is on loan IN from Birmingham (88); Fernandes is on loan OUT to Parma (50, option to buy)
+            db.teamplayerlinks[#db.teamplayerlinks + 1] = { teamid = MANAGED, playerid = 461607 }
+            db.teamplayerlinks[#db.teamplayerlinks + 1] = { teamid = 50, playerid = 463808 }
+            db.leagueteamlinks[#db.leagueteamlinks + 1] = { teamid = 50, leagueid = 1 }   -- clubs, as opposed to national teams
+            db.leagueteamlinks[#db.leagueteamlinks + 1] = { teamid = 88, leagueid = 1 }
+            db.playerloans = {
+                { playerid = 461607, teamidloanedfrom = 88, loandateend = 163159, isloantobuy = 0 },
+                { playerid = 463808, teamidloanedfrom = MANAGED, loandateend = 163343, isloantobuy = 1 },
+            }
+            db.players = {
+                { playerid = 460129, contractvaliduntil = 2033 }, { playerid = 461607, contractvaliduntil = 2032 },
+                { playerid = 463808, contractvaliduntil = 2033 }, { playerid = 460045, contractvaliduntil = 1999 },
+            }
+        end })
+        check(g.ok, "script starts for the health and contract checks", g.err)
+        local status_text = g.vfs[ROOT .. "/script_status.json"]
+        check(status_text ~= nil, "script_status.json is written as soon as the script runs")
+        local st = status_text and json_decode(status_text) or {}
+        check(st.version == "2.8.0" and st.protocol == 2 and st.app == "fc26-capture", "it names the script, its version and protocol",
+            tostring(st.version))
+        check(st.exporter == true, "it says the detailed-stats exporter is running")
+        check(st.club == "Torquay AFC", "it names the club", tostring(st.club))
+        check(st.careerDate == "2028-08-12", "it carries the game's own date", tostring(st.careerDate))
+        check(#payloads_of(g.vfs, "squad") == 0, "no squad report while the start-up scans are still going on")
+        g.tick(25)
+        local squads = payloads_of(g.vfs, "squad")
+        check(#squads == 1, "one squad report goes out after the start-up scans", #squads)
+        local sq = squads[1] or {}
+        check(sq.careerDate == "2028-08-12", "the report carries the game date", tostring(sq.careerDate))
+        local by_name = {}
+        for _, p in ipairs(sq.players or {}) do by_name[p.name] = p end
+        check(by_name["Marc Palomino"] and by_name["Marc Palomino"].contractEnd == "2033-06-30",
+            "a contract ends on 30 June of players.contractvaliduntil")
+        check(by_name["Jordan Anderson"] and by_name["Jordan Anderson"].contractEnd == nil,
+            "an unreadable contract year gives no date (nothing is guessed)")
+        local bravo = by_name["Fabi\195\161n Bravo"]
+        check(bravo and bravo.loan and bravo.loan.dir == "in" and bravo.loan.club == "Birmingham City" and bravo.loan["end"] == "2029-07-01"
+            and bravo.loan.toBuy == nil, "a loan in: parent club and the real loan end date", bravo and bravo.loan and bravo.loan["end"])
+        local fern = by_name["Denilson Fernandes"]
+        check(fern and fern.loan and fern.loan.dir == "out" and fern.loan.club == "Parma" and fern.loan.toBuy == true,
+            "a loan out: the other club and the option to buy", fern and fern.loan and fern.loan.club)
+        check(fern and fern.loan and fern.loan["end"] == "2030-01-01", "with the real loan end date", fern and fern.loan and fern.loan["end"])
+        g.tick(30)
+        g.tick(30)
+        check(#payloads_of(g.vfs, "squad") == 1, "nothing is sent again while nothing changed", #payloads_of(g.vfs, "squad"))
+        st = json_decode(g.vfs[ROOT .. "/script_status.json"] or "{}")
+        check((st.lastSquad or 0) > 0 and (st.scans or 0) >= 3, "the health report counts scans and knows when the squad was sent",
+            tostring(st.lastSquad) .. "/" .. tostring(st.scans))
+        g.close()
+    end
+
+    -- E. the app's "Re-send last match" reaches the script through resend_request.json
+    do
+        local g = play({ exporter = false })
+        g.tick(3)
+        g.finish_match()
+        g.finish_other()
+        for _ = 1, 8 do g.tick(3) end
+        check(#match_payloads(g.vfs) == 1, "the match was sent once the normal way", #match_payloads(g.vfs))
+        g.vfs[ROOT .. "/resend_request.json"] = '{"id": "req-42", "time": 1795000100}'
+        g.tick(3)
+        check(g.vfs[ROOT .. "/resend_request.json"] == nil, "the request file is consumed")
+        check(#match_payloads(g.vfs) == 2, "the latest match was queued again", #match_payloads(g.vfs))
+        local st = json_decode(g.vfs[ROOT .. "/script_status.json"] or "{}")
+        check(st.resend and st.resend.id == "req-42" and st.resend.result == "sent", "the health report says it was sent",
+            st.resend and (st.resend.result .. "/" .. tostring(st.resend.id)))
+        check(st.resend and st.resend.detail and st.resend.detail:find("Sunderland", 1, true) ~= nil, "and which match it was",
+            st.resend and st.resend.detail)
+        g.tick(3)
+        check(#match_payloads(g.vfs) == 2, "one request gives exactly one re-send", #match_payloads(g.vfs))
+        g.vfs[ROOT .. "/resend_request.json"] = "garbage"
+        g.tick(3)
+        local st2 = json_decode(g.vfs[ROOT .. "/script_status.json"] or "{}")
+        check(st2.resend and st2.resend.id == "manual", "a request without an id still works", st2.resend and st2.resend.id)
+        g.close()
+    end
+end
+
+-- ---------------------------------------------------------------------------------------------------------
+print("7d. squad report, health report and re-send request (pure functions)")
+do
+    local src = read_file(scripts .. "FC26_Auto_Capture.lua")
+    local block = src:match("%-%- BEGIN squad_status[^\n]*\n(.-)%-%- END squad_status")
+    check(block ~= nil, "squad_status block found between the markers")
+    local jstr_src = src:match("(local function jstr%(value%).-\nend\n)")
+    check(jstr_src ~= nil, "jstr found")
+    local fn = assert(load(jstr_src .. block .. "\nreturn contract_end_iso, squad_row_json, squad_payload, squad_signature, status_json, parse_resend_request", "squad_status"))
+    local contract_end_iso, squad_row_json, squad_payload, squad_signature, status_json, parse_resend_request = fn()
+
+    check(contract_end_iso(2031) == "2031-06-30" and contract_end_iso("2033") == "2033-06-30", "contract year -> 30 June")
+    check(contract_end_iso(0) == nil and contract_end_iso(nil) == nil and contract_end_iso(1999) == nil and contract_end_iso(2500) == nil
+        and contract_end_iso("x") == nil, "implausible years give nothing")
+
+    local row = json_decode(squad_row_json({ pid = 7, name = 'A "Quoted" \\ Name', contract_year = 2030 }))
+    check(row.name == 'A "Quoted" \\ Name' and row.pid == 7 and row.contractEnd == "2030-06-30" and row.loan == nil,
+        "a row survives quotes and backslashes")
+    local loan = json_decode(squad_row_json({ pid = 8, name = "B", loan = { dir = "out", club = "Parma", ends = "2029-07-01", to_buy = true } }))
+    check(loan.contractEnd == nil and loan.loan.dir == "out" and loan.loan.club == "Parma" and loan.loan["end"] == "2029-07-01"
+        and loan.loan.toBuy == true, "a loan row")
+    local odd = json_decode(squad_row_json({ pid = 9, name = "C", loan = { dir = "in", club = "X", ends = "garbage" } }))
+    check(odd.loan["end"] == nil and odd.loan.toBuy == nil, "a loan end that is not a date is left out")
+
+    local rows = { { pid = 2, name = "Zed", contract_year = 2031 }, { pid = 1, name = "Abe", contract_year = 2032 } }
+    local payload = json_decode(squad_payload(rows, "2028-08-09"))
+    check(payload.dataType == "squad" and payload.careerDate == "2028-08-09" and #payload.players == 2, "the payload is valid JSON")
+    check(payload.players[1].name == "Abe" and payload.players[2].name == "Zed", "players are sorted by name")
+    check(rows[1].name == "Zed", "sorting does not disturb the caller's list")
+    check(squad_signature(rows) == squad_signature({ rows[2], rows[1] }), "the signature does not depend on the order")
+    check(squad_signature(rows) ~= squad_signature({ { pid = 2, name = "Zed", contract_year = 2032 }, rows[2] }),
+        "a changed contract changes the signature")
+
+    local st = json_decode(status_json({ version = "2.8.0", started = 100, exporter = true, club = 'Club "X"', career_date = "2028-08-09",
+        scans = 12, last_match = 150, last_transfer = 0, last_squad = 140, pending_matches = 1, undelivered = 2,
+        resend = { id = "r1", time = 160, result = "sent", detail = "A 1-0 B" } }, 170))
+    check(st.app == "fc26-capture" and st.version == "2.8.0" and st.protocol == 2 and st.time == 170 and st.started == 100, "status basics")
+    check(st.exporter == true and st.club == 'Club "X"' and st.careerDate == "2028-08-09" and st.scans == 12, "status details")
+    check(st.lastMatch == 150 and st.lastTransfer == 0 and st.lastSquad == 140 and st.pendingMatches == 1 and st.undelivered == 2,
+        "status counters")
+    check(st.resend.id == "r1" and st.resend.result == "sent" and st.resend.detail == "A 1-0 B", "status carries the last re-send")
+    local bare = json_decode(status_json({ version = "2.8.0", started = 1 }, 2))
+    check(bare.exporter == false and bare.resend == nil and bare.scans == 0, "a bare status is still valid")
+
+    check(parse_resend_request('{"id": "abc", "time": 5}') == "abc", "request id is read")
+    check(parse_resend_request("") == "manual" and parse_resend_request(nil) == "manual" and parse_resend_request("x") == "manual",
+        "a request without an id is 'manual'")
+    check(#parse_resend_request('{"id": "' .. string.rep("z", 200) .. '"}') == 64, "a long id is cut")
 end
 
 

@@ -102,6 +102,7 @@ fun AppDrawer(
             DrawerItem("season_summary", "Season Summary", Icons.Default.BarChart),
             DrawerItem("career_summary", "Career Summary", Icons.Default.History),
             DrawerItem("assistant", "AI Assistant", Icons.Default.SmartToy),
+            DrawerItem("connection", "PC Connection", Icons.Default.Wifi),
             DrawerItem("settings", "Settings", Icons.Default.Settings)
         )
 

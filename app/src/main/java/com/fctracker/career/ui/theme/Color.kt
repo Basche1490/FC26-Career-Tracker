@@ -14,3 +14,9 @@ val OutlineDark = Color(0xFF313033)
 val WinColor = Color(0xFFB4E380)
 val DrawColor = Color(0xFFFFE082)
 val LossColor = Color(0xFFF2B8B5)
+
+// Connection and data-quality signals. Shapes and words always go with them, so colour is never the only cue.
+val StatusLive = Color(0xFF10B981)
+val StatusWarn = Color(0xFFFBBF24)
+val StatusDown = Color(0xFFEF4444)
+val StatusIdle = Color(0xFF94A3B8)

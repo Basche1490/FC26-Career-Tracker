@@ -34,6 +34,12 @@ import com.fctracker.career.MainViewModel
 import com.fctracker.career.MatchResult
 import com.fctracker.career.PlayerPerformance
 import com.fctracker.career.isPlaceholderPlayerName
+import com.fctracker.career.insights.MatchInsights
+import com.fctracker.career.insights.ResultFilter
+import com.fctracker.career.ui.theme.StatusWarn
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import com.fctracker.career.ui.theme.DrawColor
 import com.fctracker.career.ui.theme.LossColor
 import com.fctracker.career.ui.theme.WinColor
@@ -49,7 +55,9 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
     val state by viewModel.state.collectAsState()
     var showMatchForm by remember { mutableStateOf(false) }
     var matchToEdit by remember { mutableStateOf<MatchResult?>(null) }
-    var selectedCompetitionFilter by remember { mutableStateOf("All") }
+    var selectedCompetitionFilter by remember { mutableStateOf(MatchInsights.ALL_COMPETITIONS) }
+    var resultFilter by remember { mutableStateOf(ResultFilter.ALL) }
+    var matchToDelete by remember { mutableStateOf<MatchResult?>(null) }
 
     
     // Calendar Logic
@@ -72,6 +80,13 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
         state.recentMatches
     }
     val isArchived = state.viewingSeasonYear != null
+
+    // History filters: a competition (this season may not have the one that was picked) and a result chip.
+    val competitionOptions = remember(displayMatches) { MatchInsights.competitions(displayMatches) }
+    val activeCompetition = if (selectedCompetitionFilter in competitionOptions) selectedCompetitionFilter else MatchInsights.ALL_COMPETITIONS
+    val competitionMatches = remember(displayMatches, activeCompetition) { MatchInsights.byCompetition(displayMatches, activeCompetition) }
+    val visibleMatches = remember(competitionMatches, resultFilter) { competitionMatches.filter { MatchInsights.fits(it, resultFilter) } }
+    val estimatedInList = remember(competitionMatches) { MatchInsights.estimatedCount(competitionMatches) }
 
     val df = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
     val monthFmt = SimpleDateFormat("yyyy-MM", Locale.getDefault())
@@ -112,7 +127,7 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                     Icon(Icons.Default.Menu, "Menu", tint = MaterialTheme.colorScheme.primary)
                 }
                 Text("Matches & Fixtures", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                Box(modifier = Modifier.size(48.dp))
+                StatusPill(viewModel)
             }
             
             LazyColumn(
@@ -138,15 +153,14 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                 item {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Text("Match History", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        val allComps = listOf("All") + displayMatches.map { it.competition }.distinct().sorted()
                         var expanded by remember { mutableStateOf(false) }
                         Box {
                             TextButton(onClick = { expanded = true }) {
-                                Text(selectedCompetitionFilter, color = MaterialTheme.colorScheme.primary)
-                                Icon(Icons.Default.ArrowDropDown, contentDescription = "Filter", tint = MaterialTheme.colorScheme.primary)
+                                Text(activeCompetition, color = MaterialTheme.colorScheme.primary)
+                                Icon(Icons.Default.ArrowDropDown, contentDescription = "Filter by competition", tint = MaterialTheme.colorScheme.primary)
                             }
                             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                                allComps.forEach { comp ->
+                                competitionOptions.forEach { comp ->
                                     DropdownMenuItem(
                                         text = { Text(comp) },
                                         onClick = { selectedCompetitionFilter = comp; expanded = false }
@@ -156,17 +170,47 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                         }
                     }
                 }
-                
-                items(displayMatches.filter { selectedCompetitionFilter == "All" || it.competition == selectedCompetitionFilter }) { match ->
-                    MatchResultCard(
-                        match = match, 
+
+                if (state.historicalSeasons.isNotEmpty()) {
+                    item {
+                        SeasonChips(state, onSelect = { viewModel.setViewingSeasonYear(it) })
+                    }
+                }
+
+                if (competitionMatches.isNotEmpty()) {
+                    item { MatchSummaryCard(MatchInsights.record(competitionMatches), MatchInsights.form(competitionMatches)) }
+                    item {
+                        ResultChips(
+                            selected = resultFilter,
+                            estimatedCount = estimatedInList,
+                            onSelect = { resultFilter = it }
+                        )
+                    }
+                }
+
+                items(visibleMatches) { match ->
+                    SwipeableMatchCard(
+                        match = match,
                         state = state,
-                        onEdit = { if(!isArchived) { matchToEdit = match; showMatchForm = true } },
-                        onDelete = { if(!isArchived) viewModel.deleteMatchResult(match.id) }
+                        swipeEnabled = !isArchived,
+                        onEdit = { if (!isArchived) { matchToEdit = match; showMatchForm = true } },
+                        onAskDelete = { if (!isArchived) matchToDelete = match }
                     )
                 }
-                if (displayMatches.filter { selectedCompetitionFilter == "All" || it.competition == selectedCompetitionFilter }.isEmpty()) {
-                    item { Text("No matches played yet.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                if (visibleMatches.isEmpty()) {
+                    item {
+                        if (displayMatches.isEmpty()) {
+                            Text("No matches played yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("No matches fit these filters.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                TextButton(onClick = {
+                                    resultFilter = ResultFilter.ALL
+                                    selectedCompetitionFilter = MatchInsights.ALL_COMPETITIONS
+                                }) { Text("Clear filters") }
+                            }
+                        }
+                    }
                 }
                 item { Spacer(Modifier.height(80.dp)) }
             }
@@ -182,6 +226,27 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
         }
         }
         
+        val pendingDelete = matchToDelete
+        if (pendingDelete != null) {
+            AlertDialog(
+                onDismissRequest = { matchToDelete = null },
+                title = { Text("Delete this match?") },
+                text = {
+                    Text(
+                        "${pendingDelete.goalsFor}-${pendingDelete.goalsAgainst} ${if (pendingDelete.isHome) "vs" else "at"} " +
+                            "${pendingDelete.opponentName} on ${pendingDelete.matchDate} will be removed from your match history. This cannot be undone."
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        viewModel.deleteMatchResult(pendingDelete.id)
+                        matchToDelete = null
+                    }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = { TextButton(onClick = { matchToDelete = null }) { Text("Keep it") } }
+            )
+        }
+
         if (showMatchForm) {
             MatchFormModal(
                 viewModel = viewModel, 
@@ -306,6 +371,24 @@ fun FixtureCalendar(currentMonthCal: Calendar, onMonthChange: (Calendar) -> Unit
 
 @Composable
 fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, onDelete: () -> Unit) {
+    var showEstimatedInfo by remember { mutableStateOf(false) }
+    if (showEstimatedInfo) {
+        AlertDialog(
+            onDismissRequest = { showEstimatedInfo = false },
+            title = { Text("Estimated stats") },
+            text = {
+                Text(
+                    "The game did not send full detail for this match, so the line-up, ratings and team numbers (passes, shots, " +
+                        "xG, possession) are typical values, not what happened in the game. Open the match to correct them. " +
+                        "Saving it there marks the stats as reviewed and removes this tag."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showEstimatedInfo = false; onEdit() }) { Text("Edit match") }
+            },
+            dismissButton = { TextButton(onClick = { showEstimatedInfo = false }) { Text("Got it") } }
+        )
+    }
     val badgeColor = when (match.resultBadge) {
         "W" -> com.fctracker.career.ui.theme.WinColor
         "D" -> com.fctracker.career.ui.theme.DrawColor
@@ -407,12 +490,8 @@ fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, on
             }
 
             if (match.statsEstimated) {
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "ⓘ Estimated stats: the game did not send full match detail, so line-up, ratings and team numbers are typical values. Edit the match to correct them.",
-                    fontSize = 10.sp,
-                    color = Color(0xFFF59E0B)
-                )
+                Spacer(Modifier.height(8.dp))
+                EstimatedChip(onClick = { showEstimatedInfo = true })
             }
 
             // Goals: one row per goal, the scorer by name, a boot and the assister when the game said who made it
@@ -1763,5 +1842,191 @@ fun TeamCrestImage(teamName: String, modifier: Modifier = Modifier) {
         )
     } else {
         fallbackBox()
+    }
+}
+
+/** "Estimated stats": the short marker on a match whose detail the game did not send. A tap explains it. */
+@Composable
+internal fun EstimatedChip(onClick: () -> Unit) {
+    val shape = RoundedCornerShape(50)
+    Row(
+        modifier = Modifier
+            .clip(shape)
+            .background(StatusWarn.copy(alpha = 0.14f))
+            .border(1.dp, StatusWarn.copy(alpha = 0.5f), shape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Default.Info, contentDescription = null, tint = StatusWarn, modifier = Modifier.size(12.dp))
+        Spacer(Modifier.width(4.dp))
+        Text("Estimated stats", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = StatusWarn)
+    }
+}
+
+/** One result of the form guide: a coloured disc with W, D or L. */
+@Composable
+private fun FormDot(result: String) {
+    val color = when (result) {
+        "W" -> WinColor
+        "D" -> DrawColor
+        else -> LossColor
+    }
+    Box(
+        modifier = Modifier.size(24.dp).clip(CircleShape).background(color),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(result, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1A1C18))
+    }
+}
+
+/** Played, W/D/L, goals and the last five results (the newest on the right) of the matches shown below. */
+@Composable
+private fun MatchSummaryCard(record: MatchInsights.Record, form: List<String>) {
+    DarkCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "${record.played} played   ${record.won}W ${record.drawn}D ${record.lost}L",
+                    fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground
+                )
+                val gd = record.goalDifference
+                Text(
+                    "Goals ${record.goalsFor}-${record.goalsAgainst} (${if (gd > 0) "+" else ""}$gd)   ${record.points} pts",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (form.isNotEmpty()) {
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("Form", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.semantics(mergeDescendants = true) {
+                            contentDescription = "Last ${form.size} results, oldest first: ${form.joinToString(", ")}"
+                        }
+                    ) {
+                        form.forEach { FormDot(it) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ResultChips(selected: ResultFilter, estimatedCount: Int, onSelect: (ResultFilter) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        ResultFilter.values().forEach { filter ->
+            // The Estimated chip only appears when there is something to find (or while it is the active filter).
+            if (filter != ResultFilter.ESTIMATED || estimatedCount > 0 || selected == filter) {
+                FilterChip(
+                    selected = selected == filter,
+                    onClick = { onSelect(filter) },
+                    label = { Text(if (filter == ResultFilter.ESTIMATED) "Estimated ($estimatedCount)" else filter.label, fontSize = 12.sp) }
+                )
+            }
+        }
+    }
+}
+
+/** The seasons of the career: the one on screen is highlighted, a tap switches (the same switch as on the Dashboard). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SeasonChips(state: AppState, onSelect: (Int?) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        state.historicalSeasons.map { it.year }.sortedDescending().forEach { year ->
+            FilterChip(
+                selected = state.viewingSeasonYear == year,
+                onClick = { onSelect(year) },
+                label = { Text(MatchInsights.seasonLabel(year), fontSize = 12.sp) }
+            )
+        }
+        FilterChip(
+            selected = state.viewingSeasonYear == null,
+            onClick = { onSelect(null) },
+            label = { Text("${MatchInsights.seasonLabel(state.startYear)} (current)", fontSize = 12.sp) }
+        )
+    }
+}
+
+/**
+ * A match card you can swipe: to the right opens it for editing, to the left asks to delete it (the person confirms
+ * in a dialog). The card always springs back. The tap on the card and the bin icon do the same, so nothing depends
+ * on the gesture.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeableMatchCard(
+    match: MatchResult,
+    state: AppState,
+    swipeEnabled: Boolean,
+    onEdit: () -> Unit,
+    onAskDelete: () -> Unit
+) {
+    if (!swipeEnabled) {
+        MatchResultCard(match = match, state = state, onEdit = onEdit, onDelete = onAskDelete)
+        return
+    }
+    val currentEdit by rememberUpdatedState(onEdit)
+    val currentDelete by rememberUpdatedState(onAskDelete)
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd -> currentEdit()
+                SwipeToDismissBoxValue.EndToStart -> currentDelete()
+                SwipeToDismissBoxValue.Settled -> Unit
+            }
+            false
+        }
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        backgroundContent = {
+            val direction = dismissState.dismissDirection
+            val deleting = direction == SwipeToDismissBoxValue.EndToStart
+            val background = when (direction) {
+                SwipeToDismissBoxValue.StartToEnd -> MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+                SwipeToDismissBoxValue.EndToStart -> MaterialTheme.colorScheme.error.copy(alpha = 0.25f)
+                SwipeToDismissBoxValue.Settled -> Color.Transparent
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(background)
+                    .padding(horizontal = 20.dp),
+                contentAlignment = if (deleting) Alignment.CenterEnd else Alignment.CenterStart
+            ) {
+                if (direction != SwipeToDismissBoxValue.Settled) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (deleting) Icons.Default.Delete else Icons.Default.Edit,
+                            contentDescription = null,
+                            tint = if (deleting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (deleting) "Delete" else "Edit",
+                            fontWeight = FontWeight.Bold,
+                            color = if (deleting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+        }
+    ) {
+        MatchResultCard(match = match, state = state, onEdit = onEdit, onDelete = onAskDelete)
     }
 }

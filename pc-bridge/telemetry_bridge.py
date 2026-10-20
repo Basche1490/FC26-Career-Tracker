@@ -12,6 +12,12 @@ import csv
 from urllib.parse import urlsplit
 
 LOCAL_PORT = 5050
+BRIDGE_VERSION = "2.0.0"
+BRIDGE_PROTOCOL = 2            # what the phone app, this bridge and the Live Editor script have to agree on
+MIN_SCRIPT_VERSION = "2.8.0"   # older capture scripts do not report their health or answer a re-send request
+SCRIPT_ALIVE_SECONDS = 20      # the script writes its heartbeat every 5 seconds
+PHONE_ALIVE_SECONDS = 30       # the app asks the bridge for news every 10 seconds
+RESEND_MIN_SECONDS = 10        # at most one "re-send the last match" request per this many seconds
 EVENTS_FILE = os.path.join(os.path.dirname(__file__), "telemetry_events.json")
 MAX_BODY_BYTES = 5 * 1024 * 1024  # largest POST body the bridge will accept (5 MiB)
 
@@ -217,6 +223,396 @@ def process_payload_text(text):
     return 200, reply
 
 
+# ---------------------------------------------------------------------------
+# Health: what the bridge page and the phone app show as "is everything working?"
+#
+# The capture script writes script_status.json (a heartbeat every few seconds) into Documents\FC26 Export. The bridge
+# combines that with what it sees itself (folders, waiting files, when the phone last asked) into one list of checks.
+# ---------------------------------------------------------------------------
+STARTED_AT = time.time()
+phone_seen = {"time": 0.0, "ip": ""}
+resend_state = {"last": 0.0}
+_write_test_cache = {"time": 0.0, "root": "", "ok": True}
+
+
+def parse_version(text):
+    m = re.match(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?", str(text or ""))
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+
+
+def version_at_least(have, need):
+    h, n = parse_version(have), parse_version(need)
+    if h is None or n is None:
+        return False
+    return h >= n
+
+
+def note_phone(client_ip, now=None):
+    """The phone (or any other reader that is not this PC) just asked for news."""
+    phone_seen["time"] = time.time() if now is None else now
+    phone_seen["ip"] = _strip_mapped(client_ip)
+
+
+def read_script_status(roots=None, now=None):
+    """The freshest script_status.json found in the export folders, described for the status page."""
+    now = time.time() if now is None else now
+    best = None
+    for root in (atlas_roots() if roots is None else roots):
+        path = os.path.join(root, "script_status.json")
+        try:
+            with open(path, "rb") as f:
+                data = json.loads(f.read().decode("utf-8-sig", errors="replace"))
+            mtime = os.path.getmtime(path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        stamp = _i(data.get("time")) or int(mtime)
+        if best is None or stamp > best[0]:
+            best = (stamp, data, root)
+    if best is None:
+        return {"found": False}
+    stamp, data, root = best
+    age = max(0, int(now - stamp))
+    version = str(data.get("version") or "")
+    resend = data.get("resend") if isinstance(data.get("resend"), dict) else None
+    return {
+        "found": True,
+        "folder": root,
+        "version": version,
+        "protocol": _i(data.get("protocol")),
+        "time": stamp,
+        "ageSeconds": age,
+        "alive": age <= SCRIPT_ALIVE_SECONDS,
+        "versionOk": version_at_least(version, MIN_SCRIPT_VERSION),
+        "club": str(data.get("club") or ""),
+        "careerDate": str(data.get("careerDate") or ""),
+        "exporter": bool(data.get("exporter")),
+        "scans": _i(data.get("scans")),
+        "lastMatch": _i(data.get("lastMatch")),
+        "lastTransfer": _i(data.get("lastTransfer")),
+        "lastSquad": _i(data.get("lastSquad")),
+        "pendingMatches": _i(data.get("pendingMatches")),
+        "undelivered": _i(data.get("undelivered")),
+        "resend": resend,
+    }
+
+
+def outbox_state(roots=None, now=None):
+    """How many payload files are waiting in the outbox, how many were refused, and whether the bridge can write there."""
+    now = time.time() if now is None else now
+    pending = bad = 0
+    oldest = 0
+    writable = True
+    folders = atlas_roots() if roots is None else roots
+    for root in folders:
+        outbox = os.path.join(root, "outbox")
+        if not os.path.isdir(outbox):
+            continue
+        try:
+            names = os.listdir(outbox)
+        except OSError:
+            continue
+        for name in names:
+            low = name.lower()
+            if low.endswith(".json"):
+                pending += 1
+                try:
+                    oldest = max(oldest, int(now - os.path.getmtime(os.path.join(outbox, name))))
+                except OSError:
+                    pass
+            elif low.endswith(".bad"):
+                bad += 1
+        # A real write test, at most every 30 seconds. The file is not a .json, so the outbox watcher ignores it.
+        if _write_test_cache["root"] != outbox or now - _write_test_cache["time"] > 30:
+            ok = True
+            probe = os.path.join(outbox, ".bridge_write_test")
+            try:
+                with open(probe, "w") as f:
+                    f.write("ok")
+                os.remove(probe)
+            except OSError:
+                ok = False
+            _write_test_cache.update(time=now, root=outbox, ok=ok)
+        writable = writable and _write_test_cache["ok"]
+    return {"pending": pending, "bad": bad, "oldestSeconds": oldest, "writable": writable}
+
+
+def event_times():
+    """When the newest match / transfer / squad report arrived (epoch seconds, 0 = never)."""
+    latest = {"match": 0, "transfer": 0, "squad": 0}
+    with events_lock:
+        recent = list(events)
+    for ev in recent:
+        msg = ev.get("message")
+        if not isinstance(msg, str) or not msg.startswith("{"):
+            continue
+        try:
+            data = json.loads(msg)
+        except ValueError:
+            continue
+        kind = data.get("dataType") if isinstance(data, dict) else None
+        if kind in latest:
+            latest[kind] = max(latest[kind], _i(ev.get("time")))
+    return {"count": len(recent), "lastMatch": latest["match"], "lastTransfer": latest["transfer"],
+            "lastSquad": latest["squad"]}
+
+
+def _span(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{seconds // 60} min"
+    if seconds < 172800:
+        return f"{seconds // 3600} h"
+    return f"{seconds // 86400} days"
+
+
+def _ago(seconds):
+    return _span(seconds) + " ago"
+
+
+def _check(check_id, label, state, detail, fix=""):
+    return {"id": check_id, "label": label, "state": state, "detail": detail, "fix": fix}
+
+
+def selfcheck(script, outbox, ev, roots, local_ip, now):
+    """The list shown under 'Self check'. state: ok | warn | fail | info. 'fix' says what to do about a warn or fail."""
+    checks = [_check("bridge", "Bridge", "ok",
+                     f"Version {BRIDGE_VERSION} is running on {PC_NAME} (port {LOCAL_PORT}).")]
+
+    if not roots:
+        checks.append(_check("folder", "Export folder", "fail", "Documents\\FC26 Export was not found.",
+                             "Run FC26_Auto_Capture.lua in Live Editor once: it creates the folder."))
+    else:
+        checks.append(_check("folder", "Export folder", "ok", roots[0]))
+
+    if roots:
+        if not outbox["writable"]:
+            checks.append(_check("outbox", "Outbox", "fail", "The bridge cannot write to the outbox folder.",
+                                 "Check that the folder is not read-only and that no program is locking it."))
+        elif outbox["bad"]:
+            checks.append(_check("outbox", "Outbox", "warn", f"{outbox['bad']} file(s) could not be read and were set aside (.bad).",
+                                 "The script sent something the bridge could not read. Re-run the script; if it keeps happening, send the bridge_send_log.txt file."))
+        elif outbox["pending"] and outbox["oldestSeconds"] > 30:
+            checks.append(_check("outbox", "Outbox", "warn",
+                                 f"{outbox['pending']} payload(s) have been waiting for {_span(outbox['oldestSeconds'])}.",
+                                 "Keep this window open: the bridge delivers them. If it stays, restart the bridge."))
+        else:
+            checks.append(_check("outbox", "Outbox", "ok",
+                                 "Empty." if not outbox["pending"] else f"{outbox['pending']} payload(s) being delivered."))
+
+    if not script["found"]:
+        checks.append(_check("script", "Capture script", "fail", "No heartbeat from the script yet.",
+                             "In Live Editor open your career, then Lua Scripts > FC26_Auto_Capture.lua > Execute."))
+    elif not script["alive"]:
+        checks.append(_check("script", "Capture script", "fail", f"Last heard from {_ago(script['ageSeconds'])}.",
+                             "Live Editor was closed or the script stopped. Execute FC26_Auto_Capture.lua again."))
+    else:
+        club = f" for {script['club']}" if script["club"] else ""
+        checks.append(_check("script", "Capture script", "ok", f"Running{club}, version {script['version'] or '?'}."))
+
+    if script["found"]:
+        if not script["versionOk"]:
+            checks.append(_check("version", "Script version", "warn",
+                                 f"Script {script['version'] or '?'} is older than {MIN_SCRIPT_VERSION}, which this bridge expects.",
+                                 "Run FC26_Launcher.bat to install the current script, then Execute it again in Live Editor."))
+        else:
+            checks.append(_check("version", "Script version", "ok", f"{script['version']} (needs {MIN_SCRIPT_VERSION} or newer)."))
+        if script["alive"]:
+            if script["exporter"]:
+                checks.append(_check("exporter", "Match statistics", "ok", "The Project Atlas exporter is running."))
+            else:
+                checks.append(_check("exporter", "Match statistics", "warn",
+                                     "The Project Atlas exporter is not running, so matches arrive with estimated statistics.",
+                                     "Execute the Project Atlas exporter script in Live Editor too."))
+            if script["undelivered"]:
+                checks.append(_check("undelivered", "Delivery", "warn", f"{script['undelivered']} report(s) not delivered yet.",
+                                     "Keep this window open; the bridge picks them up."))
+
+    if ev["lastMatch"]:
+        checks.append(_check("matches", "Last match", "info", f"Received {_ago(now - ev['lastMatch'])}."))
+    else:
+        checks.append(_check("matches", "Last match", "info", "No match received yet. Play or sim a match to see one arrive."))
+
+    if phone_seen["time"] <= 0:
+        checks.append(_check("phone", "Phone", "warn", "The phone has not connected yet.",
+                             f"In the app open PC Connection (in the menu) and enter http://{local_ip}:{LOCAL_PORT}, or tap Find my PC."))
+    elif now - phone_seen["time"] > PHONE_ALIVE_SECONDS:
+        checks.append(_check("phone", "Phone", "warn", f"The phone last asked {_ago(now - phone_seen['time'])} ({phone_seen['ip']}).",
+                             "Open the app. Phone and PC need to be on the same Wi-Fi."))
+    else:
+        checks.append(_check("phone", "Phone", "ok", f"Connected ({phone_seen['ip']}), last asked {_ago(now - phone_seen['time'])}."))
+
+    if local_ip.startswith("127."):
+        checks.append(_check("address", "Network address", "fail", "This PC has no network address.",
+                             "Connect the PC to the same Wi-Fi or network as the phone."))
+    else:
+        checks.append(_check("address", "Network address", "ok", f"http://{local_ip}:{LOCAL_PORT}"))
+    return checks
+
+
+def build_status(now=None, roots=None):
+    now = time.time() if now is None else now
+    roots = atlas_roots() if roots is None else roots
+    local_ip = get_local_ip()
+    script = read_script_status(roots, now)
+    outbox = outbox_state(roots, now)
+    ev = event_times()
+    checks = selfcheck(script, outbox, ev, roots, local_ip, now)
+    states = [c["state"] for c in checks]
+    summary = "fail" if "fail" in states else "warn" if "warn" in states else "ok"
+    seen = phone_seen["time"]
+    return {
+        "app": "fc26-bridge",
+        "now": int(now),
+        "bridge": {"version": BRIDGE_VERSION, "protocol": BRIDGE_PROTOCOL, "minScript": MIN_SCRIPT_VERSION,
+                   "kind": "python", "name": PC_NAME, "port": LOCAL_PORT, "address": f"http://{local_ip}:{LOCAL_PORT}",
+                   "started": int(STARTED_AT)},
+        "script": script,
+        "outbox": outbox,
+        "events": ev,
+        "phone": {"lastSeen": int(seen), "ageSeconds": int(now - seen) if seen else -1, "ip": phone_seen["ip"]},
+        "checks": checks,
+        "summary": summary,
+    }
+
+
+def request_resend(roots=None, now=None):
+    """Asks the capture script to send its latest match again (a file the script reads, because the script, not the
+    bridge, knows the match). Returns (http_status, reply_dict)."""
+    now = time.time() if now is None else now
+    script = read_script_status(roots, now)
+    if not script["found"] or not script["alive"]:
+        return 409, {"status": "error", "code": "script_not_running",
+                     "message": "The capture script is not running, so it cannot send anything. Execute FC26_Auto_Capture.lua in Live Editor first."}
+    if not script["versionOk"]:
+        return 409, {"status": "error", "code": "script_too_old",
+                     "message": f"The capture script ({script['version'] or '?'}) is older than {MIN_SCRIPT_VERSION} and cannot do this. Install the current script with FC26_Launcher.bat."}
+    if now - resend_state["last"] < RESEND_MIN_SECONDS:
+        return 429, {"status": "error", "code": "too_soon", "message": "A re-send was just requested. Give it a few seconds."}
+    request_id = f"r{int(now)}"
+    target = os.path.join(script["folder"], "resend_request.json")
+    try:
+        tmp = target + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"id": request_id, "time": int(now)}, f)
+        os.replace(tmp, target)
+    except OSError as e:
+        return 500, {"status": "error", "code": "write_failed", "message": f"Could not write the request: {e}"}
+    resend_state["last"] = now
+    print(f"[{time.strftime('%H:%M:%S')}] Re-send of the latest match requested [{request_id}]")
+    return 200, {"status": "requested", "id": request_id}
+
+
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html>
+<head>
+    <title>EA FC Telemetry Bridge</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 24px; margin: 0; }
+        .card { background: #1e293b; border-radius: 14px; padding: 24px; max-width: 680px; margin: 0 auto 16px; }
+        h1 { color: #38bdf8; font-size: 22px; margin-top: 0; }
+        h3 { margin: 0 0 12px; }
+        .info { background: #0f172a; padding: 14px; border-radius: 8px; font-family: monospace; margin: 14px 0; border: 1px solid #334155; }
+        button, a.btn { background: #10b981; color: white; border: none; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: bold; text-decoration: none; display: inline-block; margin: 0 8px 8px 0; }
+        button.blue { background: #0284c7; }
+        button.red { background: #ef4444; }
+        button:disabled { opacity: .5; cursor: default; }
+        .row { display: flex; gap: 12px; padding: 10px 0; border-top: 1px solid #334155; }
+        .row:first-child { border-top: 0; }
+        .dot { flex: 0 0 12px; height: 12px; border-radius: 6px; margin-top: 5px; background: #64748b; }
+        .dot.ok { background: #10b981; } .dot.warn { background: #f59e0b; } .dot.fail { background: #ef4444; }
+        .label { font-weight: bold; font-size: 14px; }
+        .detail { font-size: 13px; color: #cbd5e1; }
+        .fix { font-size: 13px; color: #fcd34d; margin-top: 2px; }
+        #summary { font-size: 15px; font-weight: bold; margin-bottom: 8px; }
+        #resendNote { font-size: 13px; color: #cbd5e1; margin-left: 4px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>EA Sports FC Telemetry Bridge <span style="font-size:13px;color:#94a3b8;">v__VERSION__ (Python)</span></h1>
+        <div class="info">
+            <strong>IP address for the Android app:</strong><br>
+            <span style="color:#10b981;font-size:16px;font-weight:bold;">http://__LOCAL_IP__:__PORT__</span>
+        </div>
+    </div>
+    <div class="card">
+        <h3>Self check</h3>
+        <div id="summary">Checking...</div>
+        <div id="checks"></div>
+        <div style="margin-top:14px;">
+            <button id="resendBtn" class="blue" type="button">Re-send last match</button><button id="recheckBtn" type="button">Check again</button>
+            <span id="resendNote"></span>
+        </div>
+    </div>
+    <div class="card">
+        <div style="margin: 0 0 16px;">
+            <button onclick="fetch('/test-match', {method:'POST'}).then(()=>location.reload())">Send Test Match (3 - 1 vs Arsenal)</button>
+            <button class="blue" onclick="fetch('/test-transfer', {method:'POST'}).then(()=>location.reload())">Send Test Transfer (&euro;120M)</button>
+            <button class="red" onclick="fetch('/clear', {method:'POST'}).then(()=>location.reload())">Clear</button>
+        </div>
+        <p style="font-size:12px;color:#94a3b8;"><a href="/events" target="_blank" style="color:#38bdf8;">[View JSON]</a> <a href="/status" target="_blank" style="color:#38bdf8;">[Status JSON]</a></p>
+        <h3>Live Events (__COUNT__ queued)</h3>
+        <pre style="background:#0f172a;padding:12px;border-radius:8px;max-height:260px;overflow:auto;font-size:12px;color:#cbd5e1;">__EVENTS__</pre>
+    </div>
+<script>
+function row(c) {
+    var r = document.createElement('div'); r.className = 'row';
+    var d = document.createElement('div'); d.className = 'dot ' + (c.state || '');
+    var t = document.createElement('div');
+    var l = document.createElement('div'); l.className = 'label'; l.textContent = c.label;
+    var x = document.createElement('div'); x.className = 'detail'; x.textContent = c.detail;
+    t.appendChild(l); t.appendChild(x);
+    if (c.fix) { var f = document.createElement('div'); f.className = 'fix'; f.textContent = c.fix; t.appendChild(f); }
+    r.appendChild(d); r.appendChild(t);
+    return r;
+}
+function refresh() {
+    return fetch('/status').then(function (r) { return r.json(); }).then(function (s) {
+        var box = document.getElementById('checks');
+        box.textContent = '';
+        s.checks.forEach(function (c) { box.appendChild(row(c)); });
+        var sum = document.getElementById('summary');
+        sum.textContent = s.summary === 'ok' ? 'Everything is working.' : s.summary === 'warn' ? 'Working, with something to look at.' : 'Something needs fixing.';
+        sum.style.color = s.summary === 'ok' ? '#10b981' : s.summary === 'warn' ? '#f59e0b' : '#ef4444';
+        return s;
+    }).catch(function () {
+        document.getElementById('summary').textContent = 'The bridge did not answer.';
+    });
+}
+document.getElementById('recheckBtn').onclick = refresh;
+document.getElementById('resendBtn').onclick = function () {
+    var btn = this, note = document.getElementById('resendNote');
+    btn.disabled = true; note.textContent = 'Asking the script...';
+    fetch('/resend', {method: 'POST'}).then(function (r) { return r.json(); }).then(function (reply) {
+        if (reply.status !== 'requested') { note.textContent = reply.message || 'Could not ask.'; btn.disabled = false; return; }
+        var tries = 0;
+        (function poll() {
+            refresh().then(function (s) {
+                var rs = s && s.script && s.script.resend;
+                if (rs && rs.id === reply.id) {
+                    note.textContent = rs.result === 'sent' ? 'Sent: ' + rs.detail : rs.result === 'nothing' ? rs.detail : 'The script could not do it: ' + rs.detail;
+                    btn.disabled = false;
+                } else if (++tries > 12) {
+                    note.textContent = 'No answer from the script. Is Live Editor still open?'; btn.disabled = false;
+                } else { setTimeout(poll, 1500); }
+            });
+        })();
+    }).catch(function () { note.textContent = 'The bridge did not answer.'; btn.disabled = false; });
+};
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>"""
+
+
 class TelemetryHandler(http.server.BaseHTTPRequestHandler):
     timeout = 15  # drop clients that stall in the middle of a request
 
@@ -259,10 +655,30 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         # No CORS preflight support - browsers on other sites must not be able to write.
         self._reject(405, "Method not allowed.")
 
+    def _json(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
+        path = self.path.lower()
+        if path == "/resend":
+            # The phone's "Re-send last match" button. It only asks the capture script to send its latest match again
+            # (rate limited, and the bridge drops a duplicate), so it is allowed from the local network. Host and
+            # Origin checks still keep web pages in a browser out.
+            if not self._host_allowed():
+                return
+            if not origin_ok(self.headers.get('Origin'), self.headers.get('Host'), self.headers.get('Sec-Fetch-Site')):
+                self._reject(403, "Cross-site request blocked.")
+                return
+            code, reply = request_resend()
+            self._json(code, reply)
+            return
         if not self._write_allowed():
             return
-        path = self.path.lower()
         if path == "/test-match":
             sample = create_sample_match()
             add_event("Live Match Final", "Full Time: vs 3 - 1 Arsenal (Premier League)", json.dumps(sample))
@@ -334,6 +750,15 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        server_ip = self.connection.getsockname()[0]
+        if path in ["/events", "/json", "/api/telemetry", "/status", "/api/status"] and \
+                not is_local_client(self.client_address[0], server_ip):
+            note_phone(self.client_address[0])
+
+        if path in ["/status", "/api/status"]:
+            self._json(200, build_status())
+            return
+
         if path in ["/events", "/json", "/api/telemetry"]:
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
@@ -343,40 +768,12 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        local_ip = get_local_ip()
-        page = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>EA FC Telemetry Bridge (Python)</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 24px; margin: 0; }}
-        .card {{ background: #1e293b; border-radius: 14px; padding: 24px; max-width: 680px; margin: 0 auto; }}
-        h1 {{ color: #38bdf8; font-size: 22px; }}
-        .info {{ background: #0f172a; padding: 14px; border-radius: 8px; font-family: monospace; margin: 14px 0; border: 1px solid #334155; }}
-        button, a.btn {{ background: #10b981; color: white; border: none; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: bold; text-decoration: none; display: inline-block; margin-right: 8px; }}
-        button.blue {{ background: #0284c7; }}
-        button.red {{ background: #ef4444; }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>⚽ EA Sports FC Telemetry Bridge (Python)</h1>
-        <div class="info">
-            <strong>📱 IP Address for Android App:</strong><br>
-            <span style="color:#10b981;font-size:16px;font-weight:bold;">http://{local_ip}:{LOCAL_PORT}</span>
-        </div>
-        <div style="margin: 16px 0;">
-            <button onclick="fetch('/test-match', {{method:'POST'}}).then(()=>location.reload())">⚡ Send Test Match (3 - 1 vs Arsenal)</button>
-            <button class="blue" onclick="fetch('/test-transfer', {{method:'POST'}}).then(()=>location.reload())">⚡ Send Test Transfer (€120M)</button>
-            <button class="red" onclick="fetch('/clear', {{method:'POST'}}).then(()=>location.reload())">🗑️ Clear</button>
-        </div>
-        <p style="font-size:12px;color:#94a3b8;"><a href="/events" target="_blank" style="color:#38bdf8;">[View JSON]</a></p>
-        <h3>Live Events ({len(events)} queued)</h3>
-        <pre style="background:#0f172a;padding:12px;border-radius:8px;max-height:260px;overflow:auto;font-size:12px;color:#cbd5e1;">{html.escape(json.dumps(events, indent=2))}</pre>
-    </div>
-</body>
-</html>"""
+        page = (DASHBOARD_HTML
+                .replace("__LOCAL_IP__", html.escape(get_local_ip()))
+                .replace("__PORT__", str(LOCAL_PORT))
+                .replace("__VERSION__", html.escape(BRIDGE_VERSION))
+                .replace("__COUNT__", str(len(events)))
+                .replace("__EVENTS__", html.escape(json.dumps(events, indent=2))))
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
@@ -1216,11 +1613,12 @@ if __name__ == "__main__":
     local_ip = get_local_ip()
     port = LOCAL_PORT
     print("===================================================")
-    print(f" EA SPORTS FC TELEMETRY BRIDGE (Python)")
+    print(f" EA SPORTS FC TELEMETRY BRIDGE {BRIDGE_VERSION} (Python)")
     print(f" ⭐ ENTER IN YOUR ANDROID APP:")
     print(f"    http://{local_ip}:{port}")
     print(f" Web Dashboard: http://localhost:{port}")
-    print(" Phone access is read-only; writes are accepted from this PC only.")
+    print(" Phone access is read-only (apart from asking for the last match again); other writes are accepted from this PC only.")
+    print(" Self check: open the web dashboard above.")
     print(" Keep this window open while playing!")
     print("===================================================")
 

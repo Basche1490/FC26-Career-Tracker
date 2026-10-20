@@ -37,7 +37,7 @@ local function send_to_bridge(json_payload)
             return true
         end
     end
-    print("[TelemetrySenderV2] bridge did not accept the payload (is Start_Bridge.bat running?)")
+    print("[TelemetrySenderV2] bridge did not accept the payload (is the bridge running? run FC26_Launcher.bat)")
     return false
 end
 

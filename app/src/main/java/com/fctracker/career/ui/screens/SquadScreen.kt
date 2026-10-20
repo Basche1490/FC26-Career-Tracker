@@ -57,6 +57,10 @@ fun SquadScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                         Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.primary)
                     }
                 },
+                actions = {
+                    StatusPill(viewModel)
+                    Spacer(Modifier.width(12.dp))
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                     titleContentColor = MaterialTheme.colorScheme.onBackground
@@ -94,7 +98,7 @@ fun SquadScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
             val activeSquad = displayPlayers.filter { it.status != "Sold" && it.status != "Retired" && it.status != "Loaned Out" && !it.isLoanedOut && !it.isAcademy }
             val rosterSquad = displayPlayers.filter { it.status != "Sold" && it.status != "Retired" }
             when (selectedTabIndex) {
-                0 -> RosterTab(rosterSquad, startYear = state.startYear, Modifier.weight(1f), onPlayerUpdate = { viewModel.updatePlayer(it) }, onPlayerDelete = { viewModel.deletePlayer(it) }, allEafcPlayers = availableEafc)
+                0 -> RosterTab(rosterSquad, startYear = state.startYear, Modifier.weight(1f), onPlayerUpdate = { viewModel.updatePlayer(it) }, onPlayerDelete = { viewModel.deletePlayer(it) }, allEafcPlayers = availableEafc, referenceDate = if (isArchived) null else com.fctracker.career.telemetry.ContractTime.referenceDate(state))
                 1 -> FormationTab(
                     activeSquad,
                     Modifier.weight(1f),
@@ -140,11 +144,19 @@ fun SquadScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
     }
 }
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun RosterTab(players: List<Player>, startYear: Int = 2025, modifier: Modifier = Modifier, onPlayerUpdate: (Player) -> Unit = {}, onPlayerDelete: (String) -> Unit = {}, allEafcPlayers: List<com.fctracker.career.EafcPlayer> = emptyList()) {
+fun RosterTab(players: List<Player>, startYear: Int = 2025, modifier: Modifier = Modifier, onPlayerUpdate: (Player) -> Unit = {}, onPlayerDelete: (String) -> Unit = {}, allEafcPlayers: List<com.fctracker.career.EafcPlayer> = emptyList(), referenceDate: String? = null) {
     var searchQuery by remember { mutableStateOf("") }
     var editingPlayer by remember { mutableStateOf<Player?>(null) }
     var showAddPlayer by remember { mutableStateOf(false) }
+    var onlyAttention by remember { mutableStateOf(false) }
+    // Players whose contract or loan needs a decision, the soonest first (needs the game's date to be known).
+    val attention = remember(players, referenceDate) {
+        if (referenceDate == null) emptyList() else com.fctracker.career.telemetry.ContractTime.attentionList(players, referenceDate)
+    }
+    val attentionOrder = remember(attention) { attention.withIndex().associate { it.value.id to it.index } }
+    val attentionOnly = onlyAttention && attention.isNotEmpty()
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -161,19 +173,42 @@ fun RosterTab(players: List<Player>, startYear: Int = 2025, modifier: Modifier =
                 }
             }
             
+            if (attention.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(selected = !attentionOnly, onClick = { onlyAttention = false }, label = { Text("All", fontSize = 12.sp) })
+                    FilterChip(
+                        selected = attentionOnly,
+                        onClick = { onlyAttention = true },
+                        label = { Text("Needs attention (${attention.size})", fontSize = 12.sp) }
+                    )
+                }
+                if (attentionOnly) {
+                    Text(
+                        "Contracts ending within a year and loans ending within three months, the soonest first.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+            }
+
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 val filtered = players.filter {
-                    it.displayName.contains(searchQuery, true) ||
+                    (it.displayName.contains(searchQuery, true) ||
                     it.name.contains(searchQuery, true) ||
-                    it.primaryPosition.contains(searchQuery, true)
+                    it.primaryPosition.contains(searchQuery, true)) &&
+                    (!attentionOnly || it.id in attentionOrder)
                 }
                 val firstTeamPlayers = filtered.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }
-                    .sortedByDescending { it.overall }
+                    .let { list -> if (attentionOnly) list.sortedBy { attentionOrder[it.id] ?: Int.MAX_VALUE } else list.sortedByDescending { it.overall } }
                 val academyPlayers = filtered.filter { it.isAcademy || it.status.equals("Academy", ignoreCase = true) }
-                    .sortedByDescending { it.overall }
+                    .let { list -> if (attentionOnly) list.sortedBy { attentionOrder[it.id] ?: Int.MAX_VALUE } else list.sortedByDescending { it.overall } }
 
                 if (firstTeamPlayers.isNotEmpty()) {
                     item {
@@ -186,7 +221,7 @@ fun RosterTab(players: List<Player>, startYear: Int = 2025, modifier: Modifier =
                         )
                     }
                     items(firstTeamPlayers, key = { it.id }) { player ->
-                        PlayerRowDark(player, onClick = { editingPlayer = player })
+                        PlayerRowDark(player, onClick = { editingPlayer = player }, referenceDate = referenceDate)
                     }
                 }
                 if (academyPlayers.isNotEmpty()) {
@@ -201,7 +236,7 @@ fun RosterTab(players: List<Player>, startYear: Int = 2025, modifier: Modifier =
                         )
                     }
                     items(academyPlayers, key = { it.id }) { player ->
-                        PlayerRowDark(player, onClick = { editingPlayer = player })
+                        PlayerRowDark(player, onClick = { editingPlayer = player }, referenceDate = referenceDate)
                     }
                 }
                 item { Spacer(Modifier.height(80.dp)) }
@@ -209,7 +244,7 @@ fun RosterTab(players: List<Player>, startYear: Int = 2025, modifier: Modifier =
         }
 
         editingPlayer?.let {
-            EditPlayerDialog(startYear = startYear, player = it, allEafcPlayers = allEafcPlayers, onDismiss = { editingPlayer = null }, onUpdate = onPlayerUpdate, onDelete = { onPlayerDelete(it.id); editingPlayer = null })
+            EditPlayerDialog(startYear = startYear, player = it, allEafcPlayers = allEafcPlayers, onDismiss = { editingPlayer = null }, onUpdate = onPlayerUpdate, onDelete = { onPlayerDelete(it.id); editingPlayer = null }, referenceDate = referenceDate)
         }
 
         if (showAddPlayer) {
@@ -476,7 +511,7 @@ fun MedicalWingTab(
     }
 }
 @Composable
-fun PlayerRowDark(player: Player, onClick: () -> Unit = {}) {
+fun PlayerRowDark(player: Player, onClick: () -> Unit = {}, referenceDate: String? = null) {
     Box(
         modifier = Modifier
             .clickable { onClick() }
@@ -603,6 +638,7 @@ fun PlayerRowDark(player: Player, onClick: () -> Unit = {}) {
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold
                 )
+                ContractInfoRows(player, referenceDate)
             }
             Box(
                 modifier = Modifier

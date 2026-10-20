@@ -1,4 +1,4 @@
--- FC26 AutoCapture v2.7.0 (Precision Live Telemetry & Atlas Tracker)
+-- FC26 AutoCapture v2.8.0 (Precision Live Telemetry & Atlas Tracker)
 -- Complete support for EFL Championship, Premier League, FA Cup, Carabao Cup, Play-offs.
 -- Gathers REAL in-game data: Real League Position, Real Lineups, Real Goal Scorers, Real MOTM.
 -- Strict League Rules: League matches NEVER have extra time or penalty shootouts.
@@ -8,6 +8,8 @@
 -- the real results, positions, the other side's scorers); no flashing command windows.
 -- v2.7: no command windows at start-up or after a match (all folders in one command, spare folders for the exporter),
 -- other side's scorers named from the players' goal tallies, loan-outs noticed while the game runs.
+-- v2.8: reports its own health to the bridge and the app (script_status.json), answers a "re-send the last match"
+-- request from the app, and sends the real contract and loan end dates of the squad.
 
 local MEMORY = require "imports/core/memory"
 require "imports/other/helpers"
@@ -16,7 +18,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "2.7.0"
+local VERSION = "2.8.0"
 local SCRIPT_INSTANCE = "FC26_AUTOCAP_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
 _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] = SCRIPT_INSTANCE
 
@@ -85,6 +87,10 @@ local MATCH_STATS_ROOT = COMMUNITY_ROOT .. "/MatchStats"
 local OUTBOX_DIR = COMMUNITY_ROOT .. "/outbox"
 
 local get_current_career_date -- defined further down; the match code above it needs it
+
+-- What the script tells the bridge (and through it the app) about itself: see script_status.json further down.
+local status = { started = os.time(), last_match = 0, last_transfer = 0, last_squad = 0, scans = 0, written = 0,
+                 squad_dirty = true, resend = nil }
 
 -- BEGIN quiet_exec (this exact block is also run by tests/lua/test_transfer_logic.lua)
 -- Every program a script starts through os.execute / io.popen opens a console window on top of the game for a moment.
@@ -1374,6 +1380,10 @@ local function send_payload_to_bridge(payload, log_label)
         end
 
         track_outbox_file(json_path, id)
+        local kind = payload:match('"dataType"%s*:%s*"(%w+)"')
+        if kind == "match" then status.last_match = os.time()
+        elseif kind == "transfer" then status.last_transfer = os.time()
+        elseif kind == "squad" then status.last_squad = os.time() end
         log_monitor("Queued for bridge [" .. id .. "]: " .. tostring(log_label) .. "  (result is written to bridge_send_log.txt)")
     end, debug.traceback)
     if not ok then
@@ -2765,9 +2775,13 @@ local function read_loan_rows()
             if pl then
                 local r = pl:GetFirstRecord()
                 while r and r > 0 do
+                    local ended = nil
+                    pcall(function() ended = decode_fifa_date(pl:GetRecordFieldValue(r, "loandateend")) end)
                     rows[#rows + 1] = {
                         pid = tonumber(pl:GetRecordFieldValue(r, "playerid")) or 0,
-                        from = tonumber(pl:GetRecordFieldValue(r, "teamidloanedfrom")) or 0
+                        from = tonumber(pl:GetRecordFieldValue(r, "teamidloanedfrom")) or 0,
+                        ends = ended,
+                        to_buy = (tonumber(pl:GetRecordFieldValue(r, "isloantobuy")) or 0) == 1
                     }
                     r = pl:GetNextValidRecord()
                 end
@@ -2782,7 +2796,9 @@ local function read_loan_rows()
                     for _, r in ipairs(raw) do
                         rows[#rows + 1] = {
                             pid = tonumber(r.playerid and r.playerid.value or r.playerid) or 0,
-                            from = tonumber(r.teamidloanedfrom and r.teamidloanedfrom.value or r.teamidloanedfrom) or 0
+                            from = tonumber(r.teamidloanedfrom and r.teamidloanedfrom.value or r.teamidloanedfrom) or 0,
+                            ends = decode_fifa_date(r.loandateend and r.loandateend.value or r.loandateend),
+                            to_buy = (tonumber(r.isloantobuy and r.isloantobuy.value or r.isloantobuy) or 0) == 1
                         }
                     end
                 end
@@ -3243,6 +3259,7 @@ local function emit_transfer(key, data, force_sync)
     if force_sync or not _G["FC26_BEAMED_TRANSFERS"][key] then
         mark_beamed(key)
         beam_transfer_to_bridge(data)
+        status.squad_dirty = true -- a signing or a sale changes who has which contract
         return true
     end
     return false
@@ -3731,7 +3748,7 @@ local function run_snapshot()
         if not ok then log_monitor("FC26_Snapshot.lua error: " .. tostring(err)) end
         return ok
     end
-    log_monitor("FC26_Snapshot.lua not found - snapshot skipped")
+    log_monitor("FC26_Snapshot.lua not found - snapshot skipped (FC26_AutoCapture_v1.1.1.lua publishes the snapshot by itself)")
     return false
 end
 
@@ -3848,16 +3865,16 @@ local function service_pending_matches()
     state.pre_match_cpi = get_player_info_snapshot(state.managed_team_id)
 end
 
--- Force sync function: Immediately beams the latest completed match
-function FC26_AutoCapture_SyncLatest()
+-- Sends the latest completed match again. Returns "sent" and a short description, or "nothing" and the reason.
+-- Used by FC26_AutoCapture_SyncLatest() and by the phone's "Re-send last match" button.
+local function resend_latest_match()
     local current_fixtures = get_all_managed_fixtures(state.managed_team_id)
     local latest_idx = nil
     for idx, f in ipairs(current_fixtures) do
         if f.completed then latest_idx = idx end
     end
     if not latest_idx then
-        print("[FC26 AutoCapture] No completed matches found to sync.")
-        return
+        return "nothing", "No completed match found in this career yet"
     end
 
     local latest = current_fixtures[latest_idx]
@@ -3870,9 +3887,21 @@ function FC26_AutoCapture_SyncLatest()
     beam_match_to_bridge(latest, state.managed_team_id, state.pre_match_cpi, atlas_path)
     _G["FC26_BEAMED_FIXTURE_KEYS"][fixture_key(latest)] = true
     state.completed_ids[fixture_key(latest)] = true
-    print(string.format("[FC26 AutoCapture] Force Synced Latest Match: %s vs %d-%d %s (%s - %s)%s",
-        latest.user_team_name, latest.goals_for, latest.goals_against, latest.opponent_name,
-        latest.competition, latest.stage, atlas_name and " [with Atlas stats]" or " [no Atlas export found]"))
+    local text = string.format("%s %d-%d %s (%s - %s)%s",
+        tostring(latest.user_team_name), to_int(latest.goals_for), to_int(latest.goals_against),
+        tostring(latest.opponent_name), tostring(latest.competition), tostring(latest.stage),
+        atlas_name and " [with Atlas stats]" or " [no Atlas export found]")
+    return "sent", text
+end
+
+-- Force sync function: Immediately beams the latest completed match
+function FC26_AutoCapture_SyncLatest()
+    local result, text = resend_latest_match()
+    if result == "sent" then
+        print("[FC26 AutoCapture] Force Synced Latest Match: " .. text)
+    else
+        print("[FC26 AutoCapture] " .. text .. " - nothing to sync.")
+    end
 end
 
 FC26_AutoCapture_SyncNow = FC26_AutoCapture_SyncLatest
@@ -3936,6 +3965,250 @@ function FC26_AutoCapture_Status()
     end
 end
 
+-- ---------------------------------------------------------------------------
+-- Health report, squad contracts and "re-send the last match"
+-- ---------------------------------------------------------------------------
+-- BEGIN squad_status (this exact block is also run by tests/lua/test_transfer_logic.lua)
+local SCRIPT_PROTOCOL = 2
+
+-- FC 26 contracts run to the end of June of players.contractvaliduntil. Checked against the game's own squad screen:
+-- in August 2028 a player with contractvaliduntil 2031 shows "2y 10m". Anything that is not a plausible year is unknown.
+local function contract_end_iso(valid_until)
+    local year = math.floor(tonumber(valid_until) or 0)
+    if year < 2000 or year > 2100 then return nil end
+    return string.format("%04d-06-30", year)
+end
+
+-- row: { pid =, name =, contract_year =, loan = { dir = "in"|"out", club =, ends = "yyyy-mm-dd" | nil, to_buy = bool } | nil }
+local function squad_row_json(row)
+    local parts = {
+        '"name": "' .. jstr(row.name) .. '"',
+        string.format('"pid": %d', math.floor(tonumber(row.pid) or 0))
+    }
+    local contract_end = contract_end_iso(row.contract_year)
+    if contract_end then parts[#parts + 1] = '"contractEnd": "' .. contract_end .. '"' end
+    if row.loan then
+        local loan = {
+            '"dir": "' .. jstr(row.loan.dir) .. '"',
+            '"club": "' .. jstr(row.loan.club or "") .. '"'
+        }
+        if tostring(row.loan.ends or ""):match("^%d%d%d%d%-%d%d%-%d%d$") then
+            loan[#loan + 1] = '"end": "' .. row.loan.ends .. '"'
+        end
+        if row.loan.to_buy then loan[#loan + 1] = '"toBuy": true' end
+        parts[#parts + 1] = '"loan": {' .. table.concat(loan, ", ") .. '}'
+    end
+    return "{" .. table.concat(parts, ", ") .. "}"
+end
+
+-- The payload the app reads: dataType "squad". Rows are sorted so the same squad always gives the same text.
+local function squad_payload(rows, career_date)
+    local sorted = {}
+    for _, row in ipairs(rows) do sorted[#sorted + 1] = row end
+    table.sort(sorted, function(a, b)
+        if (a.name or "") ~= (b.name or "") then return (a.name or "") < (b.name or "") end
+        return (a.pid or 0) < (b.pid or 0)
+    end)
+    local items = {}
+    for _, row in ipairs(sorted) do items[#items + 1] = "    " .. squad_row_json(row) end
+    return table.concat({
+        "{",
+        '  "dataType": "squad",',
+        '  "title": "Squad contracts",',
+        '  "message": "Contracts and loans of ' .. tostring(#sorted) .. ' players",',
+        '  "careerDate": "' .. jstr(career_date or "") .. '",',
+        '  "players": [',
+        table.concat(items, ",\n"),
+        "  ]",
+        "}"
+    }, "\n")
+end
+
+-- Only a change in what is reported is worth sending again.
+local function squad_signature(rows)
+    local keys = {}
+    for _, row in ipairs(rows) do keys[#keys + 1] = squad_row_json(row) end
+    table.sort(keys)
+    return table.concat(keys, "|")
+end
+
+-- script_status.json: what the bridge and the app show as "Capture script". Numbers only where there is a value.
+local function status_json(s, now)
+    local function num(v) return string.format("%d", math.floor(tonumber(v) or 0)) end
+    local parts = {
+        '"app": "fc26-capture"',
+        '"version": "' .. jstr(s.version) .. '"',
+        '"protocol": ' .. num(SCRIPT_PROTOCOL),
+        '"time": ' .. num(now),
+        '"started": ' .. num(s.started),
+        '"exporter": ' .. tostring(s.exporter == true),
+        '"club": "' .. jstr(s.club or "") .. '"',
+        '"careerDate": "' .. jstr(s.career_date or "") .. '"',
+        '"scans": ' .. num(s.scans),
+        '"lastMatch": ' .. num(s.last_match),
+        '"lastTransfer": ' .. num(s.last_transfer),
+        '"lastSquad": ' .. num(s.last_squad),
+        '"pendingMatches": ' .. num(s.pending_matches),
+        '"undelivered": ' .. num(s.undelivered)
+    }
+    if s.resend then
+        parts[#parts + 1] = '"resend": {"id": "' .. jstr(s.resend.id) .. '", "time": ' .. num(s.resend.time) ..
+            ', "result": "' .. jstr(s.resend.result) .. '", "detail": "' .. jstr(s.resend.detail) .. '"}'
+    end
+    return "{\n  " .. table.concat(parts, ",\n  ") .. "\n}\n"
+end
+
+-- resend_request.json is written by the bridge: { "id": "...", "time": ... }. Returns the id (never empty).
+local function parse_resend_request(text)
+    local id = tostring(text or ""):match('"id"%s*:%s*"([^"]*)"')
+    if id == nil or id == "" then id = "manual" end
+    return id:sub(1, 64)
+end
+-- END squad_status
+
+local STATUS_FILE = COMMUNITY_ROOT .. "/script_status.json"
+local RESEND_FILE = COMMUNITY_ROOT .. "/resend_request.json"
+local STATUS_WRITE_SECONDS = 5
+local SQUAD_FIRST_CHECK_SECONDS = 20     -- the start-up scans come first
+local SQUAD_CHECK_SECONDS = 600
+local squad_scan = { started = os.time(), last_check = 0, signature = nil }
+
+local function write_script_status(force)
+    local now = os.time()
+    if not force and now - status.written < STATUS_WRITE_SECONDS then return end
+    status.written = now
+    local pending_out = 0
+    for json_path in pairs(outbox_pending) do
+        if file_exists(json_path) then pending_out = pending_out + 1 end
+    end
+    local _, career_date = pcall(function() return (get_current_career_date()) end)
+    local text = status_json({
+        version = VERSION,
+        started = status.started,
+        exporter = atlas_exporter_active(),
+        club = state and state.managed_team_name or "",
+        career_date = type(career_date) == "string" and career_date or "",
+        scans = status.scans,
+        last_match = status.last_match,
+        last_transfer = status.last_transfer,
+        last_squad = status.last_squad,
+        pending_matches = state and state.pending_matches and #state.pending_matches or 0,
+        undelivered = pending_out,
+        resend = status.resend
+    }, now)
+    local f = io.open(STATUS_FILE, "wb")
+    if f then
+        f:write(text)
+        f:close()
+    end
+end
+
+-- The phone's "Re-send last match" button reaches the bridge, which leaves resend_request.json here.
+local function service_resend_request()
+    local f = io.open(RESEND_FILE, "rb")
+    if not f then return end
+    local text = f:read("*a") or ""
+    f:close()
+    pcall(os.remove, RESEND_FILE)
+    local id = parse_resend_request(text)
+    log_monitor("Re-send of the latest match requested from the app [" .. id .. "]")
+    local ok, result, detail = pcall(resend_latest_match)
+    if ok then
+        status.resend = { id = id, time = os.time(), result = result, detail = tostring(detail or "") }
+    else
+        status.resend = { id = id, time = os.time(), result = "error", detail = tostring(result):sub(1, 200) }
+        log_monitor("Re-send failed: " .. tostring(result))
+    end
+    write_script_status(true)
+end
+
+-- Contract end (players.contractvaliduntil) of the wanted players: pid -> year.
+local function read_contract_years(wanted)
+    local years = {}
+    pcall(function()
+        if LE and LE.db then
+            local pt = LE.db:GetTable("players")
+            if pt then
+                local r = pt:GetFirstRecord()
+                while r and r > 0 do
+                    local pid = tonumber(pt:GetRecordFieldValue(r, "playerid")) or 0
+                    if pid > 0 and wanted[pid] then
+                        years[pid] = tonumber(pt:GetRecordFieldValue(r, "contractvaliduntil")) or 0
+                    end
+                    r = pt:GetNextValidRecord()
+                end
+            end
+        end
+    end)
+    if next(years) == nil then
+        pcall(function()
+            if type(GetDBTableRows) == "function" then
+                local rows = GetDBTableRows("players")
+                if type(rows) == "table" then
+                    for _, r in ipairs(rows) do
+                        local pid = tonumber(r.playerid and r.playerid.value or r.playerid) or 0
+                        if pid > 0 and wanted[pid] then
+                            years[pid] = tonumber(r.contractvaliduntil and r.contractvaliduntil.value or r.contractvaliduntil) or 0
+                        end
+                    end
+                end
+            end
+        end)
+    end
+    return years
+end
+
+local function collect_squad_rows(managed_tid)
+    local squad, _, club_links = get_managed_squad_state(managed_tid)
+    local loan_rows = read_loan_rows()
+    local loans_in, loans_out = classify_loans(loan_rows, managed_tid, squad, club_links)
+    local loan_info = {}
+    for _, row in ipairs(loan_rows) do
+        if row.pid and row.pid > 0 then loan_info[row.pid] = row end
+    end
+    local wanted = {}
+    for pid in pairs(squad) do wanted[pid] = true end
+    for pid in pairs(loans_out) do wanted[pid] = true end
+    local years = read_contract_years(wanted)
+
+    local rows = {}
+    for pid in pairs(wanted) do
+        local name = safe_player_name(pid)
+        if not is_unnamed_player(name) then
+            local loan = nil
+            local info = loan_info[pid] or {}
+            if loans_in[pid] then
+                loan = { dir = "in", club = safe_team_name(loans_in[pid]), ends = info.ends, to_buy = info.to_buy }
+            elseif loans_out[pid] then
+                local dest = loans_out[pid]
+                loan = { dir = "out", club = dest > 0 and safe_team_name(dest) or "", ends = info.ends, to_buy = info.to_buy }
+            end
+            rows[#rows + 1] = { pid = pid, name = name, contract_year = years[pid], loan = loan }
+        end
+    end
+    return rows
+end
+
+-- Sends the squad's contract and loan end dates when they changed (and once after the script starts).
+local function check_squad_contracts()
+    if not state or not state.active then return end
+    if _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] ~= SCRIPT_INSTANCE then return end
+    local now = os.time()
+    if now - squad_scan.started < SQUAD_FIRST_CHECK_SECONDS then return end
+    if not status.squad_dirty and now - squad_scan.last_check < SQUAD_CHECK_SECONDS then return end
+    squad_scan.last_check = now
+    status.squad_dirty = false
+
+    local rows = collect_squad_rows(state.managed_team_id)
+    if #rows == 0 then return end
+    local signature = squad_signature(rows)
+    if signature == squad_scan.signature then return end
+    squad_scan.signature = signature
+    local _, career_date = pcall(function() return (get_current_career_date()) end)
+    send_payload_to_bridge(squad_payload(rows, type(career_date) == "string" and career_date or ""),
+        "Squad contracts (" .. #rows .. " players)")
+end
+
 -- Run a periodic job; an error is logged (once a minute at most) instead of silently swallowed.
 local last_error_log = {}
 local function guarded(name, fn)
@@ -3950,10 +4223,14 @@ local function guarded(name, fn)
 end
 
 local function tick()
+    status.scans = status.scans + 1
     guarded("match detection", check_for_new_completed_match)
     guarded("pending matches", service_pending_matches)
     guarded("transfer scan", function() check_for_squad_transfers(false) end)
     guarded("outbox", service_outbox)
+    guarded("re-send request", service_resend_request)
+    guarded("squad contracts", check_squad_contracts)
+    guarded("status report", write_script_status)
 end
 
 -- Background Polling Timer (every 2 seconds, independent of the event listener)
@@ -3988,6 +4265,7 @@ pcall(function()
     end)
 end)
 
+pcall(write_script_status, true)
 log_monitor(string.format("Monitoring armed for %s (ID: %d). Completed matches baseline: %d. Instance: %s",
     state.managed_team_name, state.managed_team_id, state.last_count, SCRIPT_INSTANCE))
 
@@ -4008,6 +4286,7 @@ else
     print("   Run FC26_AutoCapture_v1.1.1.lua yourself first, then run FC26_Auto_Capture.lua again (see auto_capture_monitor.log).")
 end
 print(" Delivery log: Documents\\FC26 Export\\bridge_send_log.txt (undelivered items are retried).")
+print(" Health report: Documents\\FC26 Export\\script_status.json (the bridge page and the app show it).")
 print(" Background timer active (2s loop). Event listeners hooked.")
 print(" Safe Startup: No old matches beamed on launch.")
 print(" Commands:")
