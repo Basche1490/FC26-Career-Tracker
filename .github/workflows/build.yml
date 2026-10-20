@@ -69,17 +69,23 @@ jobs:
         run: |
           python3 - <<'PY'
           import os, zipfile
-          files = ["FC26_Launcher.bat", "docs/PC_SETUP.md"]
+          files = ["FC26_Launcher.bat", "docs/PC_SETUP.md", "docs/SECURITY.md"]
           for folder in ("pc-bridge", "live-editor-scripts"):
               for base, dirs, names in os.walk(folder):
                   dirs[:] = [d for d in dirs if d != "__pycache__"]
                   files += [os.path.join(base, n).replace(os.sep, "/") for n in names if not n.endswith((".pyc", ".json", ".log"))]
           with zipfile.ZipFile("FC26-PC-Tools.zip", "w", zipfile.ZIP_DEFLATED) as z:
               for f in sorted(files):
-                  z.write(f, f if f != "docs/PC_SETUP.md" else "PC_SETUP.md")
+                  z.write(f, f[len("docs/"):] if f.startswith("docs/") else f)
           print(len(files), "files in FC26-PC-Tools.zip")
           PY
           unzip -l FC26-PC-Tools.zip
+
+      # The SHA-256 of both downloads, so a download can be checked (docs/SECURITY.md, "Checking the downloads").
+      - name: Checksums
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk FC26-Career-Tracker.apk
+          sha256sum FC26-Career-Tracker.apk FC26-PC-Tools.zip | tee SHA256SUMS.txt
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -88,6 +94,7 @@ jobs:
           path: |
             app/build/outputs/apk/release/*.apk
             FC26-PC-Tools.zip
+            SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Publish "Latest build" release
@@ -95,11 +102,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/release/app-release.apk FC26-Career-Tracker.apk
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest FC26-Career-Tracker.apk FC26-PC-Tools.zip \
+          sums="$(sed 's/^/    /' SHA256SUMS.txt)"
+          printf '%s\n\n%s\n\n%s\n' \
+            "Automatic build of commit ${GITHUB_SHA::7} (build #${GITHUB_RUN_NUMBER}). FC26-Career-Tracker.apk is the phone app: install it over the previous version, your data is kept. FC26-PC-Tools.zip is the PC side: unzip it and double-click FC26_Launcher.bat." \
+            "SHA-256 (check with: Get-FileHash .\\FC26-PC-Tools.zip -Algorithm SHA256):" \
+            "$sums" > notes.md
+          gh release create latest FC26-Career-Tracker.apk FC26-PC-Tools.zip SHA256SUMS.txt \
             --title "Latest build" \
-            --notes "Automatic build of commit ${GITHUB_SHA::7} (build #${GITHUB_RUN_NUMBER}). FC26-Career-Tracker.apk is the phone app: install it over the previous version, your data is kept. FC26-PC-Tools.zip is the PC side: unzip it and double-click FC26_Launcher.bat." \
+            --notes-file notes.md \
             --prerelease --target "$GITHUB_SHA"
 
   # The Live Editor scripts cannot be run without the game, but their logic is checked here against a pretend
@@ -126,12 +137,14 @@ jobs:
           python3 tests/bridge/test_outbox_watch.py
           python3 tests/bridge/test_match_log.py
           python3 tests/bridge/test_bridge_status.py
+          python3 tests/bridge/test_bridge_auth.py
       - name: PowerShell bridge checks
         run: |
           pwsh -Version
           python3 tests/bridge/test_powershell_importer.py
           python3 tests/bridge/test_powershell_status.py
           python3 tests/bridge/test_powershell_http.py
+          python3 tests/bridge/test_powershell_auth.py
       # The launcher is a batch file with a PowerShell program inside. Its functions run on pretend folder layouts
       # (Live Editor and the bridge in different places, several Live Editors, old scripts, a bridge already running),
       # and the whole launcher runs once against the real bridge.

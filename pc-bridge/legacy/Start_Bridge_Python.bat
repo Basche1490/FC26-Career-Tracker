@@ -1,34 +1,14 @@
 @echo off
-title EA FC Live Telemetry Bridge (Python Engine)
-cd /d "%~dp0.."
-
-echo ===================================================
-echo  Starting EA FC Telemetry Bridge (Python Engine)
-echo  Runs pure sockets - Zero HTTP.SYS / Zero 503 errors!
-echo ===================================================
-echo.
-
-where python >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    where py >nul 2>&1
-    if %ERRORLEVEL% NEQ 0 (
-        echo [!] Python was not found in your system PATH.
-        echo     Please use FC26_Launcher.bat in the main folder instead,
-        echo     or install Python from https://www.python.org/
-        echo.
-        pause
-        exit /b 1
-    ) else (
-        echo Found Python launcher (py)...
-        py "%~dp0..\telemetry_bridge.py"
-        pause
-        exit /b
-    )
+rem Older starter, kept so that an old shortcut still works. It now runs FC26_Launcher.bat, which sets everything up
+rem the safe way: firewall rule for home networks only, port permission for your Windows user only, the bridge without
+rem administrator rights and without a window, and the pairing code your phone needs.
+title EA FC Live Telemetry Bridge (older starter)
+set "FC26_LAUNCHER_FILE=%~dp0..\..\FC26_Launcher.bat"
+if exist "%FC26_LAUNCHER_FILE%" (
+  call "%FC26_LAUNCHER_FILE%" %*
+  exit /b %ERRORLEVEL%
 )
-
-python "%~dp0..\telemetry_bridge.py"
-if %ERRORLEVEL% NEQ 0 (
-    echo.
-    echo Bridge stopped with error.
-    pause
-)
+echo FC26_Launcher.bat was not found next to the pc-bridge folder.
+echo Unzip FC26-PC-Tools.zip again and double-click FC26_Launcher.bat in its main folder.
+pause
+exit /b 1

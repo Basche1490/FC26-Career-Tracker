@@ -139,7 +139,7 @@ fun SetupGuideScreen(viewModel: MainViewModel, onClose: () -> Unit) {
     val status = contact.status
     val script = status?.script
     val pcDone = launcherStarted || contact.reachable
-    val phoneDone = contact.reachable
+    val phoneDone = contact.reachable && contact.failKind !in com.fctracker.career.telemetry.PAIRING_PROBLEMS
     val scriptDone = script != null && script.found && script.alive && script.versionOk
     val matchDone = scriptDone && status != null && status.lastMatch > 0
     val done = listOf(pcDone, phoneDone, scriptDone, matchDone)
@@ -219,11 +219,14 @@ fun SetupGuideScreen(viewModel: MainViewModel, onClose: () -> Unit) {
             }
 
             item {
-                GuideStep(2, "Connect this phone", modeOf(1), "Connected to ${contact.address}") {
-                    Body("Put the phone on the same Wi-Fi as the PC, then tap Find my PC.")
+                GuideStep(2, "Connect this phone", modeOf(1), "Connected and paired with ${contact.address}") {
+                    Body(
+                        "Put the phone on the same Wi-Fi as the PC, tap Find my PC, then type the pairing code the launcher " +
+                            "shows on the PC. Only a phone with that code can read anything from your PC."
+                    )
                     Spacer(Modifier.height(10.dp))
                     BridgeAddressPanel(viewModel, state.telemetryServerUrl)
-                    val step = health.steps.firstOrNull { it.id == "phone" }
+                    val step = health.steps.firstOrNull { (it.id == "phone" || it.id == "pairing") && it.state == StepState.FAIL }
                     if (step != null && step.state == StepState.FAIL && step.fix.isNotBlank()) {
                         Spacer(Modifier.height(8.dp))
                         FixBox(step.fix, stepColor(step.state))

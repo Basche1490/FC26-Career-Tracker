@@ -12,7 +12,7 @@ class BridgeHealthTest {
     // /status as the bridge (telemetry_bridge.py and bridge.ps1 give the same fields) answers it with the script running.
     private val running = """
         {"app":"fc26-bridge","now":1800000000,
-         "bridge":{"version":"2.0.0","protocol":2,"minScript":"2.8.0","kind":"python","name":"gaming-pc","port":5050,"address":"http://192.168.2.24:5050","started":1792459068},
+         "bridge":{"version":"3.0.0","protocol":3,"minScript":"2.8.0","kind":"python","name":"gaming-pc","port":5050,"address":"http://192.168.2.24:5050","started":1792459068},
          "script":{"found":true,"folder":"C:\\Users\\Joel\\Documents\\FC26 Export","version":"2.8.0","protocol":2,"time":1799999997,"ageSeconds":3,"alive":true,"versionOk":true,
                    "club":"Pumas","careerDate":"2026-08-09","exporter":true,"scans":12,"lastMatch":1799996400,"lastTransfer":0,"lastSquad":1799999500,
                    "pendingMatches":0,"undelivered":0,
@@ -27,7 +27,7 @@ class BridgeHealthTest {
 
     private val noScript = """
         {"app":"fc26-bridge","now":1800000000,
-         "bridge":{"version":"2.0.0","protocol":2,"minScript":"2.8.0","kind":"powershell","name":"gaming-pc","port":5050,"address":"http://192.168.2.24:5050","started":1},
+         "bridge":{"version":"3.0.0","protocol":3,"minScript":"2.8.0","kind":"powershell","name":"gaming-pc","port":5050,"address":"http://192.168.2.24:5050","started":1},
          "script":{"found":false},"outbox":{"pending":0,"bad":0,"oldestSeconds":0,"writable":true},
          "events":{"count":0,"lastMatch":0,"lastTransfer":0,"lastSquad":0},
          "phone":{"lastSeen":0,"ageSeconds":-1,"ip":""},"checks":[],"summary":"fail"}
@@ -49,8 +49,8 @@ class BridgeHealthTest {
     @Test
     fun parsesTheBridgesStatus() {
         val s = status(running)
-        assertEquals("2.0.0", s.bridgeVersion)
-        assertEquals(2, s.protocol)
+        assertEquals("3.0.0", s.bridgeVersion)
+        assertEquals(3, s.protocol)
         assertEquals("2.8.0", s.minScript)
         assertEquals("gaming-pc", s.name)
         assertTrue(s.script.found && s.script.alive && s.script.versionOk && s.script.exporter)
@@ -92,7 +92,7 @@ class BridgeHealthTest {
         assertEquals("Live", h.pill)
         assertTrue(h.steps.all { it.state == StepState.OK })
         assertTrue(h.detail, h.detail.contains("last match 60 min ago"))
-        assertEquals(listOf("phone", "bridge", "script", "stats"), h.steps.map { it.id })
+        assertEquals(listOf("phone", "pairing", "bridge", "script", "stats"), h.steps.map { it.id })
     }
 
     @Test
@@ -158,7 +158,7 @@ class BridgeHealthTest {
         assertEquals(StepState.UNKNOWN, step(noStatusPage, "script").state)
         assertTrue(noStatusPage.detail.contains("FC26_Launcher.bat"))
 
-        val protocol1 = running.replace("\"protocol\":2,\"minScript\"", "\"protocol\":1,\"minScript\"")
+        val protocol1 = running.replace("\"protocol\":3,\"minScript\"", "\"protocol\":2,\"minScript\"")
         val h = HealthModel.evaluate(contact(status(protocol1)))
         assertEquals(StepState.WARN, step(h, "bridge").state)
     }
@@ -171,5 +171,59 @@ class BridgeHealthTest {
         assertEquals("2 days", HealthModel.span(2 * 86400 + 5))
         assertEquals("0s", HealthModel.span(-4))
         assertNotNull(HealthModel.ago(4))
+    }
+
+    // ---- the pairing code ------------------------------------------------------------------------------------
+
+    @Test
+    fun aPairedPhoneShowsThePairingStepAsOk() {
+        val h = HealthModel.evaluate(contact(status(running)))
+        assertEquals(StepState.OK, step(h, "pairing").state)
+        assertEquals(Level.LIVE, h.level)
+    }
+
+    @Test
+    fun withoutACodeTheBridgeAndScriptCannotBeChecked() {
+        val h = HealthModel.evaluate(contact(kind = FailKind.UNPAIRED))
+        assertEquals(Level.DOWN, h.level)
+        assertEquals("Not paired", h.pill)
+        assertEquals(StepState.OK, step(h, "phone").state)                  // the PC answered the ping
+        assertEquals(StepState.FAIL, step(h, "pairing").state)
+        assertTrue(step(h, "pairing").fix, step(h, "pairing").fix.contains("localhost:5050"))
+        assertEquals(StepState.UNKNOWN, step(h, "bridge").state)
+        assertEquals(StepState.UNKNOWN, step(h, "script").state)
+        assertFalse(h.steps.any { it.id == "stats" })
+    }
+
+    @Test
+    fun eachPairingProblemHasItsOwnWords() {
+        val bad = HealthModel.evaluate(contact(kind = FailKind.BAD_CODE))
+        assertTrue(bad.headline, bad.headline.contains("did not accept"))
+        val locked = HealthModel.evaluate(contact(kind = FailKind.LOCKED))
+        assertTrue(step(locked, "pairing").detail.contains("wrong attempts"))
+        val old = HealthModel.evaluate(contact(kind = FailKind.OLD_BRIDGE))
+        assertEquals("Update PC", old.pill)
+        assertEquals(HealthModel.UPDATE_HINT, step(old, "pairing").fix)
+        val forged = HealthModel.evaluate(contact(kind = FailKind.UNTRUSTED))
+        assertTrue(step(forged, "pairing").detail.contains("ignored"))
+        assertTrue(step(forged, "pairing").fix.contains("Do not use this address"))
+    }
+
+    @Test
+    fun aClockProblemSaysWhichWayAndByHowMuch() {
+        val ahead = Contact("http://192.168.2.24:5050", true, true, FailKind.CLOCK, 401, null, false, clockOffsetSeconds = 1200)
+        assertEquals("The PC's clock is 20 min ahead of the phone's.", step(HealthModel.evaluate(ahead), "pairing").detail)
+        val behind = Contact("http://192.168.2.24:5050", true, true, FailKind.CLOCK, 401, null, false, clockOffsetSeconds = -7200)
+        assertEquals("The PC's clock is 2 h behind the phone's.", step(HealthModel.evaluate(behind), "pairing").detail)
+    }
+
+    @Test
+    fun pairingProblemsSlowThePollingDown() {
+        for (kind in listOf(FailKind.UNPAIRED, FailKind.BAD_CODE, FailKind.CLOCK, FailKind.LOCKED, FailKind.OLD_BRIDGE, FailKind.UNTRUSTED)) {
+            assertTrue(kind.name, kind in PAIRING_PROBLEMS)
+        }
+        for (kind in listOf(FailKind.NONE, FailKind.REFUSED, FailKind.TIMEOUT, FailKind.NO_ROUTE, FailKind.HTTP, FailKind.OTHER)) {
+            assertFalse(kind.name, kind in PAIRING_PROBLEMS)
+        }
     }
 }

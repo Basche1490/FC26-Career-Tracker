@@ -12,7 +12,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Stores small secrets (the AI API key) encrypted with a key that lives in the Android Keystore, so the
+ * Stores small secrets (the AI API key, the PC bridge's pairing code) encrypted with a key that lives in the Android Keystore, so the
  * value is never written to disk, backups or exports in readable form.
  *
  * If the device cannot provide a Keystore key, [get] returns "" and [put] does nothing; the app keeps working
@@ -67,6 +67,7 @@ class SecretStore(context: Context) : Secrets {
 
     companion object {
         const val AI_API_KEY = "ai_api_key"
+        const val BRIDGE_CODE = "bridge_pairing_code"
         private const val PREFS = "fc_secrets"
         private const val ALIAS = "fc_tracker_secrets_v1"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"

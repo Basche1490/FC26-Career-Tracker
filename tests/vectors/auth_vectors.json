@@ -1,0 +1,52 @@
+{
+  "_comment": "Shared by the Python, PowerShell and Kotlin implementations (see docs/SECURITY.md). Do not change without changing all three.",
+  "code": "ABCD-EFGH-JKLM-NPQR",
+  "normalizedCode": "ABCDEFGHJKLMNPQR",
+  "keyHex": "6032136b87342f87de8510ebc86d8f1c75b7368ae12cea8f325e5bff6cff4af8",
+  "requests": [
+    {
+      "method": "GET",
+      "target": "/events",
+      "time": 1800000000,
+      "nonce": "00112233445566778899aabbccddeeff",
+      "body": "",
+      "sig": "90ace0b76324021aa141b43c29875ef665463f97e1cf576e47c0aa4a09ba0fe0"
+    },
+    {
+      "method": "POST",
+      "target": "/resend",
+      "time": 1800000123,
+      "nonce": "ffeeddccbbaa99887766554433221100",
+      "body": "",
+      "sig": "104177cd5c25ff82170df68bd13f6c48edda4cd2fc1c002734ceb90300bd5581"
+    },
+    {
+      "method": "POST",
+      "target": "/resend",
+      "time": 1800000123,
+      "nonce": "ffeeddccbbaa99887766554433221100",
+      "body": "{\"a\":1}",
+      "sig": "05e01dc433c9e9b4d054702a4537f0ce7bca1627505ceb773e670828cd0693ac"
+    }
+  ],
+  "responses": [
+    {
+      "nonce": "00112233445566778899aabbccddeeff",
+      "status": 200,
+      "body": "[]",
+      "sig": "67635238756838c231448bad6d351aa0b5f23ff8ca2c2f31377b4c586d622842"
+    },
+    {
+      "nonce": "00112233445566778899aabbccddeeff",
+      "status": 200,
+      "body": "{\"status\":\"requested\",\"id\":\"r1\"}",
+      "sig": "d9e8016114c08f37ed985ab9eafe1f4109cd1d0308d69f420630f469cd9d52b8"
+    },
+    {
+      "nonce": "00112233445566778899aabbccddeeff",
+      "status": 409,
+      "body": "{\"status\":\"error\"}",
+      "sig": "d91cc48526fd2f65c12e5484be94d0391825d273b4612bf93f5af5b83223b5da"
+    }
+  ]
+}

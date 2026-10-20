@@ -53,11 +53,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.fctracker.career.MainViewModel
+import com.fctracker.career.telemetry.BridgeAuth
 import com.fctracker.career.telemetry.BridgeCheck
 import com.fctracker.career.telemetry.BridgeClient
 import com.fctracker.career.telemetry.HealthStep
@@ -181,17 +183,21 @@ private fun CheckRow(check: BridgeCheck) {
 }
 
 private fun BridgeClient.Found.title(): String {
-    val name = status?.name.orEmpty().ifBlank { "Your PC" }
-    return name
+    val label = name.ifBlank { "Your PC" }
+    return if (old) "$label (old bridge: run FC26_Launcher.bat to update it)" else label
 }
 
 /**
- * The bridge address, "Find my PC" and "Save & connect". Used by the Connection screen and by the setup guide, so
- * there is one place (and one set of words) for the address.
+ * The bridge address, the pairing code, "Find my PC", "Save & connect" and "Forget this PC". Used by the Connection
+ * screen and by the setup guide, so there is one place (and one set of words) for both.
  */
 @Composable
 fun BridgeAddressPanel(viewModel: MainViewModel, savedAddress: String) {
+    val savedCode by viewModel.bridgeCode.collectAsState()
     var input by remember(savedAddress) { mutableStateOf(savedAddress) }
+    var codeInput by remember(savedCode) { mutableStateOf(BridgeAuth.format(savedCode)) }
+    val codeTyped = BridgeAuth.normalize(codeInput)
+    val codeOk = BridgeAuth.isValid(codeInput)
     var finding by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -205,6 +211,33 @@ fun BridgeAddressPanel(viewModel: MainViewModel, savedAddress: String) {
             placeholder = { Text("http://192.168.1.20:5050") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = codeInput,
+            onValueChange = { typed ->
+                // capitals, digits, dashes and spaces only; the same length as typed, so the cursor stays where it is
+                codeInput = typed.uppercase().filter { it in 'A'..'Z' || it in '0'..'9' || it == '-' || it == ' ' }.take(24)
+            },
+            label = { Text("Pairing code") },
+            placeholder = { Text("XXXX-XXXX-XXXX-XXXX") },
+            singleLine = true,
+            isError = codeTyped.length >= BridgeAuth.LENGTH && !codeOk,
+            supportingText = {
+                Text(
+                    when {
+                        codeTyped.isEmpty() -> "Shown in the launcher window on the PC and on the bridge page (http://localhost:5050 on the PC)."
+                        codeTyped.length < BridgeAuth.LENGTH -> "${codeTyped.length} of ${BridgeAuth.LENGTH} characters."
+                        codeTyped.length > BridgeAuth.LENGTH -> "Too long: a pairing code has ${BridgeAuth.LENGTH} characters."
+                        !codeOk -> "That is not a pairing code: it never contains I, O, 0 or 1."
+                        else -> "Only a phone with this code can read from your PC. Keep it to yourself."
+                    },
+                    fontSize = 11.sp
+                )
+            },
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Ascii, capitalization = KeyboardCapitalization.Characters, autoCorrectEnabled = false
+            ),
             modifier = Modifier.fillMaxWidth()
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -221,7 +254,8 @@ fun BridgeAddressPanel(viewModel: MainViewModel, savedAddress: String) {
                                 val only = result.found[0]
                                 input = only.base
                                 viewModel.saveBridgeAddress(only.base)
-                                message = "Found ${only.title()} at ${only.base} and connected."
+                                message = if (savedCode.isBlank()) "Found ${only.title()} at ${only.base}. Now type the pairing code shown on the PC and tap Save & connect."
+                                else "Found ${only.title()} at ${only.base}."
                             }
                             else -> {
                                 options = result.found
@@ -243,7 +277,8 @@ fun BridgeAddressPanel(viewModel: MainViewModel, savedAddress: String) {
                 onClick = {
                     saving = true
                     message = null
-                    viewModel.saveBridgeAddress(input.trim()) { saving = false }
+                    viewModel.saveBridgeConnection(input.trim(), if (codeOk) codeTyped else savedCode) { saving = false }
+                    if (codeTyped.isNotEmpty() && !codeOk) message = "The pairing code is not complete, so the saved one is kept."
                 },
                 enabled = !saving && input.isNotBlank(),
                 modifier = Modifier.weight(1f)
@@ -260,6 +295,13 @@ fun BridgeAddressPanel(viewModel: MainViewModel, savedAddress: String) {
         val shown = message
         if (shown != null) {
             Text(shown, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (savedCode.isNotBlank()) {
+            TextButton(onClick = {
+                viewModel.forgetPc()
+                codeInput = ""
+                message = "This phone forgot the pairing code. It cannot read from the PC until a code is typed again."
+            }) { Text("Forget this PC", fontSize = 13.sp) }
         }
         options.forEach { option ->
             Row(

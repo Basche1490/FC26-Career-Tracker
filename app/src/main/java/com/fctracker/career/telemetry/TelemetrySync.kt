@@ -65,6 +65,18 @@ class TelemetrySync(
         publish(Contact(address = normalizeBridgeUrl(store.state.value.telemetryServerUrl), reachable = false, everConnected = false))
     }
 
+    /** The pairing code was typed, changed or forgotten: the next answer decides again. */
+    fun pairingChanged() = addressChanged()
+
+    private var authCache: Pair<String, BridgeAuth?> = "" to null
+
+    /** The signer for the stored pairing code, or null when none (or an invalid one) is stored. */
+    private fun auth(): BridgeAuth? {
+        val code = store.bridgeCode.value
+        if (authCache.first != code) authCache = code to BridgeAuth.fromCode(code)
+        return authCache.second
+    }
+
     fun acquire(holder: String) {
         synchronized(holders) {
             holders.add(holder)
@@ -91,26 +103,40 @@ class TelemetrySync(
             } catch (e: Exception) {
                 // poll() reports its own problems through the bridge status; keep looping
             }
-            delay(POLL_INTERVAL_MS)
+            // A missing or refused pairing code is not fixed by asking again in ten seconds (and asking a refused
+            // code again and again would get the phone locked out): ask once a minute until something changes.
+            delay(if (contactFlow.value.failKind in PAIRING_PROBLEMS) SLOW_POLL_INTERVAL_MS else POLL_INTERVAL_MS)
         }
     }
 
     // -- fetching ------------------------------------------------------------------------------------
 
-    /** Fetches the bridge's events once and applies them. Returns true when the bridge answered. */
+    /** Fetches the bridge's events once and applies them. Returns true when the bridge answered (signed). */
     suspend fun poll(notify: Boolean): Boolean = withContext(Dispatchers.IO) {
         val base = normalizeBridgeUrl(store.state.value.telemetryServerUrl)
         try {
-            val reply = BridgeClient.get("$base/events", 5000)
+            val auth = auth()
+            if (auth == null) {
+                // No code yet: nothing is asked of the bridge. The unsigned "is a bridge there?" ping still tells
+                // the person whether the address is right.
+                val found = BridgeClient.probe(base, 3000)
+                setStatus(if (found != null) "Enter the pairing code" else "Offline", null)
+                publish(
+                    Contact(base, reachable = found != null, everConnected = contactFlow.value.everConnected,
+                        failKind = if (found == null) FailKind.TIMEOUT else if (found.old) FailKind.OLD_BRIDGE else FailKind.UNPAIRED)
+                )
+                return@withContext false
+            }
+            val reply = BridgeClient.get("$base/events", 5000, auth)
             if (!reply.ok) {
-                if (reply.code != 0) setStatus("HTTP ${reply.code}", null) else setStatus("Offline: ${reply.message}", null)
+                setStatus(statusText(reply), null)
                 publish(unreachable(base, reply))
                 return@withContext false
             }
             val events = parseEvents(reply.body.trim())
             setStatus("Online (${events.size} events)", events.size)
             apply(events, notify)
-            refreshStatus(base)
+            refreshStatus(base, auth)
             true
         } catch (e: CancellationException) {
             throw e
@@ -124,28 +150,39 @@ class TelemetrySync(
         }
     }
 
-    private fun unreachable(base: String, reply: BridgeClient.HttpResult) = Contact(
-        address = base,
-        reachable = false,
-        everConnected = contactFlow.value.everConnected,
-        failKind = reply.failKind,
-        httpCode = reply.code
-    )
+    private fun statusText(reply: BridgeClient.HttpResult): String = when {
+        reply.failKind in PAIRING_PROBLEMS -> "Not paired: ${reply.message}"
+        reply.code != 0 -> "HTTP ${reply.code}"
+        else -> "Offline: ${reply.message}"
+    }
+
+    /** What a failed answer means. A bridge that refused the code (or whose answer was not signed) did answer. */
+    private fun unreachable(base: String, reply: BridgeClient.HttpResult): Contact {
+        val pairing = reply.failKind in PAIRING_PROBLEMS
+        return Contact(
+            address = base,
+            reachable = pairing,
+            everConnected = contactFlow.value.everConnected,
+            failKind = reply.failKind,
+            httpCode = reply.code,
+            clockOffsetSeconds = if (reply.bridgeTime > 0) reply.bridgeTime - System.currentTimeMillis() / 1000 else 0
+        )
+    }
 
     /** Asks the bridge for its health report and publishes it together with "the bridge answered". */
-    private fun refreshStatus(base: String) {
+    private fun refreshStatus(base: String, auth: BridgeAuth) {
         val now = System.currentTimeMillis()
         if (prefs != null && now - lastSavedContact > 60_000L) {
             lastSavedContact = now
             prefs.lastConnectedAt = now
         }
         val previous = contactFlow.value
-        val fetch = BridgeClient.fetchStatus(base)
+        val fetch = BridgeClient.fetchStatus(base, auth)
         val status: BridgeStatus?
         val missing: Boolean
         when {
             fetch.result.ok -> { status = fetch.status; missing = fetch.missing }
-            fetch.result.code == 404 -> { status = null; missing = true }
+            fetch.result.code == 404 && fetch.result.verified -> { status = null; missing = true }
             else -> { status = previous.status; missing = previous.statusMissing }   // a hiccup: keep the last report
         }
         publish(Contact(base, reachable = true, everConnected = true, status = status, statusMissing = missing))
@@ -156,18 +193,24 @@ class TelemetrySync(
     /** The "Test connection" button: like [poll] but with a detailed, human-readable answer. */
     suspend fun testConnection(): TestResult = withContext(Dispatchers.IO) {
         val base = normalizeBridgeUrl(store.state.value.telemetryServerUrl)
+        val auth = auth()
+        if (auth == null) {
+            poll(notify = false)
+            return@withContext TestResult(false, "❌ Enter the pairing code first. ${HealthModel.CODE_WHERE}")
+        }
         val started = System.currentTimeMillis()
-        val reply = BridgeClient.get("$base/events", 5000)
+        val reply = BridgeClient.get("$base/events", 5000, auth)
         val elapsed = System.currentTimeMillis() - started
         if (reply.ok) {
             val count = try { JSONArray(reply.body.trim()).length() } catch (e: Exception) { 0 }
             setStatus("Connected (${elapsed}ms, $count queued)", count)
             poll(notify = true)
-            return@withContext TestResult(true, "✅ Connected! (${elapsed}ms) - $count event(s) in queue.")
+            return@withContext TestResult(true, "✅ Connected and paired (${elapsed}ms) - $count event(s) in queue.")
         }
         publish(unreachable(base, reply))
         val port = base.substringAfterLast(":", "5050").substringBefore("/")
         val detail = when {
+            reply.failKind in PAIRING_PROBLEMS -> reply.message + " " + HealthModel.failureFix(reply.failKind, base)
             reply.code == 503 ->
                 "Bridge responded with HTTP 503 (Windows HTTP.sys queue unassigned). Run FC26_Launcher.bat again (it picks the right bridge for your PC)"
             reply.code != 0 -> "Bridge responded with HTTP ${reply.code}. Check PC bridge window."
@@ -192,11 +235,12 @@ class TelemetrySync(
      */
     suspend fun resendLatestMatch(): ActionResult = withContext(Dispatchers.IO) {
         val base = normalizeBridgeUrl(store.state.value.telemetryServerUrl)
-        val asked = BridgeClient.requestResend(base)
+        val auth = auth() ?: return@withContext ActionResult(false, "Enter the pairing code first (PC Connection). ${HealthModel.CODE_WHERE}")
+        val asked = BridgeClient.requestResend(base, auth)
         if (!asked.ok) return@withContext ActionResult(false, asked.message)
         for (attempt in 1..10) {
             delay(1500)
-            val fetch = BridgeClient.fetchStatus(base, 4000)
+            val fetch = BridgeClient.fetchStatus(base, auth, 4000)
             val answer = fetch.status?.script?.resend
             if (answer != null && answer.id == asked.id) {
                 poll(notify = true)   // the re-sent match arrives through the bridge: take it in right away
@@ -264,6 +308,7 @@ class TelemetrySync(
 
     companion object {
         const val POLL_INTERVAL_MS = 10_000L
+        const val SLOW_POLL_INTERVAL_MS = 60_000L
 
         /** What the bridge sends: normally a JSON array, but one JSON object per line is accepted too. */
         fun parseEvents(body: String): List<JSONObject> {

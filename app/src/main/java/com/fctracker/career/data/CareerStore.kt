@@ -39,6 +39,9 @@ class CareerStore(
     /** The AI API key. Kept apart from [state] so it never lands in save files or exported backups. */
     val aiApiKey = MutableStateFlow("")
 
+    /** The PC bridge's pairing code (normalised), kept encrypted by [SecretStore]. Never part of a backup or export. */
+    val bridgeCode = MutableStateFlow("")
+
     val saveSlots: MutableMap<Int, AppState> = ConcurrentHashMap()
     val saveSlotNames = mutableStateMapOf<Int, String>()
     val savedNotes = mutableStateListOf<Note>()
@@ -76,6 +79,7 @@ class CareerStore(
             state.value = it.copy(bridgeConnectionStatus = "Not Checked", bridgeEventCount = 0)
         }
         aiApiKey.value = secrets.get(SecretStore.AI_API_KEY)
+        bridgeCode.value = secrets.get(SecretStore.BRIDGE_CODE)
     }
 
     @OptIn(FlowPreview::class)
@@ -141,6 +145,13 @@ class CareerStore(
     fun setAiApiKey(key: String) {
         aiApiKey.value = key
         secrets.put(SecretStore.AI_API_KEY, key)
+    }
+
+    /** Stores the pairing code ("" forgets it). Only the letters and digits are kept: "abcd-efgh..." = "ABCDEFGH...". */
+    fun setBridgeCode(code: String) {
+        val normalized = com.fctracker.career.telemetry.BridgeAuth.normalize(code)
+        bridgeCode.value = normalized
+        secrets.put(SecretStore.BRIDGE_CODE, normalized)
     }
 
     // -- writing -------------------------------------------------------------------------------------

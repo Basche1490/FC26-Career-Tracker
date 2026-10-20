@@ -5,8 +5,8 @@ param(
 
 $ErrorActionPreference = "Continue"
 $EventsFile = Join-Path $PSScriptRoot "telemetry_events.json"
-$BridgeVersion = "2.0.0"
-$BridgeProtocol = 2             # what the phone app, this bridge and the Live Editor script have to agree on
+$BridgeVersion = "3.0.0"
+$BridgeProtocol = 3             # 3 = the phone must prove it knows the pairing code (docs/SECURITY.md)
 $MinScriptVersion = "2.8.0"     # older capture scripts do not report their health or answer a re-send request
 $ScriptAliveSeconds = 20        # the script writes its heartbeat every 5 seconds
 $PhoneAliveSeconds = 30         # the app asks the bridge for news every 10 seconds
@@ -14,6 +14,8 @@ $ResendMinSeconds = 10          # at most one "re-send the last match" request p
 $StartedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 $global:PhoneSeen = @{ Time = [long]0; Ip = "" }
 $global:ResendLast = [long]0
+$global:AuthStats = @{ Rejected = 0; Time = [long]0; Ip = ""; Code = "" }
+$global:AuthLogged = @{}
 
 Write-Host "===================================================" -ForegroundColor Cyan
 Write-Host " EA SPORTS FC TELEMETRY BRIDGE $BridgeVersion (Native PowerShell)" -ForegroundColor Yellow
@@ -410,45 +412,281 @@ function Create-SampleTransferJson {
 }
 
 # =========================================================================
-# ACCESS CONTROL
-# The phone only READS (GET /events). Everything that writes - the Lua scripts,
-# the test buttons and /clear - runs on this same PC. So reads are open to the
-# local network, but writes are only accepted from the PC itself.
-# Host / Origin checks keep web pages open in a browser from reaching the bridge.
+# ACCESS CONTROL (protocol 3, written up in docs/SECURITY.md)
+#  * This PC's own browser (loopback address, host name localhost / 127.0.0.1, no proxy headers) may open the
+#    dashboard and press its buttons. That is the only unsigned access to anything.
+#  * The phone may do exactly three things: GET /events, GET /status and POST /resend. Each has to carry a signature
+#    made with the pairing code (HMAC-SHA256 over method, path, time, a one-time number and the body), and the bridge
+#    signs its answer the same way so the phone knows the answer comes from this bridge.
+#  * Everybody else gets the one-line GET /ping answer and nothing more.
+#  * Host / Origin checks keep web pages open in a browser from reaching the bridge.
 # =========================================================================
 $MaxBodyBytes = 5MB
 $PcName = "$env:COMPUTERNAME".ToLower()
+$PairAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"    # no I, O, 0 or 1: nothing to mix up when typing
+$PairLength = 16                                       # 16 x 5 bits = 80 bits of randomness
+$KeyLabel = "fc26-bridge-v1:"
+$AuthWindowSeconds = 300                               # how far the phone's clock may differ from this PC's
+$AuthMaxFails = 10                                     # wrong signatures from one address ...
+$AuthFailWindowSeconds = 60                            # ... within this time ...
+$AuthLockoutSeconds = 60                               # ... and that address is refused for this long
+$AuthMaxNonces = 20000
+$PhoneRoutes = @("GET /events", "GET /json", "GET /api/telemetry", "GET /status", "GET /api/status", "POST /resend")
+$LocalHostNames = @("localhost", "127.0.0.1", "::1")
+$ProxyHeaders = @("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Forwarded", "Via",
+                  "CF-Connecting-IP", "True-Client-IP", "X-Client-IP")
+$global:PairCache = @{ Stamp = ""; Code = ""; Key = $null }
+$global:AuthNonces = @{}      # one-time number -> when it may be forgotten
+$global:AuthFails = @{}       # address -> times of recent wrong signatures
+$global:AuthLocked = @{}      # address -> refused until
+$global:SignWith = $null      # @{ Key; Nonce } once the phone's request has been checked: the answer is signed too
 
-function Test-LocalClient {
+# ---- the pairing code ----
+function Get-StateDir {
+    # %APPDATA%\FC26Tracker: where the launcher keeps its notes and the bridge keeps the pairing code.
+    if ($env:FC26_STATE_DIR) { return $env:FC26_STATE_DIR }
+    $base = $env:APPDATA
+    if (-not $base) { $base = Join-Path $HOME ".config" }
+    return (Join-Path $base "FC26Tracker")
+}
+
+function Get-PairingFile { return (Join-Path (Get-StateDir) "bridge.key") }
+
+function ConvertTo-PairCode {
+    param([string]$Text)
+    return ([regex]::Replace([string]$Text, "[^A-Za-z0-9]", "")).ToUpperInvariant()
+}
+
+function Test-PairCode {
+    param([string]$Text)
+    $c = ConvertTo-PairCode $Text
+    if ($c.Length -ne $PairLength) { return $false }
+    foreach ($ch in $c.ToCharArray()) { if ($PairAlphabet.IndexOf($ch) -lt 0) { return $false } }
+    return $true
+}
+
+function Format-PairCode {
+    param([string]$Text)
+    $c = ConvertTo-PairCode $Text
+    $parts = @()
+    for ($i = 0; $i -lt $c.Length; $i += 4) { $parts += $c.Substring($i, [Math]::Min(4, $c.Length - $i)) }
+    return ($parts -join "-")
+}
+
+function New-PairCode {
+    $bytes = New-Object byte[] $PairLength
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($b in $bytes) { [void]$sb.Append($PairAlphabet[[int]$b % 32]) }   # 256 is a multiple of 32: no bias
+    return $sb.ToString()
+}
+
+function ConvertTo-HexText {
+    param([byte[]]$Bytes)
+    return ([BitConverter]::ToString($Bytes).Replace("-", "")).ToLowerInvariant()
+}
+
+function Get-Sha256Hex {
+    param([byte[]]$Data)
+    if ($null -eq $Data) { $Data = New-Object byte[] 0 }
+    $h = [System.Security.Cryptography.SHA256]::Create()
+    try { return (ConvertTo-HexText $h.ComputeHash($Data)) } finally { $h.Dispose() }
+}
+
+function Get-KeyFromCode {
+    param([string]$Code)
+    $h = [System.Security.Cryptography.SHA256]::Create()
+    try { return ,$h.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($KeyLabel + (ConvertTo-PairCode $Code))) } finally { $h.Dispose() }
+}
+
+function Get-HmacHex {
+    param([byte[]]$Key, [string]$Text)
+    $h = [System.Security.Cryptography.HMACSHA256]::new($Key)
+    try { return (ConvertTo-HexText $h.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Text))) } finally { $h.Dispose() }
+}
+
+function Get-RequestSignature {
+    param([byte[]]$Key, [string]$Method, [string]$Target, [string]$Stamp, [string]$Nonce, [byte[]]$Body)
+    $text = "FC26-REQ-V1`n" + $Method.ToUpperInvariant() + "`n" + $Target + "`n" + $Stamp + "`n" + $Nonce + "`n" + (Get-Sha256Hex $Body)
+    return (Get-HmacHex $Key $text)
+}
+
+function Get-ResponseSignature {
+    param([byte[]]$Key, [string]$Nonce, [int]$Status, [byte[]]$Body)
+    $text = "FC26-RESP-V1`n" + $Nonce + "`n" + [string]$Status + "`n" + (Get-Sha256Hex $Body)
+    return (Get-HmacHex $Key $text)
+}
+
+function Save-PairingCode {
+    param([string]$Code)
+    $dir = Get-StateDir
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $path = Get-PairingFile
+    $tmp = $path + ".tmp"
+    [System.IO.File]::WriteAllText($tmp, ((Format-PairCode $Code) + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+}
+
+function Get-PairingStamp {
+    try {
+        $fi = New-Object System.IO.FileInfo (Get-PairingFile)
+        if ($fi.Exists) { return ("{0}:{1}" -f $fi.LastWriteTimeUtc.Ticks, $fi.Length) }
+    } catch { }
+    return ""
+}
+
+# The normalised pairing code. The first call creates it. A change to the file (the launcher's "new code") is picked
+# up on the next request, no restart needed. Returns "" when there is none and it cannot be created.
+function Get-PairingCode {
+    $stamp = Get-PairingStamp
+    if ($stamp -and $stamp -eq $global:PairCache.Stamp) { return [string]$global:PairCache.Code }
+    $code = ""
+    if ($stamp) { try { $code = ConvertTo-PairCode ([System.IO.File]::ReadAllText((Get-PairingFile))) } catch { $code = "" } }
+    if (-not (Test-PairCode $code)) {
+        $code = New-PairCode
+        try {
+            Save-PairingCode $code
+        } catch {
+            Write-Host "[SECURITY] Could not save the pairing code to $(Get-PairingFile): $_" -ForegroundColor Red
+            $global:PairCache = @{ Stamp = ""; Code = ""; Key = $null }
+            return ""
+        }
+        $stamp = Get-PairingStamp
+    }
+    $global:PairCache = @{ Stamp = $stamp; Code = $code; Key = (Get-KeyFromCode $code) }
+    return $code
+}
+
+function Get-PairingKey {
+    $code = Get-PairingCode
+    if (-not $code) { return $null }
+    return ,([byte[]]$global:PairCache.Key)
+}
+
+# Makes a new pairing code. Every phone has to be given the new one.
+function Reset-PairingCode {
+    $code = New-PairCode
+    Save-PairingCode $code
+    $global:PairCache = @{ Stamp = (Get-PairingStamp); Code = $code; Key = (Get-KeyFromCode $code) }
+    return $code
+}
+
+# ---- who is asking ----
+function Get-RequestHostName {
+    # The host part of the Host header, lower case: "192.168.1.5:5050" -> "192.168.1.5", "[::1]:5050" -> "::1".
+    param($Request)
+    $h = [string]$Request.UserHostName
+    if ([string]::IsNullOrWhiteSpace($h)) { return "" }
+    $h = $h.Trim().ToLower()
+    if ($h.StartsWith("[")) {
+        $end = $h.IndexOf("]")
+        if ($end -gt 0) { return $h.Substring(1, $end - 1) }
+        return $h
+    }
+    if (($h.Split(":").Count - 1) -eq 1) { return $h.Split(":")[0] }
+    return $h
+}
+
+# True only for a request that really comes from a program on this PC: the connection is from the loopback address, it
+# is addressed to localhost / 127.0.0.1 / [::1], and no proxy or tunnel added forwarding headers. A request that
+# arrived through a tunnel (ngrok and the like) always carries such headers, so it is not trusted.
+function Test-TrustedLocal {
     param($Request)
     try {
         $remote = $Request.RemoteEndPoint.Address
         if ($null -eq $remote) { return $false }
         if ($remote.IsIPv4MappedToIPv6) { $remote = $remote.MapToIPv4() }
-        if ([System.Net.IPAddress]::IsLoopback($remote)) { return $true }
-        # Connecting to the PC's own LAN address: remote and local address are identical
-        $local = $Request.LocalEndPoint.Address
-        if ($null -eq $local) { return $false }
-        if ($local.IsIPv4MappedToIPv6) { $local = $local.MapToIPv4() }
-        return $remote.Equals($local)
+        if (-not [System.Net.IPAddress]::IsLoopback($remote)) { return $false }
+        $name = Get-RequestHostName $Request
+        if ($name -and ($LocalHostNames -notcontains $name)) { return $false }
+        foreach ($h in $ProxyHeaders) { if (-not [string]::IsNullOrEmpty($Request.Headers[$h])) { return $false } }
+        return $true
     } catch { return $false }
+}
+
+function Test-SameText {
+    # Compares two texts without stopping at the first difference (so the time taken tells nothing).
+    param([string]$A, [string]$B)
+    if ($A.Length -ne $B.Length) { return $false }
+    $diff = 0
+    for ($i = 0; $i -lt $A.Length; $i++) { $diff = $diff -bor ([int][char]$A[$i] -bxor [int][char]$B[$i]) }
+    return ($diff -eq 0)
+}
+
+function Get-LockSeconds {
+    param([string]$Ip, [long]$Now)
+    if (-not $global:AuthLocked.ContainsKey($Ip)) { return 0 }
+    $until = [long]$global:AuthLocked[$Ip]
+    if ($until -gt $Now) { return [int]($until - $Now) + 1 }
+    $global:AuthLocked.Remove($Ip)
+    return 0
+}
+
+function Add-AuthFail {
+    param([string]$Ip, [long]$Now, [string]$Code)
+    $global:AuthStats.Rejected = [int]$global:AuthStats.Rejected + 1
+    $global:AuthStats.Time = $Now
+    $global:AuthStats.Ip = $Ip
+    $global:AuthStats.Code = $Code
+    $recent = @()
+    if ($global:AuthFails.ContainsKey($Ip)) { $recent = @($global:AuthFails[$Ip] | Where-Object { ($Now - $_) -lt $AuthFailWindowSeconds }) }
+    $recent += $Now
+    $global:AuthFails[$Ip] = $recent
+    if ($recent.Count -ge $AuthMaxFails) {
+        $global:AuthLocked[$Ip] = $Now + $AuthLockoutSeconds
+        $global:AuthFails.Remove($Ip)
+    }
+    if ($global:AuthFails.Count -gt 2000) { $global:AuthFails.Clear() }
+}
+
+function New-AuthResult {
+    param([bool]$Ok, [int]$Status = 200, [string]$Code = "", [string]$Message = "", [string]$Nonce = "", $Extra = @{})
+    return @{ Ok = $Ok; Status = $Status; Code = $Code; Message = $Message; Nonce = $Nonce; Extra = $Extra }
+}
+
+# The result of checking one request from another machine. $Body is what was sent (empty for a GET).
+function Test-SignedRequest {
+    param([string]$Ip, [string]$Method, [string]$Target, [byte[]]$Body, [string]$Stamp, [string]$Nonce, [string]$Sig, [byte[]]$Key, [long]$Now)
+    $wait = Get-LockSeconds $Ip $Now
+    if ($wait -gt 0) { return (New-AuthResult $false 429 "locked" "Too many wrong attempts. Try again in $wait seconds." "" @{ retryAfter = $wait }) }
+    if ($null -eq $Key -or $Key.Length -eq 0) { return (New-AuthResult $false 503 "not_paired" "The bridge has no pairing code yet.") }
+    $Stamp = ([string]$Stamp).Trim()
+    $Nonce = ([string]$Nonce).Trim().ToLowerInvariant()
+    $Sig = ([string]$Sig).Trim().ToLowerInvariant()
+    if (-not (($Stamp -cmatch '^[0-9]{1,12}$') -and ($Nonce -cmatch '^[0-9a-f]{16,64}$') -and ($Sig -cmatch '^[0-9a-f]{64}$'))) {
+        Add-AuthFail $Ip $Now "unsigned"
+        return (New-AuthResult $false 401 "unsigned" "This request is not signed. Enter the pairing code in the app.")
+    }
+    $expected = Get-RequestSignature $Key $Method $Target $Stamp $Nonce $Body
+    if (-not (Test-SameText $expected $Sig)) {
+        Add-AuthFail $Ip $Now "bad_signature"
+        return (New-AuthResult $false 401 "bad_signature" "The pairing code was not accepted.")
+    }
+    if ([Math]::Abs($Now - [long]$Stamp) -gt $AuthWindowSeconds) {
+        return (New-AuthResult $false 401 "clock_skew" "The clocks of the phone and the PC differ by more than 5 minutes." "" @{ bridgeTime = $Now })
+    }
+    foreach ($n in @($global:AuthNonces.Keys)) { if ([long]$global:AuthNonces[$n] -lt $Now) { $global:AuthNonces.Remove($n) } }
+    if ($global:AuthNonces.ContainsKey($Nonce)) {
+        Add-AuthFail $Ip $Now "replay"
+        return (New-AuthResult $false 401 "replay" "This request was already used.")
+    }
+    if ($global:AuthNonces.Count -ge $AuthMaxNonces) { return (New-AuthResult $false 503 "busy" "Too many requests right now.") }
+    $global:AuthNonces[$Nonce] = $Now + 2 * $AuthWindowSeconds
+    return (New-AuthResult $true 200 "" "" $Nonce)
+}
+
+# What anybody on the network may learn: that a bridge is here, which kind, and that it wants a pairing code.
+function Get-PingInfo {
+    return [ordered]@{ app = "fc26-bridge"; protocol = $BridgeProtocol; version = $BridgeVersion; name = $PcName; auth = "hmac-sha256" }
 }
 
 function Test-AllowedHost {
     # Allow IP addresses, localhost and this PC's name. Other host names are refused
     # so a malicious web page cannot reach the bridge through DNS rebinding.
     param($Request)
-    $h = [string]$Request.UserHostName
-    if ([string]::IsNullOrWhiteSpace($h)) { return $true }   # HTTP/1.0 client without Host header - not a browser
-    $h = $h.Trim().ToLower()
-    if ($h.StartsWith("[")) {
-        $end = $h.IndexOf("]")
-        if ($end -gt 0) { $name = $h.Substring(1, $end - 1) } else { $name = $h }
-    } elseif (($h.Split(":").Count - 1) -eq 1) {
-        $name = $h.Split(":")[0]
-    } else {
-        $name = $h
-    }
+    $name = Get-RequestHostName $Request
+    if (-not $name) { return $true }   # HTTP/1.0 client without Host header - not a browser
     if ($name -eq "localhost" -or $name -eq $PcName -or $name -eq "$PcName.local") { return $true }
     $parsedIp = $null
     return [System.Net.IPAddress]::TryParse($name, [ref]$parsedIp)
@@ -472,11 +710,14 @@ function Test-OriginAllowed {
 }
 
 function Send-Reject {
-    param($Response, [int]$Code, [string]$Message)
+    param($Response, [int]$Code, [string]$Message, $Extra = @{}, $Headers = @{})
     try {
         $Response.StatusCode = $Code
         $Response.ContentType = "application/json"
-        $buf = [System.Text.Encoding]::UTF8.GetBytes((@{ status = "error"; message = $Message } | ConvertTo-Json -Compress))
+        $obj = [ordered]@{ status = "error"; message = $Message }
+        foreach ($k in $Extra.Keys) { $obj[[string]$k] = $Extra[$k] }
+        foreach ($k in $Headers.Keys) { $Response.Headers.Add([string]$k, [string]$Headers[$k]) }
+        $buf = [System.Text.Encoding]::UTF8.GetBytes(($obj | ConvertTo-Json -Compress))
         $Response.ContentLength64 = $buf.Length
         $Response.OutputStream.Write($buf, 0, $buf.Length)
     } catch {}
@@ -507,12 +748,21 @@ if (-not $bound) {
 }
 
 try {
+    $startCode = Get-PairingCode      # made before the first request can arrive
     $Listener.Start()
     Write-Host ""
     Write-Host "===================================================" -ForegroundColor Green
     Write-Host " Bridge Server started successfully!" -ForegroundColor Green
     Write-Host " 🟢 Active listening on Port $Port." -ForegroundColor Green
     Write-Host " Keep this window open while playing EA FC. Press Ctrl+C to stop." -ForegroundColor White
+    if (-not $startCode) {
+        Write-Host " No pairing code could be made, so no phone can connect. Check that the folder $(Get-StateDir) can be written to." -ForegroundColor Red
+    } elseif ($env:FC26_HIDDEN) {
+        Write-Host " Pairing code: shown by FC26_Launcher.bat and on the dashboard (never written to this log)." -ForegroundColor White
+    } else {
+        Write-Host " Pairing code for the app: $(Format-PairCode $startCode)" -ForegroundColor Yellow
+    }
+    Write-Host " Only a phone that knows the pairing code can read from the bridge. Everything else works from this PC only." -ForegroundColor DarkGray
     Write-Host "===================================================" -ForegroundColor Green
     Write-Host ""
 } catch {
@@ -1645,11 +1895,25 @@ function Get-SelfCheck {
     }
 
     if ($global:PhoneSeen.Time -le 0) {
-        $checks += New-Check "phone" "Phone" "warn" "The phone has not connected yet." "In the app open PC Connection (in the menu) and enter http://${LocalIp}:${Port}, or tap Find my PC."
+        $checks += New-Check "phone" "Phone" "warn" "The phone has not connected yet." "In the app open PC Connection (in the menu), tap Find my PC (or enter http://${LocalIp}:${Port}) and type the pairing code shown on the dashboard at http://localhost:${Port}."
     } elseif (($Now - $global:PhoneSeen.Time) -gt $PhoneAliveSeconds) {
         $checks += New-Check "phone" "Phone" "warn" "The phone last asked $(Format-Ago ($Now - $global:PhoneSeen.Time)) ($($global:PhoneSeen.Ip))." "Open the app. Phone and PC need to be on the same Wi-Fi."
     } else {
         $checks += New-Check "phone" "Phone" "ok" "Connected ($($global:PhoneSeen.Ip)), last asked $(Format-Ago ($Now - $global:PhoneSeen.Time))."
+    }
+
+    $rej = $global:AuthStats
+    if ($null -ne $rej -and [long]$rej.Time -gt 0 -and ($Now - [long]$rej.Time) -lt 300) {
+        $why = switch ([string]$rej.Code) {
+            "bad_signature" { "a wrong pairing code" }
+            "unsigned" { "no pairing code" }
+            "replay" { "a repeated request" }
+            "locked" { "too many wrong attempts" }
+            default { "not allowed" }
+        }
+        $checks += New-Check "security" "Network access" "warn" "A device on your network ($($rej.Ip)) was refused $(Format-Ago ($Now - [long]$rej.Time)): $why." "If that was not your phone, press New pairing code on the dashboard (open http://localhost:${Port} on this PC)."
+    } else {
+        $checks += New-Check "security" "Network access" "ok" "Only a phone with the pairing code can read from the bridge."
     }
 
     if ($LocalIp.StartsWith("127.")) {
@@ -1721,16 +1985,41 @@ function Request-Resend {
     return @{ Code = 200; Reply = [ordered]@{ status = "requested"; id = $id } }
 }
 
-function Send-Json {
-    param($Response, [int]$Code, $Object)
+# Sends a body. When the request was the phone's (checked and signed), the answer carries a signature over the request's
+# one-time number, the status and the body, so the phone can tell the answer comes from this bridge.
+function Send-Body {
+    param($Response, [int]$Code, [string]$ContentType, [byte[]]$Buf)
     try {
         $Response.StatusCode = $Code
-        $Response.ContentType = "application/json"
-        $buf = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Object -Depth 8 -Compress))
-        $Response.ContentLength64 = $buf.Length
-        $Response.OutputStream.Write($buf, 0, $buf.Length)
+        $Response.ContentType = $ContentType
+        if ($global:SignWith) {
+            $Response.Headers.Add("X-FC-Sig", (Get-ResponseSignature $global:SignWith.Key $global:SignWith.Nonce $Code $Buf))
+        }
+        $Response.ContentLength64 = $Buf.Length
+        $Response.OutputStream.Write($Buf, 0, $Buf.Length)
     } catch {}
     try { $Response.Close() } catch {}
+}
+
+function Send-Json {
+    param($Response, [int]$Code, $Object)
+    Send-Body $Response $Code "application/json" ([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Object -Depth 8 -Compress)))
+}
+
+# Reads a small request body as bytes. Returns $null when it is larger than $Limit.
+function Read-BodyBytes {
+    param($Request, [int]$Limit)
+    $ms = New-Object System.IO.MemoryStream
+    try {
+        $buf = New-Object byte[] 4096
+        while (($n = $Request.InputStream.Read($buf, 0, $buf.Length)) -gt 0) {
+            $ms.Write($buf, 0, $n)
+            if ($ms.Length -gt $Limit) { return $null }
+        }
+        return ,$ms.ToArray()
+    } finally {
+        $ms.Dispose()
+    }
 }
 
 Import-AtlasState
@@ -1772,6 +2061,28 @@ while ($Listener.IsListening) {
         $method = $Request.HttpMethod.ToUpper()
         $rawPath = $Request.Url.AbsolutePath.ToLower()
         $isWriteRoute = ($rawPath -eq "/test-match") -or ($rawPath -eq "/test-transfer") -or ($rawPath -eq "/clear") -or ($rawPath -eq "/events" -and $method -eq "DELETE")
+        $isLocal = Test-TrustedLocal $Request
+        $remoteIp = if ($clientIp.StartsWith("::ffff:")) { $clientIp.Substring(7) } else { $clientIp }
+        $global:SignWith = $null
+
+        if ($method -eq "GET" -and $rawPath -eq "/ping") {
+            # The only thing anybody on the network may ask: is a bridge here, and which one?
+            Send-Json $Response 200 (Get-PingInfo)
+            continue
+        }
+
+        if (-not $isLocal) {
+            # From another machine only the phone's three requests are possible, and only with the pairing code.
+            $wait = Get-LockSeconds $remoteIp (Get-EpochNow)
+            if ($wait -gt 0) {
+                Send-Reject $Response 429 "Too many wrong attempts. Try again in $wait seconds." @{ code = "locked" } @{ "Retry-After" = $wait }
+                continue
+            }
+            if ($PhoneRoutes -notcontains "$method $rawPath") {
+                Send-Reject $Response 403 "Only the PC that runs the bridge may do this. Open http://localhost:$Port on that PC." @{ code = "local_only" }
+                continue
+            }
+        }
 
         if ($method -eq "GET") {
             # These used to fire on a plain GET, so a link or <img> tag on any web page could
@@ -1783,13 +2094,9 @@ while ($Listener.IsListening) {
             }
         } elseif ($method -eq "POST" -or $method -eq "DELETE") {
             # The phone's "Re-send last match" button only asks the capture script to send its latest match again
-            # (rate limited, and the bridge drops a duplicate), so it is allowed from the local network. The Host
-            # and Origin checks still keep web pages in a browser out. Every other write stays PC-only.
-            $lanAllowed = ($method -eq "POST" -and $rawPath -eq "/resend")
-            if (-not $lanAllowed -and -not (Test-LocalClient $Request)) {
-                Send-Reject $Response 403 "Writes are only accepted from the PC running the bridge."
-                continue
-            }
+            # (rate limited, and the bridge drops a duplicate); with the pairing code it is allowed from the local
+            # network. The Host and Origin checks still keep web pages in a browser out. Every other write is for
+            # this PC only (the check above already refused it from anywhere else).
             if (-not (Test-OriginAllowed $Request)) {
                 Send-Reject $Response 403 "Cross-site request blocked."
                 continue
@@ -1804,9 +2111,49 @@ while ($Listener.IsListening) {
             continue
         }
 
+        # The phone's requests (and any local request that brings a signature) are checked here.
+        $isPhoneRequest = ($method -eq "GET") -or ($rawPath -eq "/resend")
+        if ($isPhoneRequest -and ((-not $isLocal) -or (-not [string]::IsNullOrEmpty($Request.Headers["X-FC-Sig"])))) {
+            $bodyBytes = New-Object byte[] 0
+            if ($method -eq "POST") {
+                $bodyBytes = Read-BodyBytes $Request 1024
+                if ($null -eq $bodyBytes) { Send-Reject $Response 413 "Payload too large."; continue }
+            }
+            $key = Get-PairingKey
+            $auth = Test-SignedRequest $remoteIp $method ([string]$Request.RawUrl) $bodyBytes ([string]$Request.Headers["X-FC-Time"]) ([string]$Request.Headers["X-FC-Nonce"]) ([string]$Request.Headers["X-FC-Sig"]) $key (Get-EpochNow)
+            if (-not $auth.Ok) {
+                $logKey = "$remoteIp|$($auth.Code)"
+                $nowLog = Get-EpochNow
+                if (-not $global:AuthLogged.ContainsKey($logKey) -or ($nowLog - [long]$global:AuthLogged[$logKey]) -gt 60) {
+                    $global:AuthLogged[$logKey] = $nowLog
+                    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Refused a request from ${remoteIp}: $($auth.Message)" -ForegroundColor Yellow
+                }
+                $extra = @{ code = $auth.Code }
+                $headers = @{}
+                foreach ($k in $auth.Extra.Keys) { $extra[$k] = $auth.Extra[$k] }
+                if ($auth.Extra.ContainsKey("retryAfter")) { $headers["Retry-After"] = $auth.Extra["retryAfter"] }
+                Send-Reject $Response $auth.Status $auth.Message $extra $headers
+                continue
+            }
+            $global:SignWith = @{ Key = $key; Nonce = $auth.Nonce }
+            if (-not $isLocal) { Set-PhoneSeen $remoteIp }
+        }
+
         if ($rawPath -eq "/resend" -and $method -eq "POST") {
             $resendResult = Request-Resend
             Send-Json $Response $resendResult.Code $resendResult.Reply
+            continue
+        }
+
+        if ($rawPath -eq "/pairing/new" -and $method -eq "POST") {
+            # The dashboard's "New pairing code" button (this PC only, see the check above).
+            try {
+                $newCode = Reset-PairingCode
+                Write-Host "[$(Get-Date -Format 'HH:mm:ss')] A new pairing code was made. Enter it in the app." -ForegroundColor Yellow
+                Send-Json $Response 200 ([ordered]@{ status = "ok"; code = (Format-PairCode $newCode) })
+            } catch {
+                Send-Reject $Response 500 "Could not save the new pairing code: $_"
+            }
             continue
         }
 
@@ -1919,24 +2266,18 @@ while ($Listener.IsListening) {
             $Response.OutputStream.Write($buffer, 0, $buffer.Length)
             $Response.Close()
         } elseif ($Request.HttpMethod -eq "GET") {
-            $isReaderRoute = @("/events", "/json", "/api/telemetry", "/status", "/api/status") -contains $rawPath
-            if ($isReaderRoute -and -not (Test-LocalClient $Request)) { Set-PhoneSeen $clientIp }
             if ($rawPath -eq "/status" -or $rawPath -eq "/api/status") {
                 Send-Json $Response 200 (Get-BridgeStatus)
             } elseif ($rawPath -eq "/events" -or $rawPath -eq "/json" -or $rawPath -eq "/api/telemetry") {
-                $Response.StatusCode = 200
-                $Response.ContentType = "application/json"
                 $jsonArray = "[" + ($global:EventList -join ",") + "]"
-                $buffer = [System.Text.Encoding]::UTF8.GetBytes($jsonArray)
-                $Response.ContentLength64 = $buffer.Length
-                $Response.OutputStream.Write($buffer, 0, $buffer.Length)
-                $Response.Close()
+                Send-Body $Response 200 "application/json" ([System.Text.Encoding]::UTF8.GetBytes($jsonArray))
             } else {
                 # Return Web UI Status Dashboard
                 $Response.StatusCode = 200
                 $Response.ContentType = "text/html; charset=utf-8"
                 $Response.Headers.Add("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
                 $eventCount = $global:EventList.Count
+                $pairingText = Format-PairCode (Get-PairingCode)
                 $html = @"
 <!DOCTYPE html>
 <html>
@@ -1979,6 +2320,14 @@ while ($Listener.IsListening) {
         <div class="info">
             <strong>📱 IP Address for Android App:</strong><br>
             <span style="color:#10b981;font-size:16px;font-weight:bold;">http://${primaryIp}:${Port}</span><br>
+        </div>
+
+        <h3>Pairing code</h3>
+        <p style="font-size:13px;color:#cbd5e1;margin-top:0;">Type this code into the app (menu, PC Connection). Only a phone that has it can read anything from this bridge. Do not share it, and do not post a screenshot of this page.</p>
+        <div id="pairCode" style="font-family:monospace;font-size:26px;letter-spacing:2px;color:#facc15;">$pairingText</div>
+        <div style="margin:12px 0 20px;">
+            <button id="newCodeBtn" class="btn-danger" type="button">New pairing code</button>
+            <span id="newCodeNote" style="font-size:13px;color:#cbd5e1;margin-left:6px;"></span>
         </div>
 
         <h3>Self check</h3>
@@ -2110,6 +2459,13 @@ while ($Listener.IsListening) {
                 document.getElementById('summary').textContent = 'The bridge did not answer.';
             });
         }
+        document.getElementById('newCodeBtn').onclick = function () {
+            if (!confirm('Make a new pairing code? The phone will stop working until you type the new code into the app.')) return;
+            fetch('/pairing/new', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (d) {
+                if (d && d.code) { document.getElementById('pairCode').textContent = d.code; document.getElementById('newCodeNote').textContent = 'Done. Enter the new code in the app.'; }
+                else { document.getElementById('newCodeNote').textContent = (d && d.message) || 'Could not make a new code.'; }
+            }).catch(function () { document.getElementById('newCodeNote').textContent = 'The bridge did not answer.'; });
+        };
         document.getElementById('recheckBtn').onclick = refreshStatus;
         document.getElementById('resendBtn').onclick = function () {
             var btn = this, note = document.getElementById('resendNote');

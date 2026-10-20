@@ -23,9 +23,18 @@ def load_bridge(tmp):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     mod.EVENTS_FILE = os.path.join(tmp, "telemetry_events.json")
+    os.environ["FC26_STATE_DIR"] = os.path.join(tmp, "state")          # the pairing code goes here, not into the real profile
     mod.events.clear()
     mod._outbox_handled.clear()
     return mod
+
+
+def signed_headers(bridge, key, method, target, body=b"", when=None, nonce=None):
+    """The three headers the phone adds to a request (see docs/SECURITY.md)."""
+    when = int(time.time()) if when is None else when
+    nonce = nonce or os.urandom(16).hex()
+    return {"X-FC-Time": str(when), "X-FC-Nonce": nonce,
+            "X-FC-Sig": bridge.sign_request(key, method, target, when, nonce, body)}
 
 
 class StatusTest(unittest.TestCase):
@@ -277,13 +286,15 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(200, code, body)
         self.assertTrue(os.path.exists(os.path.join(self.root, "resend_request.json")))
 
-    def test_resend_is_allowed_from_the_network_but_other_writes_are_not(self):
-        self.bridge.is_local_client = lambda client, server: False      # pretend the request comes from the phone
-        code, _ = self.request("POST", "/resend")
-        self.assertEqual(200, code)
-        for path in ("/clear", "/test-match", "/test-transfer"):
-            self.assertEqual(403, self.request("POST", path)[0], path)
-        self.assertEqual(403, self.request("POST", "/")[0])
+    def test_the_network_cannot_resend_without_the_pairing_code_and_cannot_write_at_all(self):
+        lan = {"Host": "192.168.2.24:%d" % self.port}                   # a request addressed to the PC's network address
+        code, _ = self.request("POST", "/resend", headers=lan)
+        self.assertEqual(401, code)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "resend_request.json")))
+        for path in ("/clear", "/test-match", "/test-transfer", "/pairing/new"):
+            self.assertEqual(403, self.request("POST", path, headers=lan)[0], path)
+        self.assertEqual(403, self.request("POST", "/", headers=lan)[0])
+        self.assertEqual(403, self.request("GET", "/", headers=lan)[0])
 
     def test_resend_refuses_other_web_sites_and_odd_hosts(self):
         code, _ = self.request("POST", "/resend", {"Origin": "http://evil.example"})
@@ -292,19 +303,17 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(403, code)
         self.assertFalse(os.path.exists(os.path.join(self.root, "resend_request.json")))
 
-    def test_phone_contact_is_noted_only_for_other_machines(self):
+    def test_phone_contact_is_noted_only_for_a_phone_that_proved_the_code(self):
         self.request("GET", "/events")
         self.assertEqual(0.0, self.bridge.phone_seen["time"])            # this PC's own browser does not count
-        self.bridge.is_local_client = lambda client, server: False
-        self.request("GET", "/events")
+        lan = {"Host": "192.168.2.24:%d" % self.port}
+        self.request("GET", "/events", headers=lan)
+        self.assertEqual(0.0, self.bridge.phone_seen["time"])            # a stranger without the code does not count either
+        key = self.bridge.pairing_key()
+        headers = dict(lan)
+        headers.update(signed_headers(self.bridge, key, "GET", "/events"))
+        self.assertEqual(200, self.request("GET", "/events", headers=headers)[0])
         self.assertGreater(self.bridge.phone_seen["time"], 0)
-        self.bridge.phone_seen.update(time=0.0, ip="")
-        self.request("GET", "/status")
-        self.assertGreater(self.bridge.phone_seen["time"], 0)
-
-    def test_get_does_not_trigger_the_test_buttons(self):
-        for path in ("/clear", "/test-match"):
-            self.assertEqual(302, self.request("GET", path)[0])
 
 
 if __name__ == "__main__":

@@ -13,8 +13,9 @@ Phone and PC must be on the same Wi-Fi network. One file sets up the PC side: `F
 1. **On the PC:** download `FC26-PC-Tools.zip` from the **Latest build** release of this repository
    (*Releases → Latest build*), unzip it anywhere, and double-click **`FC26_Launcher.bat`**.
    Windows may ask once for permission (the shield window): say **Yes**. That is the firewall rule that lets your phone in.
-2. **On the phone:** open the app, menu → **PC Connection** → **Find my PC**. (The app's **Set up live sync** guide walks
-   through these same steps and ticks each one off as it works.)
+2. **On the phone:** open the app, menu → **PC Connection** → **Find my PC**, then type the **pairing code** the launcher
+   shows and tap **Save & connect**. (The app's **Set up live sync** guide walks through these same steps and ticks each one
+   off as it works.) Only a phone with that code can read anything from your PC: see [SECURITY.md](SECURITY.md).
 3. **In FC Live Editor:** load your career, open the **Lua Scripts** tab, pick **`FC26_Auto_Capture.lua`** and press **Execute**.
 
 Then play. After each match press **Advance** to reach the Career Hub: the match appears in the app by itself.
@@ -37,22 +38,26 @@ It does these things, and tells you plainly what it did:
    folder. A changed script is replaced and the previous one kept as `.bak`; a newer script that is already there is never overwritten.
    Scripts of earlier versions in that folder (`telemetry_sync.lua`, `telemetry_auto_loop.lua` and so on) are renamed to `.old`,
    never deleted, because they would otherwise run next to the new one.
-3. **Lets your phone in.** It adds one Windows Firewall rule, "EA FC Telemetry Bridge", for port 5050 and the local network only,
-   after asking Windows once. It does **not** change your network profile (Public/Private).
+3. **Lets your phone in.** It adds one Windows Firewall rule, "EA FC Telemetry Bridge", for port 5050, for devices on your local
+   network only and on Private (home) or Domain (work) networks only, after asking Windows once. It does **not** change your
+   network type itself. If Windows treats your network as Public, the launcher says so and asks: open Windows Settings so you
+   can make it a Private network (recommended for your home Wi-Fi), allow the bridge on Public networks too, or leave it closed.
+   A rule from an earlier launcher that was open on every network is replaced.
 4. **Starts the bridge in the background, with no window.** It uses Python when a working Python 3 is installed, otherwise the built-in
-   PowerShell version (which needs one more permission, an HTTP reservation, asked in the same single prompt). If a bridge is already
+   PowerShell version (which needs one more permission, an HTTP reservation for your Windows user only, asked in the same single prompt). If a bridge is already
    running it is kept; if it is older than the files, it is restarted. The bridge's output goes to
    `%APPDATA%\FC26Tracker\bridge.log` and `bridge-errors.log`.
-5. **Prints the address** to type into the phone, and the next steps. The window then waits for **Enter** so you can read it; if
+5. **Prints the address and the pairing code** to type into the phone, and the next steps. The window then waits for **Enter** so you can read it; if
    anything goes wrong the window stays open instead of vanishing.
 
 Options (type them after the file name in a command prompt, or ignore them):
 
 | Command | Does |
 | --- | --- |
-| `FC26_Launcher.bat status` | Shows what the bridge sees: phone, script, versions, folders. |
+| `FC26_Launcher.bat status` | Shows what the bridge sees: phone, script, versions, folders, and the pairing code. |
 | `FC26_Launcher.bat stop` | Stops the bridge. |
-| `FC26_Launcher.bat reset` | Forgets the remembered folders, then runs normally. |
+| `FC26_Launcher.bat newcode` | Makes a new pairing code. The old one stops working at once; type the new one into the app. |
+| `FC26_Launcher.bat reset` | Forgets the remembered folders and network choices, then runs normally. |
 | `FC26_Launcher.bat nopause` | Does not wait for Enter at the end. |
 
 The bridge does not start with Windows: run the launcher when you sit down to play. (Closing the launcher window does not stop
@@ -69,6 +74,8 @@ If Live Editor was open when the scripts were installed, restart it once so it l
 | Something that is not this bridge is using port 5050 | Close that program, then run the launcher again. |
 | An old bridge could not be stopped | It was started as administrator (for example by an older `Start_Bridge.bat`). Close its window, run the launcher again. |
 | The permission was not given | Run the launcher again and choose **Yes** when Windows asks. |
+| Windows treats the network as Public | If it is your home Wi-Fi: Windows Settings → Network → your network → **Private network**, then run the launcher again. |
+| Found the bridge files in ... Use this folder? | The launcher found them by searching. Say yes only if that is the folder you unzipped. |
 | The bridge did not start | The lines under it are the bridge's own message; `%APPDATA%\FC26Tracker\bridge-errors.log` has more. |
 
 ## 2. Checking that it all works (PC Connection)
@@ -82,7 +89,9 @@ In the app, menu → **PC Connection** shows the whole path, from phone to bridg
 - **Versions:** app, bridge and script. If the script is older than the bridge needs (`2.8.0`), the screen says to update it (run the launcher again).
 - **Re-send last match:** asks the capture script to send the newest finished match again, for example when the phone missed it
   or you cleared it. The screen tells you what happened (sent, nothing to send, script not running).
-- **PC address:** shows the saved address and **Find my PC**, which looks for the bridge on your Wi-Fi. A VPN on the phone can hide the PC; the screen says so.
+- **PC address and pairing code:** the saved address, **Find my PC** (looks for the bridge on your Wi-Fi), the pairing code, and
+  **Forget this PC** (deletes the code from the phone). A VPN on the phone can hide the PC; the screen says so. When the code is
+  missing, wrong, or the clocks of phone and PC differ by more than five minutes, the *Pairing code* step says which and what to do.
 - **Testing** (collapsed): *Test match* and *Test transfer* put a made-up match or transfer into the app so you can see how it looks and
   that alerts work, without touching the bridge. Delete them afterwards.
 
@@ -342,23 +351,23 @@ deals are sent again only if `beamed_transfers.txt` or `auto_capture_state.lua` 
 
 ## Security
 
-- Your phone can **read** the bridge's news (`/events`) and its health report (`/status`, which holds the folder paths, the script
-  version and the club name), and it can ask for the last match to be sent again (`/resend`). It cannot change anything else.
-- Anything else that writes (the Live Editor scripts, the test buttons, Clear) must come from this same PC.
-  Writes from other devices on your network are refused (HTTP 403).
-- The Windows firewall rule created by `FC26_Launcher.bat` ("EA FC Telemetry Bridge") only allows devices on your local subnet, on port 5050.
-  The launcher never changes your network profile. To remove the rule: `netsh advfirewall firewall delete rule name="EA FC Telemetry Bridge"`
-  in an administrator command prompt.
-- The launcher installs files only into Live Editor's scripts folder and its own `%APPDATA%\FC26Tracker` folder. It renames old scripts
-  instead of deleting them, and the only thing it asks Windows to do as administrator is the firewall rule (and, for the PowerShell
-  bridge, the HTTP reservation for port 5050).
-- Web pages in a browser cannot send data to the bridge (no CORS, Host and Origin checks).
-- Anyone on your local network can still **read** `/events` and `/status` if they know the address. Do not run the bridge on
-  shared or public Wi-Fi.
+The whole story is in [SECURITY.md](SECURITY.md). In short:
+
+- Your phone has to prove it knows the **pairing code** before the bridge tells it anything, and the app only accepts answers
+  signed with that code. Other devices on your network get nothing but "a bridge is here".
+- The phone can only read (news, health report) and ask for the last match again. The capture script's reports, the test
+  buttons, Clear and a new pairing code work from this PC only.
+- The firewall rule lets in devices on your own network, on Private or Domain networks only. Nothing is reachable from the
+  internet; never forward port 5050 on your router.
+- The bridge runs without administrator rights. The launcher starts Windows programs by their full path and asks before using
+  files it found by searching.
+- Not protected: the traffic is not encrypted, so someone already capturing your Wi-Fi traffic could read match data as it travels
+  (not change it). A strong Wi-Fi password keeps them out.
+- To remove the firewall rule: `netsh advfirewall firewall delete rule name="EA FC Telemetry Bridge"` in an administrator command prompt.
 
 ## Without the launcher
 
 You can do the launcher's work by hand: copy the two `.lua` files from `live-editor-scripts` into Live Editor's `lua\scripts` folder, then
-start the bridge with `pc-bridge/legacy/Start_Bridge.bat` (PowerShell engine; asks for administrator rights) or
-`pc-bridge/legacy/Start_Bridge_Python.bat` (needs Python 3). Those two keep a window open while you play. `Start_Bridge.bat` also adds the
-firewall rule and switches a Public network to Private; the Python starter does neither, so the phone may need the firewall opened by hand.
+start the bridge with `python -I telemetry_bridge.py` in the `pc-bridge` folder (it shows the pairing code in its window and keeps the
+window open while you play), and allow port 5050 for your local network in the Windows firewall yourself. The older starters in
+`pc-bridge/legacy` (`Start_Bridge.bat`, `Start_Bridge_Python.bat`) now simply run `FC26_Launcher.bat`.

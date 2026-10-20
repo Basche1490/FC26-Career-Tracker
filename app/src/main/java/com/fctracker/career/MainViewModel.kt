@@ -54,6 +54,31 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         saveBridgeAddress(url)
     }
 
+    /** The PC bridge's pairing code as stored (letters and digits only, "" when none). */
+    val bridgeCode: StateFlow<String> = store.bridgeCode
+
+    /** Saves the address and the pairing code together and asks the bridge right away. */
+    fun saveBridgeConnection(url: String, code: String, onDone: (() -> Unit)? = null) {
+        val normalizedUrl = TelemetrySync.normalizeBridgeUrl(url)
+        val codeChanged = com.fctracker.career.telemetry.BridgeAuth.normalize(code) != store.bridgeCode.value
+        if (codeChanged) store.setBridgeCode(code)
+        if (normalizedUrl != _state.value.telemetryServerUrl) {
+            _state.value = _state.value.copy(telemetryServerUrl = normalizedUrl)
+            persistData()
+            sync.addressChanged()
+        } else if (codeChanged) {
+            sync.pairingChanged()
+        }
+        recheckConnection { onDone?.invoke() }
+    }
+
+    /** "Forget this PC": the pairing code is deleted from the phone; the bridge then refuses this phone until a code is typed again. */
+    fun forgetPc() {
+        store.setBridgeCode("")
+        sync.pairingChanged()
+        recheckConnection()
+    }
+
     // -- connection health (the status pill, the Connection screen and the setup guide) ---------------
 
     /** One answer to "is everything working?": Live, Check or Offline, with the Phone / Bridge / Script steps behind it. */

@@ -45,6 +45,8 @@ repository (`signing/`) so builds stay updatable. It is meant for sideloading on
 `pc-bridge/` and `live-editor-scripts/` send data from FC Live Editor to the app. **One file sets it up:** unzip
 `FC26-PC-Tools.zip` from the **Latest build** release and double-click `FC26_Launcher.bat`. It finds the bridge and Live Editor wherever
 they are, installs the two capture scripts, lets the phone in through the firewall and starts the bridge in the background with no window.
+The phone pairs with the PC through a **pairing code** the launcher shows: only a phone with that code can read anything
+from the bridge, and the app only believes answers signed with it ([docs/SECURITY.md](docs/SECURITY.md)).
 Setup steps and troubleshooting are in [docs/PC_SETUP.md](docs/PC_SETUP.md). The detailed player statistics come from the Project Atlas
 exporter (`FC26_AutoCapture_v1.1.1.lua`, which has the snapshot and match-statistics exporters built in) by its original author
 on r/seriousfifacareers.
@@ -54,6 +56,8 @@ on r/seriousfifacareers.
 - Career data is written to one file per save slot, atomically, with a backup copy. A crash or power loss in the
   middle of a save can no longer damage a career.
 - The AI API key is stored encrypted with the Android Keystore and is left out of save files and backups.
+- Phone and PC pair with a code: every request is signed (HMAC-SHA256) and every answer checked, other devices on the network
+  get nothing, the firewall rule is limited to home networks, and the launcher starts Windows programs by full path.
 - Live sync runs in a foreground service, so matches arrive while the app is in the background. Swiping the app away from recent apps stops it and removes its notification. It can be turned off in Settings.
 - The match and transfer handling is one tested class (`TelemetryProcessor`) instead of code spread through the
   screen logic; about 60 unit tests run on every build.
@@ -91,5 +95,5 @@ FC26_Launcher.bat      the one launcher for the PC side (finds, installs, starts
 pc-bridge/             the PC bridge (PowerShell and Python versions); legacy/ holds the older starters
 live-editor-scripts/   the two FC Live Editor scripts; legacy/ and tools/ hold older scripts and the probe
 tests/                 Lua, bridge (Python + PowerShell) and launcher tests
-docs/                  PC setup guide
+docs/                  PC setup guide and security notes
 ```

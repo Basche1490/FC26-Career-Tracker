@@ -120,7 +120,12 @@ class LauncherFileTests(unittest.TestCase):
     def test_batch_part_hides_nothing_and_stops_before_powershell(self):
         head = self.text.split("##PS-START")[0]
         self.assertIn("exit /b", head)
-        self.assertIn("-ExecutionPolicy Bypass", head)
+        # Windows PowerShell by its full path (a powershell.exe next to the launcher must not run instead), and no
+        # policy override: text given with -Command is not a script file, so the policy does not apply to it anyway.
+        self.assertIn(r'set "FC26_PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"', head)
+        self.assertIn('"%FC26_PS%" -NoProfile -Command', head)
+        self.assertNotIn("\npowershell ", head.lower().replace("\r", ""))
+        self.assertNotIn("-ExecutionPolicy Bypass", head)
         self.assertIn("pause", head, "a failure must keep the window open so the message can be read")
 
     def test_no_window_flash_for_the_bridge(self):
@@ -128,6 +133,14 @@ class LauncherFileTests(unittest.TestCase):
         self.assertIn("-WindowStyle Hidden", body)
         self.assertIn("Press Enter to close", body, "the window must wait at the end instead of closing at once")
         self.assertNotIn("Set-NetConnectionProfile", body, "the launcher must not change the network profile")
+
+    def test_windows_programs_are_started_by_full_path(self):
+        body = self.text.split("##PS-START", 1)[1]
+        self.assertNotIn("-FilePath 'powershell.exe'", body)
+        self.assertNotIn("& netsh ", body)
+        self.assertNotIn('"netsh ', body)
+        self.assertNotIn("sddl=D:(A;;GX;;;WD)", body, "the port permission must not be for Everyone")
+        self.assertNotIn("profile=any remoteip", body.replace("profile=$profiles", ""), "the firewall rule must not be for every network by default")
 
     def test_nothing_starts_with_windows(self):
         low = self.text.lower()
@@ -195,11 +208,18 @@ class LauncherEndToEndTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(scripts, "FC26_AutoCapture_v1.1.1.lua")))
         self.assertFalse(os.path.exists(self.old_script))
         self.assertTrue(os.path.exists(self.old_script + ".old"))
-        # the bridge really answers
+        # the bridge really answers (this PC's own dashboard needs no code)
         import urllib.request
         with urllib.request.urlopen("http://127.0.0.1:5050/status", timeout=5) as r:
             status = json.load(r)
         self.assertEqual(status["app"], "fc26-bridge")
+        # the launcher made the pairing code, showed it, and the bridge it started uses exactly that code
+        with open(os.path.join(self.tmp, "state", "bridge.key"), encoding="ascii") as f:
+            code = f.read().strip()
+        self.assertIn(code, out)
+        self.assertEqual(200, self.phone_request(code))
+        self.assertEqual(401, self.phone_request(None))
+        self.assertEqual(401, self.phone_request("ZZZZ-ZZZZ-ZZZZ-ZZZZ"))
         # second run: nothing to do, same bridge
         second = self.launch()
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
@@ -208,7 +228,35 @@ class LauncherEndToEndTest(unittest.TestCase):
         self.assertNotIn("Moved old scripts aside", second.stdout)
         # status option
         st = self.launch("status")
-        self.assertIn("Bridge 2.", st.stdout)
+        self.assertIn("Bridge 3.", st.stdout)
+        self.assertIn(code, st.stdout)
+        # a new code: the running bridge takes it at once, the old one stops working
+        new = self.launch("newcode nopause")
+        self.assertEqual(new.returncode, 0, new.stdout + new.stderr)
+        with open(os.path.join(self.tmp, "state", "bridge.key"), encoding="ascii") as f:
+            new_code = f.read().strip()
+        self.assertNotEqual(code, new_code)
+        self.assertIn(new_code, new.stdout)
+        self.assertEqual(401, self.phone_request(code))
+        self.assertEqual(200, self.phone_request(new_code))
+
+    def phone_request(self, code):
+        """GET /events the way the phone does it, from 'another machine' (a LAN address in the Host header)."""
+        import hashlib
+        import hmac
+        import http.client
+        headers = {"Host": "192.168.1.5:5050"}
+        if code:
+            key = hashlib.sha256(("fc26-bridge-v1:" + code.replace("-", "")).encode()).digest()
+            when, nonce = str(int(time.time())), os.urandom(16).hex()
+            text = "\n".join(["FC26-REQ-V1", "GET", "/events", when, nonce, hashlib.sha256(b"").hexdigest()])
+            headers.update({"X-FC-Time": when, "X-FC-Nonce": nonce,
+                            "X-FC-Sig": hmac.new(key, text.encode(), hashlib.sha256).hexdigest()})
+        conn = http.client.HTTPConnection("127.0.0.1", 5050, timeout=10)
+        conn.request("GET", "/events", headers=headers)
+        status = conn.getresponse().status
+        conn.close()
+        return status
 
 
 if __name__ == "__main__":

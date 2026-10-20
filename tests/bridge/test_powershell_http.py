@@ -41,7 +41,8 @@ class PowerShellHttpTest(unittest.TestCase):
         os.makedirs(bridge_dir)
         shutil.copy(BRIDGE_PS1, bridge_dir)
         cls.port = free_port()
-        env = dict(os.environ, USERPROFILE=cls.home, HOME=cls.home, DOTNET_SYSTEM_GLOBALIZATION_INVARIANT="1")
+        env = dict(os.environ, USERPROFILE=cls.home, HOME=cls.home, FC26_STATE_DIR=os.path.join(cls.tmp.name, "state"),
+                   DOTNET_SYSTEM_GLOBALIZATION_INVARIANT="1")
         cls.log = open(os.path.join(cls.tmp.name, "bridge.log"), "w")
         cls.proc = subprocess.Popen([PWSH, "-NoProfile", "-File", os.path.join(bridge_dir, "bridge.ps1"), "-Port", str(cls.port)],
                                     stdout=cls.log, stderr=subprocess.STDOUT, env=env)
@@ -98,7 +99,7 @@ class PowerShellHttpTest(unittest.TestCase):
         st = self.status()
         self.assertEqual("fc26-bridge", st["app"])
         self.assertEqual("powershell", st["bridge"]["kind"])
-        self.assertEqual(2, st["bridge"]["protocol"])
+        self.assertEqual(3, st["bridge"]["protocol"])
         self.assertFalse(st["script"]["found"])
         self.heartbeat()
         st = self.status()
@@ -111,7 +112,7 @@ class PowerShellHttpTest(unittest.TestCase):
         code, body = self.request("GET", "/")
         text = body.decode("utf-8")
         self.assertEqual(200, code)
-        for needle in ("Self check", "Re-send last match", "refreshStatus", "v2.0.0"):
+        for needle in ("Self check", "Re-send last match", "refreshStatus", "v3.0.0", "Pairing code", "New pairing code"):
             self.assertIn(needle, text)
         self.assertNotIn("$BridgeVersion", text)
 

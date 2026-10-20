@@ -113,8 +113,16 @@ class BridgeStatus(
     }
 }
 
-/** Why the phone could not talk to the bridge. */
-enum class FailKind { NONE, REFUSED, TIMEOUT, NO_ROUTE, HTTP, OTHER }
+/**
+ * Why the phone could not talk to the bridge. The last six are about the pairing code: [UNPAIRED] no code on the phone,
+ * [BAD_CODE] the PC refused it, [CLOCK] phone and PC clocks differ by more than 5 minutes, [LOCKED] too many wrong
+ * attempts, [OLD_BRIDGE] a bridge from before pairing codes, [UNTRUSTED] an answer without the right signature (not
+ * the bridge that knows the code, so whatever it said was ignored).
+ */
+enum class FailKind { NONE, REFUSED, TIMEOUT, NO_ROUTE, HTTP, OTHER, UNPAIRED, BAD_CODE, CLOCK, LOCKED, OLD_BRIDGE, UNTRUSTED }
+
+/** The kinds that a new try in ten seconds will not fix: the phone then asks less often until something changes. */
+val PAIRING_PROBLEMS = setOf(FailKind.UNPAIRED, FailKind.BAD_CODE, FailKind.CLOCK, FailKind.LOCKED, FailKind.OLD_BRIDGE, FailKind.UNTRUSTED)
 
 /** What the phone knows about its contact with the bridge right now (the input of [HealthModel]). */
 class Contact(
@@ -127,7 +135,9 @@ class Contact(
     /** Null when the bridge could not be asked, or when it is an older one without a /status page. */
     val status: BridgeStatus? = null,
     /** True when the bridge answered the event list but has no health report: an older bridge. */
-    val statusMissing: Boolean = false
+    val statusMissing: Boolean = false,
+    /** For [FailKind.CLOCK]: how many seconds the PC's clock is ahead of the phone's (negative: behind). */
+    val clockOffsetSeconds: Long = 0
 )
 
 enum class Level { LIVE, ATTENTION, DOWN }
@@ -143,8 +153,10 @@ class Health(val level: Level, val pill: String, val headline: String, val detai
  * steps, in the order the data travels: Phone, then Bridge, then Capture script.
  */
 object HealthModel {
-    /** The bridge protocol this version of the app understands. An older bridge still works, without the health report. */
-    const val REQUIRED_BRIDGE_PROTOCOL = 2
+    /** The bridge protocol this version of the app needs: 3 is the one with the pairing code. */
+    const val REQUIRED_BRIDGE_PROTOCOL = 3
+
+    const val CODE_WHERE = "The code is shown in the launcher window on the PC and on the bridge page (open http://localhost:5050 on the PC)."
 
     const val UPDATE_HINT = "Run FC26_Launcher.bat on the PC: it updates the bridge and the capture script."
 
@@ -166,7 +178,44 @@ object HealthModel {
         FailKind.TIMEOUT -> "No answer. Check that the PC is on, the phone is on the same Wi-Fi, and that Windows allows the bridge (the launcher sets this up)."
         FailKind.NO_ROUTE -> "The phone cannot find $address. Join the same Wi-Fi as the PC, or tap Find my PC."
         FailKind.HTTP -> "Something answered, but it is not the bridge. Check the address, or tap Find my PC."
+        FailKind.UNPAIRED -> "Type the pairing code in PC Connection. $CODE_WHERE"
+        FailKind.BAD_CODE -> "Check the pairing code in PC Connection. If a new code was made on the PC, type the new one. $CODE_WHERE"
+        FailKind.CLOCK -> "Set the clock of the PC (or the phone) to the right time: Windows Settings > Time & language > Set time automatically."
+        FailKind.LOCKED -> "The PC stopped answering this phone for a minute after several wrong codes. Check the code, then wait a minute."
+        FailKind.OLD_BRIDGE -> UPDATE_HINT
+        FailKind.UNTRUSTED -> "Do not use this address: the device there does not know your pairing code. Tap Find my PC, or type the address the launcher shows."
         else -> "Check the address, or tap Find my PC."
+    }
+
+    private fun clockText(offset: Long): String = when {
+        offset > 0 -> "The PC's clock is ${span(offset)} ahead of the phone's."
+        offset < 0 -> "The PC's clock is ${span(-offset)} behind the phone's."
+        else -> "The clocks of the phone and the PC differ by more than 5 minutes."
+    }
+
+    /** The pairing step: is the bridge the one that knows the code, and does it accept this phone? */
+    private fun pairingStep(contact: Contact): HealthStep = when {
+        !contact.reachable -> HealthStep("pairing", "Pairing code", StepState.UNKNOWN, "Waiting for the connection.")
+        contact.failKind == FailKind.UNPAIRED -> HealthStep(
+            "pairing", "Pairing code", StepState.FAIL, "No pairing code entered yet.", failureFix(FailKind.UNPAIRED, contact.address)
+        )
+        contact.failKind == FailKind.BAD_CODE -> HealthStep(
+            "pairing", "Pairing code", StepState.FAIL, "The PC did not accept the code.", failureFix(FailKind.BAD_CODE, contact.address)
+        )
+        contact.failKind == FailKind.CLOCK -> HealthStep(
+            "pairing", "Pairing code", StepState.FAIL, clockText(contact.clockOffsetSeconds), failureFix(FailKind.CLOCK, contact.address)
+        )
+        contact.failKind == FailKind.LOCKED -> HealthStep(
+            "pairing", "Pairing code", StepState.FAIL, "Too many wrong attempts.", failureFix(FailKind.LOCKED, contact.address)
+        )
+        contact.failKind == FailKind.OLD_BRIDGE -> HealthStep(
+            "pairing", "Pairing code", StepState.FAIL, "This bridge is from before pairing codes and cannot be paired.", UPDATE_HINT
+        )
+        contact.failKind == FailKind.UNTRUSTED -> HealthStep(
+            "pairing", "Pairing code", StepState.FAIL, "The answer was not signed with your code, so it was ignored.",
+            failureFix(FailKind.UNTRUSTED, contact.address)
+        )
+        else -> HealthStep("pairing", "Pairing code", StepState.OK, "Paired: every answer from the PC is checked.")
     }
 
     fun evaluate(contact: Contact): Health {
@@ -187,10 +236,16 @@ object HealthModel {
         }
         steps.add(phoneStep)
 
-        // 2. Bridge
+        // 2. Pairing code
+        val pairing = pairingStep(contact)
+        steps.add(pairing)
+        val paired = pairing.state == StepState.OK
+
+        // 3. Bridge
         val status = contact.status
         val bridgeStep = when {
             !contact.reachable -> HealthStep("bridge", "PC bridge", StepState.UNKNOWN, "Waiting for the connection.")
+            !paired -> HealthStep("bridge", "PC bridge", StepState.UNKNOWN, "Cannot be checked until the phone is paired.")
             status == null || contact.statusMissing -> HealthStep(
                 "bridge", "PC bridge", StepState.WARN, "An older bridge: it works, but it cannot report the script's health.", UPDATE_HINT
             )
@@ -204,10 +259,10 @@ object HealthModel {
         }
         steps.add(bridgeStep)
 
-        // 3. Capture script
+        // 4. Capture script
         val script = status?.script
         val scriptStep = when {
-            !contact.reachable || status == null || contact.statusMissing ->
+            !contact.reachable || !paired || status == null || contact.statusMissing ->
                 HealthStep("script", "Capture script", StepState.UNKNOWN, "Cannot be checked yet.")
             script == null || !script.found -> HealthStep(
                 "script", "Capture script", StepState.FAIL, "The script has not reported yet.",
@@ -228,8 +283,8 @@ object HealthModel {
         }
         steps.add(scriptStep)
 
-        // 4. Match statistics (only when the script runs)
-        if (script != null && script.found && script.alive) {
+        // 5. Match statistics (only when the script runs)
+        if (paired && script != null && script.found && script.alive) {
             steps.add(
                 if (script.exporter) HealthStep("stats", "Match statistics", StepState.OK, "Project Atlas exporter is running.")
                 else HealthStep(
@@ -248,6 +303,10 @@ object HealthModel {
                 if (contact.everConnected) "Can't reach your PC" else "Not connected",
                 phoneStep.fix.ifBlank { phoneStep.detail },
                 steps
+            )
+            !paired -> Health(
+                Level.DOWN, if (contact.failKind == FailKind.OLD_BRIDGE) "Update PC" else "Not paired",
+                "Pairing: ${pairing.detail.trimEnd('.')}", pairing.fix, steps
             )
             firstFail != null -> Health(
                 Level.DOWN, "Script off", "${firstFail.title}: ${firstFail.detail.trimEnd('.')}", firstFail.fix, steps

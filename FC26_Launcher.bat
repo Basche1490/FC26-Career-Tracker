@@ -5,7 +5,7 @@ rem  Double-click it. It finds the bridge and FC Live Editor wherever they are, 
 rem  Live Editor scripts in place, makes Windows allow your phone, and starts the bridge in
 rem  the background with no window. Run it again any time: it fixes what is missing and updates.
 rem
-rem  Options, typed after the name in a command prompt: stop, status, reset or nopause.
+rem  Options, typed after the name in a command prompt: stop, status, newcode, reset or nopause.
 rem
 rem  This file is a batch file followed by a PowerShell program, so it works from any folder.
 rem ============================================================================================
@@ -13,7 +13,15 @@ setlocal
 title FC26 Career Tracker - launcher
 set "FC26_LAUNCHER=%~f0"
 set "FC26_ARGS=%*"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$t=[IO.File]::ReadAllText($env:FC26_LAUNCHER); $i=$t.IndexOf('#'+'#PS-START'); & ([scriptblock]::Create($t.Substring($i)))"
+rem Windows PowerShell by its full path: a program named only by its name would be looked for in the current folder
+rem first, so a file called powershell.exe left next to this launcher (in Downloads, say) could run instead.
+set "FC26_PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%FC26_PS%" (
+  echo Windows PowerShell was not found at %FC26_PS%
+  pause
+  exit /b 1
+)
+"%FC26_PS%" -NoProfile -Command "$t=[IO.File]::ReadAllText($env:FC26_LAUNCHER); $i=$t.IndexOf('#'+'#PS-START'); & ([scriptblock]::Create($t.Substring($i)))"
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" (
   echo.
@@ -28,7 +36,7 @@ exit /b %RC%
 # ---------------------------------------------------------------------------------------------
 $ErrorActionPreference = 'Stop'
 
-$script:LauncherVersion = '1.0.0'
+$script:LauncherVersion = '1.1.0'
 $script:BridgePort      = 5050
 $script:FirewallRule    = 'EA FC Telemetry Bridge'
 $script:BridgeFiles     = @('bridge.ps1', 'telemetry_bridge.py')
@@ -43,9 +51,12 @@ $script:SkipNames = @(
     'Windows', 'Windows.old', '$Recycle.Bin', 'System Volume Information', 'ProgramData', 'AppData', 'node_modules',
     '.git', 'Documents and Settings', 'legacy', 'tools', 'steamapps', 'WindowsApps', 'Recovery', 'PerfLogs'
 )
-# Tests replace these to avoid asking a person.
+# Tests replace these to avoid asking a person (and to pretend Windows calls a network Public).
 $script:ChooseHook = $null
 $script:FolderHook = $null
+$script:PublicNetworksHook = $null
+$script:PairAlphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'   # the same as the bridge: no I, O, 0 or 1
+$script:PairLength = 16
 
 # ---- output --------------------------------------------------------------------------------------
 function Say([string]$Text, [string]$Color = 'Gray') { Write-Host $Text -ForegroundColor $Color }
@@ -56,6 +67,20 @@ function Say-Step([string]$Number, [string]$Text) { Write-Host ''; Write-Host ("
 
 function Test-IsWindows { return ($env:OS -eq 'Windows_NT') }
 
+# ---- Windows programs, always by their full path -------------------------------------------------------------------
+# A program named only by its name can be found in the current folder or an odd PATH entry first, so a file called
+# netsh.exe or powershell.exe left in Downloads could run instead (with administrator rights, even). These are always
+# started from Windows' own folder.
+function Get-SystemExe([string]$Relative, [string]$Fallback) {
+    if ((Test-IsWindows) -and $env:SystemRoot) {
+        $p = Join-Path $env:SystemRoot $Relative
+        if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+    }
+    return $Fallback
+}
+function Get-NetshExe { return (Get-SystemExe 'System32\netsh.exe' 'netsh') }
+function Get-PowerShellExe { return (Get-SystemExe 'System32\WindowsPowerShell\v1.0\powershell.exe' 'powershell.exe') }
+
 # ---- remembered choices --------------------------------------------------------------------------
 function Get-StateDir {
     if ($env:FC26_STATE_DIR) { return $env:FC26_STATE_DIR }
@@ -64,14 +89,18 @@ function Get-StateDir {
     return (Join-Path $base 'FC26Tracker')
 }
 
+function New-LauncherState { return @{ bridgeDir = ''; scriptDirs = @(); allowPublic = $false; publicDeclined = @() } }
+
 function Read-LauncherState {
-    $state = @{ bridgeDir = ''; scriptDirs = @() }
+    $state = New-LauncherState
     $path = Join-Path (Get-StateDir) 'launcher.json'
     try {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             $j = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($j.bridgeDir) { $state.bridgeDir = [string]$j.bridgeDir }
             if ($j.scriptDirs) { $state.scriptDirs = @(@($j.scriptDirs) | ForEach-Object { [string]$_ }) }
+            if ($j.allowPublic -eq $true) { $state.allowPublic = $true }
+            if ($j.publicDeclined) { $state.publicDeclined = @(@($j.publicDeclined) | ForEach-Object { [string]$_ }) }
         }
     } catch { }
     return $state
@@ -81,9 +110,65 @@ function Save-LauncherState($State) {
     try {
         $dir = Get-StateDir
         if (-not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        $obj = [pscustomobject]@{ bridgeDir = [string]$State.bridgeDir; scriptDirs = @($State.scriptDirs) }
+        $obj = [pscustomobject]@{
+            bridgeDir = [string]$State.bridgeDir; scriptDirs = @($State.scriptDirs)
+            allowPublic = [bool]$State.allowPublic; publicDeclined = @($State.publicDeclined)
+        }
         [IO.File]::WriteAllText((Join-Path $dir 'launcher.json'), ($obj | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
     } catch { }
+}
+
+# ---- the pairing code ----------------------------------------------------------------------------
+# The phone has to prove it knows this code before the bridge tells it anything (docs/SECURITY.md). It lives in
+# bridge.key next to launcher.json; the bridge reads the same file (and makes it itself if it was started some other
+# way). A new code written here is used by a running bridge from its next request on.
+function ConvertTo-PairCode([string]$Text) { return ([regex]::Replace([string]$Text, '[^A-Za-z0-9]', '')).ToUpperInvariant() }
+
+function Test-PairCode([string]$Text) {
+    $c = ConvertTo-PairCode $Text
+    if ($c.Length -ne $script:PairLength) { return $false }
+    foreach ($ch in $c.ToCharArray()) { if ($script:PairAlphabet.IndexOf($ch) -lt 0) { return $false } }
+    return $true
+}
+
+function Format-PairCode([string]$Text) {
+    $c = ConvertTo-PairCode $Text
+    $parts = @()
+    for ($i = 0; $i -lt $c.Length; $i += 4) { $parts += $c.Substring($i, [Math]::Min(4, $c.Length - $i)) }
+    return ($parts -join '-')
+}
+
+function New-PairCode {
+    $bytes = New-Object byte[] $script:PairLength
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $sb = New-Object Text.StringBuilder
+    foreach ($b in $bytes) { [void]$sb.Append($script:PairAlphabet[[int]$b % 32]) }   # 256 is a multiple of 32: no bias
+    return $sb.ToString()
+}
+
+function Get-PairingFile { return (Join-Path (Get-StateDir) 'bridge.key') }
+
+function Save-PairingCode([string]$Code) {
+    $dir = Get-StateDir
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $path = Get-PairingFile
+    $tmp = $path + '.tmp'
+    [IO.File]::WriteAllText($tmp, ((Format-PairCode $Code) + "`r`n"), (New-Object Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+}
+
+# The current code, made now if there is none (or the file is damaged). '' when it cannot be read or written.
+function Get-PairingCode {
+    $path = Get-PairingFile
+    $code = ''
+    try { if (Test-Path -LiteralPath $path -PathType Leaf) { $code = ConvertTo-PairCode ([IO.File]::ReadAllText($path)) } } catch { $code = '' }
+    if (Test-PairCode $code) { return $code }
+    try {
+        $code = New-PairCode
+        Save-PairingCode $code
+        return $code
+    } catch { return '' }
 }
 
 # ---- versions ------------------------------------------------------------------------------------
@@ -281,6 +366,15 @@ function Find-BridgeDirs([string[]]$UserRoots, [string[]]$DriveRoots) {
     })
     $sorted = @($rated | Sort-Object -Property @{ Expression = 'Key'; Descending = $true }, @{ Expression = 'Time'; Descending = $true })
     return @($sorted | ForEach-Object { $_.Dir })
+}
+
+# A folder found by searching the disk (not next to this launcher, not used before) is only used when the person says
+# so: the launcher runs the bridge from it and copies scripts from it into Live Editor.
+function Confirm-FoundFolder([string]$What, [string]$Dir, [string]$Version) {
+    $v = $(if ($Version) { " (version $Version)" } else { '' })
+    $question = "Found {0} in:`n     {1}{2}`n  The launcher would run these files. Use this folder?" -f $What, $Dir, $v
+    $pick = Read-Choice $question @('Yes, use this folder', 'No, let me pick the folder myself')
+    return ($pick -eq 0)
 }
 
 # ---- finding Live Editor -------------------------------------------------------------------------
@@ -487,33 +581,81 @@ function Find-Python {
     return $null
 }
 
-function Test-FirewallRule {
-    if (-not (Test-IsWindows)) { return $true }
+# 'ok', 'missing' or 'outdated'. Outdated: an earlier launcher made it for every kind of network (Public ones too), or
+# it is not limited to devices on the local network. With $AllowPublic (the person chose it) Public networks are fine.
+function Get-FirewallRuleState([bool]$AllowPublic = $false) {
+    if (-not (Test-IsWindows)) { return 'ok' }
     try {
-        & netsh advfirewall firewall show rule name="$($script:FirewallRule)" *> $null
-        return ($LASTEXITCODE -eq 0)
-    } catch { return $false }
+        $rules = @(Get-NetFirewallRule -DisplayName $script:FirewallRule -ErrorAction Stop)
+        if ($rules.Count -eq 0) { return 'missing' }
+        foreach ($r in $rules) {
+            $prof = [string]$r.Profile
+            if (-not $AllowPublic -and ($prof -eq 'Any' -or $prof -match 'Public')) { return 'outdated' }
+            if ($AllowPublic -and $prof -ne 'Any' -and $prof -notmatch 'Public') { return 'outdated' }
+            $remote = @(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $r -ErrorAction Stop | ForEach-Object { [string]$_.RemoteAddress })
+            if ($remote -notcontains 'LocalSubnet') { return 'outdated' }
+        }
+        return 'ok'
+    } catch {
+        # Get-NetFirewallRule fails when no rule has that name (and on very old Windows): ask netsh whether it exists.
+        try {
+            & (Get-NetshExe) advfirewall firewall show rule name="$($script:FirewallRule)" *> $null
+            if ($LASTEXITCODE -eq 0) { return 'ok' }
+        } catch { }
+        return 'missing'
+    }
 }
 
-function Test-UrlAcl([int]$Port) {
-    if (-not (Test-IsWindows)) { return $true }
-    try {
-        $out = (& netsh http show urlacl "url=http://+:$Port/" 2>&1) | Out-String
-        return ($out -match (':' + $Port + '/'))
-    } catch { return $false }
+function Test-FirewallRule([bool]$AllowPublic = $false) { return ((Get-FirewallRuleState $AllowPublic) -eq 'ok') }
+
+function Get-CurrentUserSid {
+    if (-not (Test-IsWindows)) { return '' }
+    try { return [string][Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { return '' }
 }
 
-# The commands that need administrator rights, one per line.
-function Get-ElevatedCommands([bool]$NeedFirewall, [bool]$NeedUrlAcl, [int]$Port) {
+# The PowerShell bridge needs Windows' permission to listen on the port. 'ok' (for this Windows user), 'missing', or
+# 'outdated' (an earlier launcher gave it to Everyone, which lets any program of any user take the port).
+function Get-UrlAclState([int]$Port) {
+    if (-not (Test-IsWindows)) { return 'ok' }
+    try {
+        $out = (& (Get-NetshExe) http show urlacl "url=http://+:$Port/" 2>&1) | Out-String
+        if ($out -notmatch (':' + $Port + '/')) { return 'missing' }
+        $me = [string][Security.Principal.WindowsIdentity]::GetCurrent().Name
+        if ($me -and $out.IndexOf($me, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return 'ok' }
+        return 'outdated'
+    } catch { return 'missing' }
+}
+
+function Test-UrlAcl([int]$Port) { return ((Get-UrlAclState $Port) -eq 'ok') }
+
+# The networks Windows calls Public right now, by name. The firewall rule is for Private and Domain networks only.
+function Get-PublicNetworks {
+    if ($script:PublicNetworksHook) { return @(& $script:PublicNetworksHook) }
+    if (-not (Test-IsWindows)) { return @() }
+    try {
+        return @(Get-NetConnectionProfile -ErrorAction Stop | Where-Object { [string]$_.NetworkCategory -eq 'Public' } | ForEach-Object { [string]$_.Name })
+    } catch { return @() }
+}
+
+function Open-NetworkSettings {
+    if (-not (Test-IsWindows)) { return }
+    try { Start-Process 'ms-settings:network-status' } catch { }
+}
+
+# The commands that need administrator rights, one per line. Programs by full path; the URL permission is for this
+# Windows user only (its SID), never for Everyone.
+function Get-ElevatedCommands([bool]$NeedFirewall, [bool]$NeedUrlAcl, [int]$Port, [bool]$AllowPublic = $false, [string]$UserSid = '') {
     $rule = $script:FirewallRule
+    $netsh = Get-NetshExe
+    $profiles = $(if ($AllowPublic) { 'any' } else { 'private,domain' })
     $lines = @()
     if ($NeedFirewall) {
-        $lines += "netsh advfirewall firewall delete rule name=`"$rule`" | Out-Null"
-        $lines += "netsh advfirewall firewall add rule name=`"$rule`" dir=in action=allow protocol=TCP localport=$Port profile=any remoteip=LocalSubnet | Out-Null"
+        $lines += "& '$netsh' advfirewall firewall delete rule name=`"$rule`" | Out-Null"
+        $lines += "& '$netsh' advfirewall firewall add rule name=`"$rule`" dir=in action=allow protocol=TCP localport=$Port profile=$profiles remoteip=LocalSubnet | Out-Null"
     }
-    if ($NeedUrlAcl) {
-        $lines += "netsh http delete urlacl `"url=http://+:$Port/`" | Out-Null"
-        $lines += "netsh http add urlacl `"url=http://+:$Port/`" `"sddl=D:(A;;GX;;;WD)`" | Out-Null"
+    if ($NeedUrlAcl -and ($UserSid -match '^S-1-[0-9]+(-[0-9]+)+$')) {
+        $lines += "& '$netsh' http delete urlacl `"url=http://+:$Port/`" | Out-Null"
+        $lines += "& '$netsh' http add urlacl `"url=http://+:$Port/`" `"sddl=D:(A;;GX;;;$UserSid)`" | Out-Null"
     }
     return ($lines -join "`r`n")
 }
@@ -522,7 +664,7 @@ function Get-ElevatedCommands([bool]$NeedFirewall, [bool]$NeedUrlAcl, [int]$Port
 function Invoke-Elevated([string]$Commands) {
     try {
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Commands))
-        $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -Wait -PassThru `
+        $p = Start-Process -FilePath (Get-PowerShellExe) -Verb RunAs -WindowStyle Hidden -Wait -PassThru `
             -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc)
         return ($p.ExitCode -eq 0)
     } catch { return $false }
@@ -571,13 +713,15 @@ function Start-BridgeProcess([string]$BridgeDir, $Python, [int]$Port) {
     if (Test-IsWindows) { $hidden['WindowStyle'] = 'Hidden' }
     if ($Python) {
         $script = Join-Path $BridgeDir 'telemetry_bridge.py'
-        $argList = @($Python.Prefix) + @('-u', ('"' + $script + '"'))
+        # -I: Python ignores PYTHON* settings and does not load modules from the bridge folder or the current folder;
+        # -X utf8 keeps the bridge's output readable in the log.
+        $argList = @($Python.Prefix) + @('-I', '-X', 'utf8', '-u', ('"' + $script + '"'))
         $proc = Start-Process -FilePath $Python.Path -ArgumentList $argList -WorkingDirectory $BridgeDir @hidden `
             -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
     } else {
         $script = Join-Path $BridgeDir 'bridge.ps1'
         $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $script + '"'), '-Port', [string]$Port)
-        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WorkingDirectory $BridgeDir @hidden `
+        $proc = Start-Process -FilePath (Get-PowerShellExe) -ArgumentList $argList -WorkingDirectory $BridgeDir @hidden `
             -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
     }
     return @{ Process = $proc; Log = $out; ErrorLog = $err }
@@ -613,7 +757,7 @@ function Get-LanAddresses {
 
 # ---- the program ---------------------------------------------------------------------------------
 function Get-Options {
-    $o = @{ Stop = $false; Status = $false; Reset = $false; NoPause = $false }
+    $o = @{ Stop = $false; Status = $false; Reset = $false; NoPause = $false; NewCode = $false }
     $text = [string]$env:FC26_ARGS
     foreach ($t in ($text -split '\s+')) {
         switch -Regex ($t.Trim('-', '/').ToLowerInvariant()) {
@@ -621,6 +765,7 @@ function Get-Options {
             '^status$'  { $o.Status = $true }
             '^reset$'   { $o.Reset = $true }
             '^nopause$' { $o.NoPause = $true }
+            '^newcode$' { $o.NewCode = $true }
         }
     }
     return $o
@@ -641,6 +786,8 @@ function Show-Status([int]$Port) {
             default { Say ("  [ i  ] " + $line) }
         }
     }
+    $code = Get-PairingCode
+    if ($code) { Say ("  Pairing code for the app: {0}" -f (Format-PairCode $code)) 'Green' }
 }
 
 function Invoke-Launcher {
@@ -663,9 +810,21 @@ function Invoke-Launcher {
         return 0
     }
     if ($opt.Status) { Show-Status $port; return 0 }
+    if ($opt.NewCode) {
+        try {
+            $new = New-PairCode
+            Save-PairingCode $new
+            Say-Ok ("New pairing code: {0}" -f (Format-PairCode $new))
+            Say '  Type it in the app (menu, PC Connection). The old code stops working right away, also on any other phone.'
+            return 0
+        } catch {
+            Say-Fail ("Could not save a new pairing code: " + $_.Exception.Message)
+            return 1
+        }
+    }
 
     $state = Read-LauncherState
-    if ($opt.Reset) { $state = @{ bridgeDir = ''; scriptDirs = @() }; Save-LauncherState $state; Say-Ok 'Forgot the remembered folders.' }
+    if ($opt.Reset) { $state = New-LauncherState; Save-LauncherState $state; Say-Ok 'Forgot the remembered folders and network choices.' }
 
     # ---- Step 1: the project files ----
     Say-Step '1 of 4' 'Finding the bridge and the Live Editor scripts'
@@ -678,7 +837,7 @@ function Invoke-Launcher {
     if (-not $bridgeDir) {
         Say '  Looking in Desktop, Downloads and Documents ...' 'DarkGray'
         $dirs = @(Find-BridgeDirs $userRoots $driveRoots)
-        if ($dirs.Count -gt 0) { $bridgeDir = $dirs[0] }
+        if ($dirs.Count -gt 0 -and (Confirm-FoundFolder 'the bridge files' $dirs[0] (Get-BridgeVersion $dirs[0]))) { $bridgeDir = $dirs[0] }
     }
     if (-not $bridgeDir) {
         $picked = Read-FolderChoice 'Select the folder that contains bridge.ps1 (the pc-bridge folder)'
@@ -688,7 +847,9 @@ function Invoke-Launcher {
     if (-not $sourceScripts) {
         $m = { param($d) Test-HasFiles $d $script:ScriptFiles }
         $cands = @(Search-Directories -Roots $userRoots -MaxDepth 4 -Match $m | Where-Object { $_ -notmatch '[\\/]lua[\\/]' })
-        if ($cands.Count -gt 0) { $sourceScripts = $cands[0] }
+        if ($cands.Count -gt 0 -and (Confirm-FoundFolder 'the capture scripts' $cands[0] (Get-LuaVersion (Join-Path $cands[0] 'FC26_Auto_Capture.lua')))) {
+            $sourceScripts = $cands[0]
+        }
     }
     if ($bridgeDir) {
         $bv = Get-BridgeVersion $bridgeDir
@@ -732,26 +893,60 @@ function Invoke-Launcher {
     Say-Step '3 of 4' 'Letting your phone reach this PC'
     $python = $null
     if ($bridgeDir) { $python = Find-Python }
-    $needFirewall = -not (Test-FirewallRule)
-    $needAcl = ($null -eq $python) -and (-not (Test-UrlAcl $port))
+    # Windows keeps the bridge closed on networks it calls Public (a cafe, a hotel, often a home network it was never
+    # told about). The person decides; the launcher never changes the network type itself.
+    $allowPublic = [bool]$state.allowPublic
+    $publicNets = @(Get-PublicNetworks)
+    if ($publicNets.Count -gt 0 -and -not $allowPublic) {
+        $netName = [string]$publicNets[0]
+        Say-Warn ("Windows treats the network '{0}' as Public. On Public networks the bridge stays closed, so your phone cannot connect." -f $netName)
+        if (@($state.publicDeclined) -notcontains $netName) {
+            $pick = Read-Choice 'What do you want to do?' @(
+                'This is my home network: open Windows Settings so I can make it a Private network (recommended)',
+                'Allow the bridge on Public networks too (less safe: people on such a network can reach it, though not without the pairing code)',
+                'Leave it closed for now')
+            if ($pick -eq 1) {
+                $allowPublic = $true
+                $state.allowPublic = $true
+            } elseif ($pick -eq 2) {
+                $state.publicDeclined = @(@($state.publicDeclined) + $netName)
+            } else {
+                Open-NetworkSettings
+                Say '  In Settings open this network, choose "Private network", then run this launcher again.' 'Yellow'
+            }
+            Save-LauncherState $state
+        } else {
+            Say '         You chose to leave it closed. Make it a Private network in Windows Settings, or run "FC26_Launcher.bat reset" to be asked again.' 'DarkGray'
+        }
+    }
+    $fwState = Get-FirewallRuleState $allowPublic
+    $needFirewall = ($fwState -ne 'ok')
+    $aclState = $(if ($null -eq $python) { Get-UrlAclState $port } else { 'ok' })
+    $needAcl = ($aclState -ne 'ok')
+    $sid = Get-CurrentUserSid
     if ($python) { Say-Ok 'Python found: the bridge runs with Python (no administrator rights needed for the bridge itself).' }
     elseif ($bridgeDir) { Say-Ok 'No Python found: the bridge runs with PowerShell.' }
+    if ($fwState -eq 'outdated') { Say-Warn 'The Windows firewall rule from an earlier version allowed more than needed; it is replaced now.' }
+    if ($aclState -eq 'outdated') { Say-Warn 'The port permission from an earlier version was for every user of this PC; it is now given to you only.' }
+    $where = $(if ($allowPublic) { 'devices on the same network only' } else { 'home and work networks only, devices on the same network only' })
     if ($needFirewall -or $needAcl) {
         Say 'Windows needs one permission so that your phone can connect. It will ask once (the shield window).' 'Yellow'
-        $ok = Invoke-Elevated (Get-ElevatedCommands $needFirewall $needAcl $port)
-        if ((-not (Test-FirewallRule)) -or (($null -eq $python) -and (-not (Test-UrlAcl $port)))) {
+        $ok = Invoke-Elevated (Get-ElevatedCommands $needFirewall $needAcl $port $allowPublic $sid)
+        if ((-not (Test-FirewallRule $allowPublic)) -or (($null -eq $python) -and (-not (Test-UrlAcl $port)))) {
             Say-Warn 'The permission was not given. The phone may not be able to connect. Run this launcher again and choose Yes when Windows asks.'
         } else {
-            Say-Ok 'Windows now allows your phone on the local network (port 5050, this network only).'
+            Say-Ok ("Windows now lets your phone reach the bridge (port {0}, {1})." -f $port, $where)
         }
     } else {
-        Say-Ok 'Windows already allows your phone (port 5050, this network only).'
+        Say-Ok ("Windows already lets your phone reach the bridge (port {0}, {1})." -f $port, $where)
     }
 
     # ---- Step 4: the bridge ----
     Say-Step '4 of 4' 'Starting the bridge'
     $address = ''
     $bridgeOk = $false
+    $pairCode = Get-PairingCode      # made before the bridge starts, so both use the same code
+    if (-not $pairCode) { Say-Fail ("No pairing code could be saved in {0}, so no phone can connect." -f (Get-StateDir)) }
     if ($bridgeDir) {
         $source = Get-BridgeVersion $bridgeDir
         $now = Get-BridgeStatus $port
@@ -816,13 +1011,21 @@ function Invoke-Launcher {
     } else {
         Say '  1. On your phone open the app, the menu, PC Connection, and tap Find my PC.'
     }
-    Say '  2. In FC Live Editor load your career, open the Lua Scripts tab, pick'
+    if ($pairCode) {
+        Say '  2. Type this pairing code in the same place:'
+        Say ("        {0}" -f (Format-PairCode $pairCode)) 'Green'
+        Say '     Keep it to yourself: only a phone with this code can read anything from this PC.'
+    } else {
+        Say '  2. Type the pairing code shown on the bridge page (http://localhost:5050) in the same place.'
+    }
+    Say '  3. In FC Live Editor load your career, open the Lua Scripts tab, pick'
     Say '     FC26_Auto_Capture.lua and press Execute. (If it is not in the list, restart Live Editor.)'
-    Say '  3. Play. After each match press Advance to reach the Career Hub: the match then appears on your phone.'
+    Say '  4. Play. After each match press Advance to reach the Career Hub: the match then appears on your phone.'
     Say ''
     Say '  The bridge runs in the background. Run this launcher again any time to check or update.'
-    Say '  Options:  FC26_Launcher.bat stop    stops the bridge'
-    Say '            FC26_Launcher.bat status  shows what the bridge sees (phone, script, folders)'
+    Say '  Options:  FC26_Launcher.bat stop     stops the bridge'
+    Say '            FC26_Launcher.bat status   shows what the bridge sees (phone, script, folders) and the code'
+    Say '            FC26_Launcher.bat newcode  makes a new pairing code (the old one stops working)'
     if ($installedAny) { Say '  New scripts were installed: if Live Editor was open, restart it once.' 'Yellow' }
 
     if ($bridgeOk) { return 0 } else { return 1 }

@@ -9,11 +9,14 @@ import html
 import ipaddress
 import threading
 import csv
+import hashlib
+import hmac
+import secrets
 from urllib.parse import urlsplit
 
 LOCAL_PORT = 5050
-BRIDGE_VERSION = "2.0.0"
-BRIDGE_PROTOCOL = 2            # what the phone app, this bridge and the Live Editor script have to agree on
+BRIDGE_VERSION = "3.0.0"
+BRIDGE_PROTOCOL = 3            # 3 = the phone must prove it knows the pairing code (docs/SECURITY.md)
 MIN_SCRIPT_VERSION = "2.8.0"   # older capture scripts do not report their health or answer a re-send request
 SCRIPT_ALIVE_SECONDS = 20      # the script writes its heartbeat every 5 seconds
 PHONE_ALIVE_SECONDS = 30       # the app asks the bridge for news every 10 seconds
@@ -22,14 +25,31 @@ EVENTS_FILE = os.path.join(os.path.dirname(__file__), "telemetry_events.json")
 MAX_BODY_BYTES = 5 * 1024 * 1024  # largest POST body the bridge will accept (5 MiB)
 
 # ---------------------------------------------------------------------------
-# Access control
+# Access control (protocol 3, written up in docs/SECURITY.md)
 #
-# The phone only ever READS (GET /events). Everything that writes - the Lua
-# scripts, the test buttons and /clear - runs on this same PC. So reads are open
-# to the local network, but writes are only accepted from the PC itself.
-# Host / Origin checks keep web pages open in a browser from reaching the bridge.
+# * This PC's own browser (loopback address, host name localhost / 127.0.0.1, no proxy headers) may open the
+#   dashboard and press its buttons. That is the only unsigned access to anything.
+# * The phone may do exactly three things: GET /events, GET /status and POST /resend. Every one of them has to carry
+#   a signature made with the pairing code (HMAC-SHA256 over the method, path, time, a one-time number and the body),
+#   and the bridge signs its answer the same way so the phone knows the answer is from this bridge.
+# * Everybody else gets the one-line GET /ping answer (is a bridge here? which version?) and nothing more.
+# * Host / Origin checks keep web pages open in a browser from reaching the bridge.
 # ---------------------------------------------------------------------------
 PC_NAME = socket.gethostname().lower()
+
+PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"      # no I, O, 0 or 1: nothing to mix up when typing
+PAIR_LENGTH = 16                                          # 16 x 5 bits = 80 bits of randomness
+KEY_LABEL = "fc26-bridge-v1:"
+AUTH_WINDOW_SECONDS = 300                                 # how far the phone's clock may differ from this PC's
+AUTH_MAX_FAILS = 10                                       # wrong signatures from one address ...
+AUTH_FAIL_WINDOW_SECONDS = 60                             # ... within this time ...
+AUTH_LOCKOUT_SECONDS = 60                                 # ... and that address is refused for this long
+AUTH_MAX_NONCES = 20000
+PHONE_ROUTES = {("GET", "/events"), ("GET", "/json"), ("GET", "/api/telemetry"),
+                ("GET", "/status"), ("GET", "/api/status"), ("POST", "/resend")}
+LOCAL_HOST_NAMES = ("localhost", "127.0.0.1", "::1")
+PROXY_HEADERS = ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Forwarded", "Via",
+                 "CF-Connecting-IP", "True-Client-IP", "X-Client-IP")
 
 
 def _strip_mapped(addr):
@@ -37,18 +57,6 @@ def _strip_mapped(addr):
     if addr.lower().startswith("::ffff:"):
         return addr[7:]
     return addr
-
-
-def is_local_client(client_ip, server_ip):
-    """True when the request comes from this PC (loopback, or the PC's own LAN address)."""
-    client_ip = _strip_mapped(client_ip)
-    server_ip = _strip_mapped(server_ip)
-    try:
-        if ipaddress.ip_address(client_ip).is_loopback:
-            return True
-    except ValueError:
-        return False
-    return client_ip == server_ip
 
 
 def _host_only(host_header):
@@ -59,6 +67,21 @@ def _host_only(host_header):
     if h.count(":") == 1:                  # name:port or 1.2.3.4:port
         return h.split(":")[0]
     return h
+
+
+def is_trusted_local(client_ip, host_header, header_get):
+    """True only for a request that really comes from a program on this PC: the connection is from the loopback
+    address, it is addressed to localhost / 127.0.0.1 / [::1], and no proxy or tunnel added forwarding headers.
+    A request that arrived through a tunnel (ngrok and the like) always carries such headers, so it is not trusted."""
+    try:
+        if not ipaddress.ip_address(_strip_mapped(client_ip)).is_loopback:
+            return False
+    except ValueError:
+        return False
+    host = _host_only(host_header).lower()
+    if host and host not in LOCAL_HOST_NAMES:
+        return False
+    return not any(header_get(name) for name in PROXY_HEADERS)
 
 
 def host_header_ok(host_header):
@@ -86,6 +109,201 @@ def origin_ok(origin, host_header, sec_fetch_site=None):
     except ValueError:
         return False
     return bool(netloc) and netloc == (host_header or "").strip().lower()
+
+
+# ---- the pairing code ------------------------------------------------------------------------------------------
+def state_dir():
+    """Where the bridge keeps the pairing code: %APPDATA%\\FC26Tracker (the launcher keeps its notes there too)."""
+    override = os.environ.get("FC26_STATE_DIR")
+    if override:
+        return override
+    base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "FC26Tracker")
+
+
+def pairing_file():
+    return os.path.join(state_dir(), "bridge.key")
+
+
+def normalize_code(text):
+    return re.sub(r"[^A-Za-z0-9]", "", str(text or "")).upper()
+
+
+def valid_code(text):
+    code = normalize_code(text)
+    return len(code) == PAIR_LENGTH and all(c in PAIR_ALPHABET for c in code)
+
+
+def format_code(text):
+    code = normalize_code(text)
+    return "-".join(code[i:i + 4] for i in range(0, len(code), 4))
+
+
+def generate_code():
+    return "".join(secrets.choice(PAIR_ALPHABET) for _ in range(PAIR_LENGTH))
+
+
+def derive_key(code):
+    return hashlib.sha256((KEY_LABEL + normalize_code(code)).encode("ascii")).digest()
+
+
+_pair_lock = threading.Lock()
+_pair_cache = {"stamp": None, "code": "", "key": b""}
+
+
+def _write_pairing_file(code):
+    os.makedirs(state_dir(), exist_ok=True)
+    path = pairing_file()
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        f.write(format_code(code) + "\n")
+    os.replace(tmp, path)
+
+
+def _stamp(path):
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def pairing_code(create=True):
+    """The normalised pairing code. The first call creates it. A change to the file (the launcher's "new code") is
+    picked up on the next request, no restart needed. Returns "" when there is none and it cannot be created."""
+    path = pairing_file()
+    with _pair_lock:
+        stamp = _stamp(path)
+        if stamp is not None and stamp == _pair_cache["stamp"]:
+            return _pair_cache["code"]
+        code = ""
+        if stamp is not None:
+            try:
+                with open(path, encoding="ascii", errors="ignore") as f:
+                    code = normalize_code(f.read())
+            except OSError:
+                code = ""
+        if not valid_code(code):
+            if not create:
+                return ""
+            code = generate_code()
+            try:
+                _write_pairing_file(code)
+            except OSError as e:
+                print(f"[SECURITY] Could not save the pairing code to {path}: {e}")
+                _pair_cache.update(stamp=None, code="", key=b"")
+                return ""
+            stamp = _stamp(path)
+        _pair_cache.update(stamp=stamp, code=code, key=derive_key(code))
+        return code
+
+
+def pairing_key():
+    code = pairing_code()
+    return _pair_cache["key"] if code else b""
+
+
+def rotate_pairing_code():
+    """Makes a new pairing code. Every phone has to be given the new one."""
+    code = generate_code()
+    with _pair_lock:
+        _write_pairing_file(code)
+        _pair_cache.update(stamp=_stamp(pairing_file()), code=code, key=derive_key(code))
+    return code
+
+
+# ---- signing ---------------------------------------------------------------------------------------------------
+def body_hash(body):
+    return hashlib.sha256(body or b"").hexdigest()
+
+
+def sign_request(key, method, target, timestamp, nonce, body=b""):
+    text = "\n".join(["FC26-REQ-V1", method.upper(), target, str(timestamp), nonce, body_hash(body)])
+    return hmac.new(key, text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def sign_response(key, nonce, status, body):
+    text = "\n".join(["FC26-RESP-V1", nonce, str(status), body_hash(body)])
+    return hmac.new(key, text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+class AuthResult:
+    def __init__(self, ok, status=200, code="", message="", nonce="", extra=None):
+        self.ok, self.status, self.code, self.message, self.nonce = ok, status, code, message, nonce
+        self.extra = extra or {}
+
+
+class AuthGuard:
+    """Checks the signature of a request from another machine and keeps track of one-time numbers and wrong guesses."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.nonces = {}        # one-time number -> when it may be forgotten
+        self.fails = {}         # address -> times of recent wrong signatures
+        self.locked = {}        # address -> refused until
+        self.rejected = 0
+        self.last_rejected = {"time": 0.0, "ip": "", "code": ""}
+
+    def locked_for(self, ip, now):
+        with self.lock:
+            until = self.locked.get(ip, 0)
+            if until > now:
+                return int(until - now) + 1
+            self.locked.pop(ip, None)
+            return 0
+
+    def _fail(self, ip, now, code):
+        self.rejected += 1
+        self.last_rejected = {"time": now, "ip": ip, "code": code}
+        recent = [t for t in self.fails.get(ip, []) if now - t < AUTH_FAIL_WINDOW_SECONDS] + [now]
+        self.fails[ip] = recent
+        if len(recent) >= AUTH_MAX_FAILS:
+            self.locked[ip] = now + AUTH_LOCKOUT_SECONDS
+            self.fails.pop(ip, None)
+        if len(self.fails) > 2000:
+            self.fails.clear()
+
+    def check(self, ip, method, target, body, header_get, key, now):
+        """AuthResult for one request from another machine. Never raises."""
+        wait = self.locked_for(ip, now)
+        if wait:
+            return AuthResult(False, 429, "locked", f"Too many wrong attempts. Try again in {wait} seconds.", extra={"retryAfter": wait})
+        if not key:
+            return AuthResult(False, 503, "not_paired", "The bridge has no pairing code yet.")
+        stamp = (header_get("X-FC-Time") or "").strip()
+        nonce = (header_get("X-FC-Nonce") or "").strip().lower()
+        sig = (header_get("X-FC-Sig") or "").strip().lower()
+        with self.lock:
+            if not (stamp.isdigit() and len(stamp) <= 12 and re.fullmatch(r"[0-9a-f]{16,64}", nonce) and re.fullmatch(r"[0-9a-f]{64}", sig)):
+                self._fail(ip, now, "unsigned")
+                return AuthResult(False, 401, "unsigned", "This request is not signed. Enter the pairing code in the app.")
+            expected = sign_request(key, method, target, stamp, nonce, body)
+            if not hmac.compare_digest(expected, sig):
+                self._fail(ip, now, "bad_signature")
+                return AuthResult(False, 401, "bad_signature", "The pairing code was not accepted.")
+            if abs(now - int(stamp)) > AUTH_WINDOW_SECONDS:
+                return AuthResult(False, 401, "clock_skew", "The clocks of the phone and the PC differ by more than 5 minutes.",
+                                  extra={"bridgeTime": int(now)})
+            for n in [n for n, until in self.nonces.items() if until < now]:
+                del self.nonces[n]
+            if nonce in self.nonces:
+                self._fail(ip, now, "replay")
+                return AuthResult(False, 401, "replay", "This request was already used.")
+            if len(self.nonces) >= AUTH_MAX_NONCES:
+                return AuthResult(False, 503, "busy", "Too many requests right now.")
+            self.nonces[nonce] = now + 2 * AUTH_WINDOW_SECONDS
+        return AuthResult(True, nonce=nonce)
+
+
+guard = AuthGuard()
+
+
+def ping_info():
+    """What anybody on the network may learn: that a bridge is here, which kind, and that it wants a pairing code."""
+    return {"app": "fc26-bridge", "protocol": BRIDGE_PROTOCOL, "version": BRIDGE_VERSION, "name": PC_NAME,
+            "auth": "hmac-sha256"}
+
 
 def sanitize_penalty_text(text):
     if not text:
@@ -440,12 +658,24 @@ def selfcheck(script, outbox, ev, roots, local_ip, now):
 
     if phone_seen["time"] <= 0:
         checks.append(_check("phone", "Phone", "warn", "The phone has not connected yet.",
-                             f"In the app open PC Connection (in the menu) and enter http://{local_ip}:{LOCAL_PORT}, or tap Find my PC."))
+                             f"In the app open PC Connection (in the menu), tap Find my PC (or enter http://{local_ip}:{LOCAL_PORT}) and type the pairing code shown on the dashboard at http://localhost:{LOCAL_PORT}."))
     elif now - phone_seen["time"] > PHONE_ALIVE_SECONDS:
         checks.append(_check("phone", "Phone", "warn", f"The phone last asked {_ago(now - phone_seen['time'])} ({phone_seen['ip']}).",
                              "Open the app. Phone and PC need to be on the same Wi-Fi."))
     else:
         checks.append(_check("phone", "Phone", "ok", f"Connected ({phone_seen['ip']}), last asked {_ago(now - phone_seen['time'])}."))
+
+    rejected = guard.last_rejected
+    if rejected["time"] and now - rejected["time"] < 300:
+        reasons = {"bad_signature": "a wrong pairing code", "unsigned": "no pairing code", "replay": "a repeated request",
+                   "locked": "too many wrong attempts"}
+        checks.append(_check("security", "Network access", "warn",
+                             f"A device on your network ({rejected['ip']}) was refused {_ago(now - rejected['time'])}: "
+                             f"{reasons.get(rejected['code'], 'not allowed')}.",
+                             "If that was not your phone, press New pairing code on the dashboard (open http://localhost:"
+                             f"{LOCAL_PORT} on this PC)."))
+    else:
+        checks.append(_check("security", "Network access", "ok", "Only a phone with the pairing code can read from the bridge."))
 
     if local_ip.startswith("127."):
         checks.append(_check("address", "Network address", "fail", "This PC has no network address.",
@@ -543,6 +773,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
     </div>
     <div class="card">
+        <h3>Pairing code</h3>
+        <p style="font-size:13px;color:#cbd5e1;margin-top:0;">Type this code into the app (menu, PC Connection). Only a phone that has it can read anything from this bridge. Do not share it, and do not post a screenshot of this page.</p>
+        <div id="pairCode" style="font-family:monospace;font-size:26px;letter-spacing:2px;color:#facc15;">__PAIRING__</div>
+        <div style="margin-top:12px;">
+            <button id="newCodeBtn" class="red" type="button">New pairing code</button>
+            <span id="newCodeNote" style="font-size:13px;color:#cbd5e1;margin-left:6px;"></span>
+        </div>
+    </div>
+    <div class="card">
         <h3>Self check</h3>
         <div id="summary">Checking...</div>
         <div id="checks"></div>
@@ -562,6 +801,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <pre style="background:#0f172a;padding:12px;border-radius:8px;max-height:260px;overflow:auto;font-size:12px;color:#cbd5e1;">__EVENTS__</pre>
     </div>
 <script>
+document.getElementById('newCodeBtn').onclick = function () {
+    if (!confirm('Make a new pairing code? The phone will stop working until you type the new code into the app.')) return;
+    fetch('/pairing/new', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (d) {
+        if (d && d.code) { document.getElementById('pairCode').textContent = d.code; document.getElementById('newCodeNote').textContent = 'Done. Enter the new code in the app.'; }
+        else { document.getElementById('newCodeNote').textContent = (d && d.message) || 'Could not make a new code.'; }
+    }).catch(function () { document.getElementById('newCodeNote').textContent = 'The bridge did not answer.'; });
+};
 function row(c) {
     var r = document.createElement('div'); r.className = 'row';
     var d = document.createElement('div'); d.className = 'dot ' + (c.state || '');
@@ -615,6 +861,13 @@ setInterval(refresh, 5000);
 
 class TelemetryHandler(http.server.BaseHTTPRequestHandler):
     timeout = 15  # drop clients that stall in the middle of a request
+    server_version = "FC26Bridge"
+    sys_version = ""
+    _sign_with = None      # (key, one-time number) once the phone's request has been checked: the answer is signed too
+    _last_logged = {}
+
+    def version_string(self):
+        return self.server_version
 
     def end_headers(self):
         # Deliberately no CORS headers: the phone app is not a browser and the
@@ -624,13 +877,25 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         super().end_headers()
 
-    def _reject(self, code, message):
-        body = json.dumps({"status": "error", "message": message}).encode()
+    def _send(self, code, body, content_type="application/json", extra=None):
         self.send_response(code)
-        self.send_header('Content-type', 'application/json')
+        self.send_header('Content-type', content_type)
         self.send_header('Content-Length', str(len(body)))
+        for name, value in (extra or {}).items():
+            self.send_header(name, str(value))
+        if self._sign_with:
+            key, nonce = self._sign_with
+            self.send_header('X-FC-Sig', sign_response(key, nonce, code, body))
         self.end_headers()
         self.wfile.write(body)
+
+    def _json(self, code, obj):
+        self._send(code, json.dumps(obj).encode())
+
+    def _reject(self, code, message, extra=None, headers=None):
+        reply = {"status": "error", "message": message}
+        reply.update(extra or {})
+        self._send(code, json.dumps(reply).encode(), extra=headers)
 
     def _host_allowed(self):
         if host_header_ok(self.headers.get('Host')):
@@ -638,61 +903,117 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
         self._reject(403, "Unexpected Host header.")
         return False
 
+    def _is_local(self):
+        return is_trusted_local(self.client_address[0], self.headers.get('Host'), self.headers.get)
+
     def _write_allowed(self):
-        """Gate for anything that changes state. Sends the error reply itself when refusing."""
+        """Gate for anything that changes state on this PC (dashboard buttons, the Live Editor script). Only a program on
+        this PC may do these, and a web page in a browser may not. Sends the error reply itself when refusing."""
         if not self._host_allowed():
             return False
-        server_ip = self.connection.getsockname()[0]
-        if not is_local_client(self.client_address[0], server_ip):
-            self._reject(403, "Writes are only accepted from the PC running the bridge.")
+        if not self._is_local():
+            self._reject(403, "Only the PC that runs the bridge may do this. Open http://localhost:%d on that PC." % LOCAL_PORT,
+                         {"code": "local_only"})
             return False
         if not origin_ok(self.headers.get('Origin'), self.headers.get('Host'), self.headers.get('Sec-Fetch-Site')):
             self._reject(403, "Cross-site request blocked.")
             return False
         return True
 
+    def _read_body(self, limit):
+        """The request body, or None after sending the error reply."""
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except ValueError:
+            self._reject(400, "Bad Content-Length.")
+            return None
+        if length < 0:
+            self._reject(400, "Bad Content-Length.")
+            return None
+        if length > limit:
+            self._reject(413, "Payload too large.")
+            return None
+        return self.rfile.read(length)
+
+    def _log_refusal(self, ip, result):
+        now = time.time()
+        key = (ip, result.code)
+        if now - TelemetryHandler._last_logged.get(key, 0) > 60:
+            TelemetryHandler._last_logged[key] = now
+            print(f"[{time.strftime('%H:%M:%S')}] Refused a request from {ip}: {result.message}")
+
+    def _phone_allowed(self, method, body=b""):
+        """The gate for the phone's three requests (and for any request from another machine). Local, unsigned requests
+        are the dashboard's. Everything from another machine must be signed. Returns True when the request may go on;
+        otherwise the refusal has been sent."""
+        self._sign_with = None
+        ip = _strip_mapped(self.client_address[0])
+        if self._is_local() and not self.headers.get('X-FC-Sig'):
+            return True
+        route = (method, self.path.lower())
+        if not self._is_local():
+            wait = guard.locked_for(ip, time.time())
+            if wait:
+                self._reject(429, f"Too many wrong attempts. Try again in {wait} seconds.", {"code": "locked"}, {"Retry-After": wait})
+                return False
+            if route not in PHONE_ROUTES:
+                self._reject(403, "Only the PC that runs the bridge may do this. Open http://localhost:%d on that PC." % LOCAL_PORT,
+                             {"code": "local_only"})
+                return False
+        result = guard.check(ip, method, self.path, body, self.headers.get, pairing_key(), time.time())
+        if not result.ok:
+            self._log_refusal(ip, result)
+            self._reject(result.status, result.message, dict(result.extra, code=result.code))
+            return False
+        self._sign_with = (pairing_key(), result.nonce)
+        if not self._is_local():
+            note_phone(ip)
+        return True
+
     def do_OPTIONS(self):
         # No CORS preflight support - browsers on other sites must not be able to write.
         self._reject(405, "Method not allowed.")
 
-    def _json(self, code, obj):
-        body = json.dumps(obj).encode()
-        self.send_response(code)
-        self.send_header('Content-type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
     def do_POST(self):
         path = self.path.lower()
+        self._sign_with = None
         if path == "/resend":
-            # The phone's "Re-send last match" button. It only asks the capture script to send its latest match again
-            # (rate limited, and the bridge drops a duplicate), so it is allowed from the local network. Host and
-            # Origin checks still keep web pages in a browser out.
+            # The phone's "Re-send last match" button (signed), or the dashboard's own button. It only asks the capture
+            # script to send its latest match again (rate limited, and the bridge drops a duplicate).
             if not self._host_allowed():
                 return
             if not origin_ok(self.headers.get('Origin'), self.headers.get('Host'), self.headers.get('Sec-Fetch-Site')):
                 self._reject(403, "Cross-site request blocked.")
+                return
+            body = self._read_body(1024)
+            if body is None or not self._phone_allowed("POST", body):
                 return
             code, reply = request_resend()
             self._json(code, reply)
             return
         if not self._write_allowed():
             return
+        if path == "/pairing/new":
+            try:
+                code = rotate_pairing_code()
+            except OSError as e:
+                self._reject(500, f"Could not save the new pairing code: {e}")
+                return
+            print(f"[{time.strftime('%H:%M:%S')}] A new pairing code was made. Enter it in the app.")
+            self._json(200, {"status": "ok", "code": format_code(code)})
+            return
+
         if path == "/test-match":
             sample = create_sample_match()
             add_event("Live Match Final", "Full Time: vs 3 - 1 Arsenal (Premier League)", json.dumps(sample))
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(b'{"status":"ok","message":"Test match sent successfully!"}')
+            self._json(200, {"status": "ok", "message": "Test match sent successfully!"})
             return
 
         if path == "/test-transfer":
             sample = {
                 "dataType": "transfer",
                 "title": "Transfer Finalized",
-                "message": "Erling Haaland signed from Manchester City for €120.0M",
+                "message": "Erling Haaland signed from Manchester City for \u20ac120.0M",
                 "playerName": "Erling Haaland",
                 "type": "Bought",
                 "feeM": 120.0,
@@ -700,48 +1021,37 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
                 "date": time.strftime("%Y-%m-%d")
             }
             add_event("Transfer Finalized", sample["message"], json.dumps(sample))
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(b'{"status":"ok","message":"Test transfer sent successfully!"}')
+            self._json(200, {"status": "ok", "message": "Test transfer sent successfully!"})
             return
 
         if path == "/clear":
             with events_lock:
                 events.clear()
                 save_events()
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(b'{"status":"cleared"}')
+            self._json(200, {"status": "cleared"})
             return
 
-        try:
-            content_length = int(self.headers.get('Content-Length', 0))
-        except ValueError:
-            self._reject(400, "Bad Content-Length.")
+        body = self._read_body(MAX_BODY_BYTES)
+        if body is None:
             return
-        if content_length < 0:
-            self._reject(400, "Bad Content-Length.")
-            return
-        if content_length > MAX_BODY_BYTES:
-            self._reject(413, "Payload too large.")
-            return
-        post_data = self.rfile.read(content_length).decode('utf-8', errors='replace')
-        status, reply = process_payload_text(post_data)
+        status, reply = process_payload_text(body.decode('utf-8', errors='replace'))
         if status != 200:
             self._reject(status, reply)
             return
-
-        self.send_response(status)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(reply).encode())
+        self._json(status, reply)
 
     def do_GET(self):
+        self._sign_with = None
         if not self._host_allowed():
             return
         path = self.path.lower()
+        if path == "/ping":
+            # The only thing anybody on the network may ask: is a bridge here, and which one?
+            self._json(200, ping_info())
+            return
+        if not self._is_local() or self.headers.get('X-FC-Sig'):
+            if not self._phone_allowed("GET"):
+                return
         if path in ("/test-match", "/test-transfer", "/clear"):
             # These used to fire on a plain GET, which means a link or <img> tag on any
             # web page could trigger them. They are POST-only now (use the dashboard buttons).
@@ -750,22 +1060,14 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        server_ip = self.connection.getsockname()[0]
-        if path in ["/events", "/json", "/api/telemetry", "/status", "/api/status"] and \
-                not is_local_client(self.client_address[0], server_ip):
-            note_phone(self.client_address[0])
-
         if path in ["/status", "/api/status"]:
             self._json(200, build_status())
             return
 
         if path in ["/events", "/json", "/api/telemetry"]:
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
             with events_lock:
                 body = json.dumps(events).encode()
-            self.wfile.write(body)
+            self._send(200, body)
             return
 
         page = (DASHBOARD_HTML
@@ -773,12 +1075,10 @@ class TelemetryHandler(http.server.BaseHTTPRequestHandler):
                 .replace("__PORT__", str(LOCAL_PORT))
                 .replace("__VERSION__", html.escape(BRIDGE_VERSION))
                 .replace("__COUNT__", str(len(events)))
+                .replace("__PAIRING__", html.escape(format_code(pairing_code())))
                 .replace("__EVENTS__", html.escape(json.dumps(events, indent=2))))
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html; charset=utf-8')
-        self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
-        self.end_headers()
-        self.wfile.write(page.encode('utf-8'))
+        self._send(200, page.encode('utf-8'), 'text/html; charset=utf-8',
+                   {'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"})
 
     def log_message(self, format, *args):
         pass
@@ -1609,15 +1909,49 @@ def watch_outbox():
             traceback.print_exc()
         time.sleep(1)
 
+class _QuietStream:
+    """stdout / stderr that never raise. Started without a window, the bridge's output can lose its reader (on Linux and
+    macOS when the starting program exits); a failed print must never break a request or stop a watcher thread."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        try:
+            return self._stream.write(text)
+        except (OSError, ValueError):
+            return len(text)
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except (OSError, ValueError):
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 if __name__ == "__main__":
+    import sys
+    sys.stdout = _QuietStream(sys.stdout)
+    sys.stderr = _QuietStream(sys.stderr)
     local_ip = get_local_ip()
     port = LOCAL_PORT
     print("===================================================")
     print(f" EA SPORTS FC TELEMETRY BRIDGE {BRIDGE_VERSION} (Python)")
+    code = pairing_code()
     print(f" ⭐ ENTER IN YOUR ANDROID APP:")
     print(f"    http://{local_ip}:{port}")
+    if not code:
+        print(" ⚠️ No pairing code could be made, so no phone can connect. Check that the folder above can be written to.")
+    elif os.environ.get("FC26_HIDDEN"):
+        print(" Pairing code: shown by FC26_Launcher.bat and on the dashboard (never written to this log).")
+    else:
+        print(f"    Pairing code: {format_code(code)}")
     print(f" Web Dashboard: http://localhost:{port}")
-    print(" Phone access is read-only (apart from asking for the last match again); other writes are accepted from this PC only.")
+    print(" Only a phone that knows the pairing code can read from the bridge (and only events, status and 'send the last match again').")
+    print(" Everything else works from this PC only.")
     print(" Self check: open the web dashboard above.")
     print(" Keep this window open while playing!")
     print("===================================================")

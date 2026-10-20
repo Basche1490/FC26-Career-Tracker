@@ -351,11 +351,18 @@ Check 'plan.something_else_on_the_port' ((Get-BridgePlan @{ Running = $false; Ol
 Check 'plan.unknown_source_version_keeps' ((Get-BridgePlan (Status-Of '1.0.0') '').Action -eq 'keep')
 
 # ---- 10. firewall commands ---------------------------------------------------------------------------------------
+$sid = 'S-1-5-21-1004336348-1177238915-682003330-1001'
 $cmds = Get-ElevatedCommands $true $false 5050
-Check 'elevated.firewall_rule' ($cmds -match 'add rule name="EA FC Telemetry Bridge"' -and $cmds -match 'localport=5050' -and $cmds -match 'remoteip=LocalSubnet' -and $cmds -match 'profile=any') $cmds
+Check 'elevated.firewall_rule' ($cmds -match 'add rule name="EA FC Telemetry Bridge"' -and $cmds -match 'localport=5050' -and $cmds -match 'remoteip=LocalSubnet') $cmds
+Check 'elevated.firewall_home_and_work_networks_only' ($cmds -match 'profile=private,domain' -and $cmds -notmatch 'profile=any') $cmds
+Check 'elevated.firewall_public_only_when_chosen' ((Get-ElevatedCommands $true $false 5050 $true) -match 'profile=any')
+Check 'elevated.programs_by_full_path_call' (@($cmds -split "`r`n" | Where-Object { $_ -and $_ -notmatch "^& '" }).Count -eq 0) $cmds
 Check 'elevated.no_urlacl_when_not_needed' ($cmds -notmatch 'urlacl')
-$cmds2 = Get-ElevatedCommands $true $true 5050
+$cmds2 = Get-ElevatedCommands $true $true 5050 $false $sid
 Check 'elevated.urlacl_when_needed' ($cmds2 -match 'add urlacl')
+Check 'elevated.urlacl_for_this_user_only' ($cmds2 -match [regex]::Escape("sddl=D:(A;;GX;;;$sid)") -and $cmds2 -notmatch ';;;WD\)') $cmds2
+Check 'elevated.no_urlacl_without_a_user' ((Get-ElevatedCommands $false $true 5050 $false '') -eq '')
+Check 'elevated.odd_user_text_is_not_put_in_a_command' ((Get-ElevatedCommands $false $true 5050 $false 'S-1-5"; Remove-Item C:\') -eq '')
 Check 'elevated.nothing_needed_is_empty' ((Get-ElevatedCommands $false $false 5050) -eq '')
 $perr = $null; $ptok = $null
 [void][System.Management.Automation.Language.Parser]::ParseInput($cmds2, [ref]$ptok, [ref]$perr)
@@ -363,6 +370,36 @@ Check 'elevated.commands_are_valid_powershell' ($perr.Count -eq 0)
 $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmds2))
 Check 'elevated.encoded_roundtrip' ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($enc)) -eq $cmds2)
 Check 'elevated.does_not_change_network_profile' ($cmds2 -notmatch 'Set-NetConnectionProfile' -and $cmds2 -notmatch 'NetworkCategory')
+Check 'system.programs_named_by_path_on_windows_only' ((Get-NetshExe) -eq 'netsh' -and (Get-PowerShellExe) -eq 'powershell.exe')
+Check 'firewall.not_windows_is_fine' ((Get-FirewallRuleState) -eq 'ok' -and (Get-UrlAclState 5050) -eq 'ok')
+
+# ---- 10b. the pairing code ---------------------------------------------------------------------------------------
+Check 'pair.format' ((Format-PairCode 'abcdefghjklmnpqr') -eq 'ABCD-EFGH-JKLM-NPQR')
+Check 'pair.valid' ((Test-PairCode 'abcd efgh-jklm npqr') -and -not (Test-PairCode 'ABCD-EFGH-JKLM-NPQ0') -and -not (Test-PairCode 'ABCD-EFGH-JKLM-NPQI') -and -not (Test-PairCode 'ABCD'))
+$codes = @(1..100 | ForEach-Object { New-PairCode })
+Check 'pair.new_codes_are_valid_and_different' ((@($codes | Where-Object { -not (Test-PairCode $_) }).Count -eq 0) -and (@($codes | Select-Object -Unique).Count -eq 100))
+$first = Get-PairingCode
+Check 'pair.made_on_first_use' ((Test-PairCode $first) -and (Test-Path -LiteralPath (Get-PairingFile) -PathType Leaf))
+Check 'pair.kept_afterwards' ((Get-PairingCode) -eq $first)
+Check 'pair.file_has_the_shown_form' (([IO.File]::ReadAllText((Get-PairingFile))).Trim() -eq (Format-PairCode $first))
+[IO.File]::WriteAllText((Get-PairingFile), 'broken')
+$second = Get-PairingCode
+Check 'pair.damaged_file_is_replaced' ((Test-PairCode $second) -and $second -ne $first)
+
+# ---- 10c. asking before using what a search found, and Public networks -------------------------------------------
+$script:ChooseAnswer = 0
+$script:ChooseCalls = 0
+Check 'confirm.yes' (Confirm-FoundFolder 'the bridge files' '/x/pc-bridge' '3.0.0')
+Check 'confirm.asked_once_with_the_folder' ($script:ChooseCalls -eq 1 -and ($script:ChooseOptions -join '|') -match 'Yes')
+$script:ChooseAnswer = 1
+Check 'confirm.no' (-not (Confirm-FoundFolder 'the bridge files' '/x/pc-bridge' ''))
+$script:ChooseAnswer = -1
+Check 'confirm.unclear_answer_is_no' (-not (Confirm-FoundFolder 'the capture scripts' '/x' ''))
+$script:ChooseAnswer = 0
+Check 'public.none_off_windows' (@(Get-PublicNetworks).Count -eq 0)
+$script:PublicNetworksHook = { @('Cafe WiFi') }
+Check 'public.hook' ((@(Get-PublicNetworks) -join ',') -eq 'Cafe WiFi')
+$script:PublicNetworksHook = $null
 
 # ---- 11. python detection ----------------------------------------------------------------------------------------
 $realPath = $env:PATH
@@ -391,7 +428,7 @@ $env:PATH = $realPath
 
 # ---- 12. state file ----------------------------------------------------------------------------------------------
 $st = Read-LauncherState
-Check 'state.default_is_empty' ($st.bridgeDir -eq '' -and $st.scriptDirs.Count -eq 0)
+Check 'state.default_is_empty' ($st.bridgeDir -eq '' -and $st.scriptDirs.Count -eq 0 -and -not $st.allowPublic -and $st.publicDeclined.Count -eq 0)
 $st.bridgeDir = '/some/where'
 $st.scriptDirs = @('/a', '/b c')
 Save-LauncherState $st
@@ -401,6 +438,11 @@ $st.scriptDirs = @('/only')
 Save-LauncherState $st
 $back = Read-LauncherState
 Check 'state.single_item_stays_a_list' ($back.scriptDirs.Count -eq 1 -and $back.scriptDirs[0] -eq '/only')
+$st.allowPublic = $true
+$st.publicDeclined = @('Cafe WiFi')
+Save-LauncherState $st
+$back = Read-LauncherState
+Check 'state.network_choices_roundtrip' ($back.allowPublic -and $back.publicDeclined.Count -eq 1 -and $back.publicDeclined[0] -eq 'Cafe WiFi')
 [IO.File]::WriteAllText((Join-Path (Get-StateDir) 'launcher.json'), '{ this is not json')
 $back = Read-LauncherState
 Check 'state.corrupt_file_is_ignored' ($back.bridgeDir -eq '' -and $back.scriptDirs.Count -eq 0)
@@ -417,7 +459,9 @@ $o = Get-Options
 Check 'options.status_and_reset' ($o.Status -and $o.Reset)
 $env:FC26_ARGS = 'banana'
 $o = Get-Options
-Check 'options.unknown_is_ignored' (-not $o.Stop -and -not $o.Status -and -not $o.Reset -and -not $o.NoPause)
+Check 'options.unknown_is_ignored' (-not $o.Stop -and -not $o.Status -and -not $o.Reset -and -not $o.NoPause -and -not $o.NewCode)
+$env:FC26_ARGS = 'newcode'
+Check 'options.newcode' ((Get-Options).NewCode)
 $env:FC26_ARGS = ''
 
 # ---- 14. asking the bridge on a port (ports come from the python test) ------------------------------------------
