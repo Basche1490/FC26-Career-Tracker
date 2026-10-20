@@ -51,7 +51,6 @@ private fun searchEafcPlayers(query: String, allPlayers: List<com.fctracker.care
         .toList()
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 /**
  * The nickname to save. The app shows the nickname before the Full Name, so a nickname that is only the common name of
  * a regen template (copied in by an older version, or by picking the template in this dialog) must go as soon as the
@@ -83,6 +82,7 @@ internal fun nicknameToKeep(
     return typedNickname.takeIf { it.isNotBlank() }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: List<com.fctracker.career.EafcPlayer> = emptyList(), onDismiss: () -> Unit, onUpdate: (Player) -> Unit, onDelete: (() -> Unit)? = null) {
     var name by remember { mutableStateOf(player?.name ?: "") }
