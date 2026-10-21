@@ -35,8 +35,8 @@ print("1. every script parses")
 for _, name in ipairs({
     -- the two scripts people use
     "FC26_Auto_Capture.lua", "FC26_AutoCapture_v1.1.1.lua",
-    -- optional tool, and the older scripts that are kept in legacy/ (they must still parse)
-    "tools/FC26_Probe.lua",
+    -- optional tools, and the older scripts that are kept in legacy/ (they must still parse)
+    "tools/FC26_Probe.lua", "tools/FC26_TableCensus.lua",
     "legacy/FC26_MatchStatsExport.lua", "legacy/FC26_Snapshot.lua", "legacy/send_latest_match.lua",
     "legacy/telemetry_auto_loop.lua", "legacy/telemetry_sender_v2.lua", "legacy/telemetry_sync.lua",
     "legacy/telemetry_test_connection.lua"
@@ -532,6 +532,102 @@ for _, mode in ipairs({ { true, "with GetDBTableRows" }, { false, "record by rec
     check(pos_newest and pos_middle and pos_oldest and pos_newest < pos_middle and pos_middle < pos_oldest,
         "squad list is sorted by joining date, newest first")
     if not mode[1] then check(missing > 0, "candidate mode really probed columns the game does not have") end
+end
+
+
+-- ---------------------------------------------------------------------------------------------------------
+print("3b. FC26_TableCensus.lua runs against a pretend game database")
+local function census_data()
+    local data = build_data()
+    data.leagueteamlinks = {
+        { teamid = 900, leagueid = 31, prevleagueid = 31, currenttableposition = 1, points = 3, nummatchesplayed = 1, previousyeartableposition = 1, champion = 1 },
+        { teamid = 902, leagueid = 31, prevleagueid = 32, currenttableposition = 2, points = 3, nummatchesplayed = 1, previousyeartableposition = 1, champion = 1 },
+        { teamid = MANAGED, leagueid = 14, prevleagueid = 14, currenttableposition = 5, points = 1, nummatchesplayed = 1, previousyeartableposition = 9, champion = 0 },
+        { teamid = 800, leagueid = 14, prevleagueid = 14, currenttableposition = 1, points = 3, nummatchesplayed = 1, previousyeartableposition = 1, champion = 1 },
+    }
+    data.career_playerawards = { { playerid = 1, teamid = MANAGED, season = 4, typeid = 3, count = 1 } }
+    data.career_competitionprogress = { { teamid = MANAGED, compobjid = 469, season = 4, stageid = 508, hasteamwon = 0 } }
+    -- a table no list knows about, named only in one of Live Editor's own Lua files
+    data.career_secretwinners = { { compobjid = 91, teamid = 900, season = 3 } }
+    return data
+end
+
+local function run_census(with_api_rows, with_file_api)
+    local out_path = os.tmpname() .. ".txt"
+    local data = census_data()
+    local n_tables = 0
+    for _ in pairs(data) do n_tables = n_tables + 1 end
+    install_env(data, with_api_rows, out_path)
+    _G.FC26_CENSUS_OUT_PATH = out_path
+    local real_open = io.open
+    local le_file = os.tmpname()
+    do
+        local f = real_open(le_file, "wb")
+        f:write('local t = LE.db:GetTable("career_secretwinners")\nlocal u = GetDBTableRows("players")\n')
+        f:close()
+    end
+    if with_file_api then
+        _G.getFileList = function(folder, pattern)
+            if folder == "lua" then return { "lua\\helpers.lua", "readme.txt" } end
+            return {}
+        end
+        _G.getDirectoryList = function(folder)
+            if folder == "lua" then return { "imports", "." } end
+            return {}
+        end
+        io.open = function(path, mode)
+            if path == "lua\\helpers.lua" then return real_open(le_file, mode) end
+            return real_open(path, mode)
+        end
+    end
+    local quiet_print = _G.print
+    _G.print = function() end
+    local ok, err = pcall(dofile, scripts .. "tools/FC26_TableCensus.lua")
+    _G.print = quiet_print
+    io.open = real_open
+    _G.getFileList, _G.getDirectoryList, _G.FC26_CENSUS_OUT_PATH = nil, nil, nil
+    local report, csv = "", ""
+    local f = real_open(out_path, "rb")
+    if f then report = f:read("a") f:close() os.remove(out_path) end
+    local csv_path = out_path:gsub("%.txt$", "") .. "_tables.csv"
+    local c = real_open(csv_path, "rb")
+    if c then csv = c:read("a") c:close() os.remove(csv_path) end
+    os.remove(le_file)
+    return ok, err, report, csv, n_tables
+end
+
+for _, mode in ipairs({ { true, true, "with GetDBTableRows and Live Editor's file functions" }, { false, false, "record by record, no file functions" } }) do
+    print("   mode: " .. mode[3])
+    local ok, err, report, csv, n_tables = run_census(mode[1], mode[2])
+    check(ok, "census runs to the end", err)
+    check(report:find("SECTION FAILED", 1, true) == nil, "no section failed", report:match("SECTION FAILED[^\r\n]*"))
+    check(report:find("Managed team: 115486 Torquay AFC", 1, true) ~= nil, "managed team is found")
+    check(report:find("LE.db methods", 1, true) ~= nil, "Live Editor's own functions are listed")
+    local expected = mode[2] and n_tables or (n_tables - 1) -- without the file functions the hidden table cannot be known
+    check(report:find("tables that exist: " .. expected, 1, true) ~= nil, "every table of the pretend game is found (" .. expected .. ")",
+        report:match("tables that exist: %d+"))
+    if mode[2] then
+        check(report:find("career_secretwinners%s+rows=1%s+%[from Live Editor files%]") ~= nil,
+            "a table named only in Live Editor's files is found and marked")
+        check(report:find("found only in Live Editor's files; 1 Lua files read", 1, true) ~= nil, "Live Editor's Lua files are read")
+    else
+        check(report:find("its files were not read", 1, true) ~= nil, "no file functions: says so instead of starting a program")
+    end
+    if mode[1] then
+        check(report:find("currenttableposition", 1, true) ~= nil, "columns are listed")
+        check(report:find("-- career_users (1 rows)", 1, true) ~= nil, "sample rows are shown")
+        check(report:find("clubteamid->Torquay AFC", 1, true) ~= nil, "sample rows show team names")
+        check(csv:find("career_users,1,", 1, true) ~= nil and csv:find("^table,rows,columns") ~= nil, "the CSV lists the tables")
+        check(report:find("typeid=3", 1, true) ~= nil, "awards are dumped in the season-end check")
+    else
+        check(report:find("(columns not readable)", 1, true) ~= nil, "without GetDBTableRows the columns are reported as not readable")
+    end
+    check(report:find("last season's winner: Juventus (champion flag=1, now in league 31)", 1, true) ~= nil, "last season's league winner is shown")
+    check(report:find("last season's winner: Monaco", 1, true) == nil, "a team promoted as champion of another league is not called this league's winner")
+    check(report:find("your league (league 14)", 1, true) ~= nil and report:find("now 1. Leicester City", 1, true) ~= nil,
+        "the managed team's own league is added with its leader")
+    check(report:find("fixture list not readable", 1, true) ~= nil, "no game memory here: the fixture check says so instead of failing")
+    check(report:find("=== end of report ===", 1, true) ~= nil, "the report is complete")
 end
 
 
