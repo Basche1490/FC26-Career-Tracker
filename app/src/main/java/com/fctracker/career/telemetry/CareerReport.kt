@@ -17,6 +17,7 @@ import com.fctracker.career.WorldTopScorer
 import com.fctracker.career.WorldWinner
 import com.fctracker.career.logic.Dates
 import com.fctracker.career.logic.WorldWinners
+import com.fctracker.career.logic.LeagueTables
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -94,6 +95,10 @@ object CareerReport {
                 val kept = s.leagueTables.filter { it.league.lowercase() !in names }
                 val merged = incoming + kept
                 if (merged != s.leagueTables) { s = s.copy(leagueTables = merged); changed = true }
+                // The club went up or down: the game's table with the club in it names the career's league now.
+                val userInOld = incoming.any { t -> t.league.equals(s.leagueName, true) && t.rows.any { it.isUser } }
+                val moved = incoming.firstOrNull { t -> LeagueTables.isDomesticLeague(t.league) && !t.league.equals(s.leagueName, true) && t.rows.any { it.isUser } }
+                if (!userInOld && moved != null && s.leagueName.isNotBlank()) { s = s.copy(leagueName = moved.league); changed = true }
             }
         }
 

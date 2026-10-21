@@ -389,7 +389,9 @@ data class TransferLog(
      * The other player of a player swap: the one who went the other way in the same deal. Null for deals without a
      * swap (and for everything saved by older versions).
      */
-    val swapPlayerName: String? = null
+    val swapPlayerName: String? = null,
+    /** For a regen: the real player he is based on (he lends the headshot). */
+    val regenOriginalName: String? = null
 )
 
 /**

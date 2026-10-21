@@ -572,6 +572,7 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
                         isLoanedIn = log.type == "In (Loan)",
                         status = "Active",
                         isRegen = log.isRegen,
+                        regenOriginalName = log.regenOriginalName,
                         headshotUrl = log.headshotUrl
                     ))
                 }
@@ -935,7 +936,7 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
 
     fun deletePlayer(id: String) {
         _state.update { current ->
-            current.copy(players = current.players.filter { it.id != id })
+            current.copy(players = current.players.filter { it.id != id }, academyPlayers = current.academyPlayers.filter { it.id != id })
         }
     }
 
@@ -961,6 +962,7 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
             }
             current.copy(
                 players = current.players.map { if (it.id == player.id) player else it },
+                academyPlayers = current.academyPlayers.map { if (it.id == player.id) player else it },
                 transfers = updatedTransfers
             )
         }
@@ -1131,6 +1133,14 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         }
         persistData()
     }
+    fun moveLeague(newLeague: String, movedWithMe: List<String>, promoted: Boolean) {
+        edit { CareerOps.moveLeague(it, newLeague, movedWithMe, promoted) }
+        persistData()
+    }
+    fun saveLeaders(leaders: CompetitionLeaders) {
+        edit { s -> s.copy(leaders = listOf(leaders.copy(source = Source.MANUAL)) + s.leaders.filterNot { it.competition.equals(leaders.competition, true) }) }
+        persistData()
+    }
     fun applyNewSeasonClubs(leaving: List<String>, promotedIn: List<String>, relegatedIn: List<String>) {
         edit { CareerOps.applyNewSeasonClubs(it, leaving, promotedIn, relegatedIn) }
         persistData()
@@ -1166,6 +1176,24 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         _state.update { it.copy(activeFormation = applied.activeFormation, players = placed) }
         persistData()
         return true
+    }
+
+    /** Promotes a prospect to the first team, wherever he is kept (the game's academy list or the squad list). */
+    fun promoteAcademyPlayer(p: Player) {
+        edit { s ->
+            val promoted = p.copy(isAcademy = false, isPromoted = true, promotedSeasonYear = s.startYear, status = "Active")
+            val inSquad = s.players.any { it.id == p.id }
+            s.copy(
+                players = if (inSquad) s.players.map { if (it.id == p.id) promoted else it } else s.players + promoted,
+                academyPlayers = s.academyPlayers.filterNot { it.id == p.id }
+            )
+        }
+        persistData()
+    }
+
+    fun removeAcademyPlayer(id: String) {
+        edit { s -> s.copy(players = s.players.filterNot { it.id == id }, academyPlayers = s.academyPlayers.filterNot { it.id == id }) }
+        persistData()
     }
 
     // -- the assistant ----------------------------------------------------------------------------------------------

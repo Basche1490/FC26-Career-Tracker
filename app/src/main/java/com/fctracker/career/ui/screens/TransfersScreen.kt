@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.*
@@ -46,95 +47,47 @@ import androidx.compose.foundation.rememberScrollState
 @Composable
 fun TransfersScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
     val state by viewModel.state.collectAsState()
-    val viewingSeason = state.historicalSeasons.find { it.year == state.viewingSeasonYear }
-    val displayPlayers = viewingSeason?.players?.takeIf { it.isNotEmpty() } ?: state.players
-    val displayTransfers = (viewingSeason?.transfers?.takeIf { it.isNotEmpty() } ?: state.transfers).sortedByDescending { it.date }
-    val isArchived = state.viewingSeasonYear != null
+    val view = remember(state) { com.fctracker.career.logic.SeasonView.of(state) }
+    val health by viewModel.health.collectAsState()
+    val console = state.platform == com.fctracker.career.Platform.CONSOLE
+    val displayTransfers = view.transfers.sortedByDescending { it.date }
     var selectedTabIndex by remember { mutableStateOf(0) }
-    val tabs = listOf("Transfer Market", "Scout Network")
-    
     var showTransferForm by remember { mutableStateOf(false) }
     var formInitialType by remember { mutableStateOf("In (Permanent)") }
     var logToEdit by remember { mutableStateOf<com.fctracker.career.TransferLog?>(null) }
     var showDeployScout by remember { mutableStateOf(false) }
     var showScoutNetwork by remember { mutableStateOf(false) }
+    val c = com.fctracker.career.ui.theme.FcTheme.colors
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                title = { Text("Transfers & Scouting", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground) },
-                navigationIcon = {
-                    IconButton(onClick = onMenuClick) {
-                        Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.primary)
-                    }
-                },
-                actions = {
-                    StatusPill(viewModel)
-                    IconButton(
-                        onClick = {
-                            viewModel.fetchLiveTelemetry()
-                        }
-                    ) {
-                        Icon(
-                            androidx.compose.material.icons.Icons.Default.Refresh,
-                            contentDescription = "Sync from Bridge",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground
-                )
+    Column(Modifier.fillMaxSize().background(c.bg)) {
+        Column(Modifier.statusBarsPadding()) {
+            if (view.isArchived) Box(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)) { com.fctracker.career.ui.components.ArchivedBanner("${view.label} · ${view.leagueName}", { viewModel.setViewingSeasonYear(null) }) }
+            com.fctracker.career.ui.components.FcTopBar(
+                "Transfers", sub = "Market · ${view.label}", onNav = onMenuClick,
+                actions = { if (!view.isArchived && !console) com.fctracker.career.ui.components.FcIconButton(Icons.Default.Refresh, "Sync from the PC", { viewModel.fetchLiveTelemetry() }) },
+                pill = if (!view.isArchived && !console) ({ StatusPill(health.level, health.pill, onClick = { viewModel.navigateToScreen("connection") }) }) else null
             )
+            if (!view.isArchived) com.fctracker.career.ui.components.SoftTabs(listOf("Transfer market", "Scout network"), selectedTabIndex, { selectedTabIndex = it }, Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
         }
-    ) { padding ->
-        Column(modifier = Modifier.padding(padding).imePadding().fillMaxSize()) {
-            TabRow(
-                selectedTabIndex = selectedTabIndex,
-                containerColor = MaterialTheme.colorScheme.surface,
-                contentColor = MaterialTheme.colorScheme.primary,
-                indicator = { tabPositions ->
-                    if (selectedTabIndex < tabPositions.size) {
-                        TabRowDefaults.SecondaryIndicator(
-                            Modifier.tabIndicatorOffset(tabPositions[selectedTabIndex]),
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            ) {
-                tabs.forEachIndexed { index, title ->
-                    Tab(
-                        selected = selectedTabIndex == index,
-                        onClick = { selectedTabIndex = index },
-                        text = { Text(title, fontWeight = FontWeight.Bold) }
-                    )
-                }
-            }
-            
-            when (selectedTabIndex) {
+        Box(Modifier.weight(1f).imePadding()) {
+            when (if (view.isArchived) 0 else selectedTabIndex) {
                 0 -> TransferMarketTab(
                     state = state,
                     displayTransfers = displayTransfers,
-                    onLogTransfer = { 
-                        formInitialType = "In (Permanent)"
-                        showTransferForm = true 
-                    },
-                    onRecordRetirement = {
-                        formInitialType = "Retirement"
-                        showTransferForm = true
-                    },
+                    onLogTransfer = { formInitialType = "In (Permanent)"; showTransferForm = true },
+                    onRecordRetirement = { formInitialType = "Retirement"; showTransferForm = true },
                     viewModel = viewModel,
-                    onEditTransfer = { logToEdit = it }
+                    onEditTransfer = { if (!view.isArchived) logToEdit = it },
+                    archived = view.isArchived,
+                    budget = view.transferBudget
                 )
                 1 -> ScoutNetworkTab(viewModel, state, onDeployScout = { showDeployScout = true }, onManageNetwork = { showScoutNetwork = true })
             }
         }
     }
-    
-    if (showTransferForm) TransferFormModal(state = viewModel.state.collectAsState().value, viewModel = viewModel, logToEdit = null, initialType = formInitialType) { showTransferForm = false }
-    if (logToEdit != null) TransferFormModal(state = viewModel.state.collectAsState().value, viewModel = viewModel, logToEdit = logToEdit) { logToEdit = null }
+
+    if (showTransferForm) TransferFormModal(state = state, viewModel = viewModel, logToEdit = null, initialType = formInitialType) { showTransferForm = false }
+    if (logToEdit != null) TransferFormModal(state = state, viewModel = viewModel, logToEdit = logToEdit) { logToEdit = null }
     if (showDeployScout) DeployScoutModal(allEafcPlayers = viewModel.allEafcPlayers, onDismiss = { showDeployScout = false }, onSave = { report -> viewModel.addScoutReport(report); showDeployScout = false })
     if (showScoutNetwork) ScoutNetworkModal(onDismiss = { showScoutNetwork = false })
 }
@@ -146,7 +99,9 @@ fun TransferMarketTab(
     onLogTransfer: () -> Unit, 
     onRecordRetirement: () -> Unit = {},
     viewModel: com.fctracker.career.MainViewModel, 
-    onEditTransfer: (com.fctracker.career.TransferLog) -> Unit = {}
+    onEditTransfer: (com.fctracker.career.TransferLog) -> Unit = {},
+    archived: Boolean = false,
+    budget: Double = state.transferBudget
 ) {
     var transferFilter by remember { mutableStateOf("All Types") }
     var filterExpanded by remember { mutableStateOf(false) }
@@ -159,7 +114,7 @@ fun TransferMarketTab(
     
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-            BudgetHeader(state.transferBudget, onUpdateBudget = { /* Need to update app state, handle it below */ viewModel.updateTransferBudget(it) })
+            BudgetHeader(budget, onUpdateBudget = { viewModel.updateTransferBudget(it) }, editable = !archived, currency = state.currencySymbol)
             Spacer(modifier = Modifier.height(16.dp))
             
             val allTransfers = remember(state.transfers, state.historicalSeasons) {
@@ -186,7 +141,7 @@ fun TransferMarketTab(
                 Text("Transfer Logs", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
                 
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
+                    if (!archived) OutlinedButton(
                         onClick = onRecordRetirement,
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFBBF24)),
@@ -285,17 +240,11 @@ fun TransferMarketTab(
         Column(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .navigationBarsPadding()
-                .padding(16.dp),
+                .padding(end = 2.dp, bottom = 0.dp),
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            ExtendedFloatingActionButton(
-                onClick = onLogTransfer,
-                icon = { Icon(Icons.Default.Add, contentDescription = "Log Transfer Deal") },
-                text = { Text("Log Deal", fontWeight = FontWeight.Bold) },
-                containerColor = MaterialTheme.colorScheme.primary
-            )
+            if (!archived) com.fctracker.career.ui.components.Fab("Log deal", onLogTransfer, icon = Icons.Default.SwapHoriz)
         }
 
         profilePlayer?.let { p ->
@@ -497,6 +446,8 @@ fun TransferFormModal(
     
     var includeSwap by remember(logToEdit) { mutableStateOf(logToEdit?.includeSwap ?: false) }
     var isRegen by remember(logToEdit) { mutableStateOf(logToEdit?.isRegen ?: false) }
+    var regenOriginal by remember(logToEdit) { mutableStateOf(logToEdit?.regenOriginalName ?: "") }
+    var regenPicked by remember(logToEdit) { mutableStateOf<com.fctracker.career.EafcPlayer?>(null) }
     var swapPlayerQuery by remember(logToEdit) { mutableStateOf(logToEdit?.swapPlayerName ?: "") }
     var swapSearchResults by remember { mutableStateOf(emptyList<com.fctracker.career.EafcPlayer>()) }
     var swapSearchExpanded by remember { mutableStateOf(false) }
@@ -816,9 +767,30 @@ fun TransferFormModal(
                     }
 
                     item { 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = isRegen, onCheckedChange = { isRegen = it })
-                            Text("Is Regen", color = Color.White)
+                        com.fctracker.career.ui.components.FcSwitchRow("Regen", isRegen, { isRegen = it }, sub = "A player the game generated")
+                    }
+                    if (isRegen) {
+                        item {
+                            OutlinedTextField(
+                                value = regenOriginal,
+                                onValueChange = { regenOriginal = it; regenPicked = null },
+                                label = { Text("Original player name") },
+                                supportingText = { Text("The real player this regen is based on. He lends the headshot; the name above stays the regen's own.") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            val matches = if (regenOriginal.trim().length >= 3 && regenPicked == null) viewModel.searchPlayersAndTeams(regenOriginal).take(4) else emptyList()
+                            Column {
+                                matches.forEach { ep ->
+                                    Row(
+                                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { regenOriginal = ep.name; regenPicked = ep }.padding(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        com.fctracker.career.ui.components.Headshot("https://cdn.futbin.com/content/fifa25/img/players/${ep.id}.png", ep.name, 36.dp)
+                                        Column { Text(ep.name, color = Color.White, fontSize = 14.sp); Text(ep.position, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp) }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -948,7 +920,8 @@ fun TransferFormModal(
                                         swapPlayerName = swapPlayerQuery.trim()
                                             .takeIf { includeSwap && transferType != "Retirement" && it.isNotEmpty() },
                                         isRegen = if (transferType == "Retirement") false else isRegen,
-                                        headshotUrl = logToEdit?.headshotUrl ?: "",
+                                        regenOriginalName = if (isRegen && transferType != "Retirement") regenOriginal.trim().ifBlank { null } else null,
+                                        headshotUrl = regenPicked?.let { "https://cdn.futbin.com/content/fifa25/img/players/${it.id}.png" } ?: logToEdit?.headshotUrl ?: "",
                                         // blank for a new deal: the player database then supplies his real position
                                         position = logToEdit?.position ?: ""
                                     )
@@ -1092,7 +1065,7 @@ fun ScoutNetworkModal(onDismiss: () -> Unit) {
 }
 
 @Composable
-fun BudgetHeader(budget: Double, onUpdateBudget: (Double) -> Unit = {}) {
+fun BudgetHeader(budget: Double, onUpdateBudget: (Double) -> Unit = {}, editable: Boolean = true, currency: String = "€") {
     var isEditing by remember { mutableStateOf(false) }
     var budgetInput by remember { mutableStateOf(budget.toString()) }
 
@@ -1117,22 +1090,13 @@ fun BudgetHeader(budget: Double, onUpdateBudget: (Double) -> Unit = {}) {
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.primaryContainer)
-            .border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(16.dp))
-            .padding(20.dp)
-    ) {
+    com.fctracker.career.ui.components.FcCard(Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Column {
-                Text("Remaining Budget", fontSize = 12.sp, color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Medium)
-                Text("€${budget}M", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                com.fctracker.career.ui.components.FcLabel(if (editable) "Remaining budget" else "Budget at the end of the season")
+                com.fctracker.career.ui.components.Figure("$currency${String.format(java.util.Locale.US, "%.1f", budget)}M", 40.sp)
             }
-            IconButton(onClick = { isEditing = true }) {
-                Icon(Icons.Default.Edit, "Edit Budget", tint = MaterialTheme.colorScheme.primary)
-            }
+            if (editable) com.fctracker.career.ui.components.FcIconButton(Icons.Default.Edit, "Edit transfer budget", { budgetInput = budget.toString(); isEditing = true })
         }
     }
 }

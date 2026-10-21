@@ -27,7 +27,9 @@ data class Movements(
     val upInto: List<String>,
     val upFrom: List<String>,
     val leagueBelow: String?,
-    val leagueAbove: String?
+    val leagueAbove: String?,
+    /** The clubs coming down into the league from the league above (when its final table is known). */
+    val downInto: List<String> = emptyList()
 )
 
 /**
@@ -150,14 +152,40 @@ object LeagueTables {
      * places (and the first play-off place, standing in for the play-off winner) of the league below come up, and
      * the same places of [own] go up. Every name can be changed by the person before it is used.
      */
-    fun proposeMovements(own: LeagueTableData, below: LeagueTableData?): Movements {
+    fun proposeMovements(own: LeagueTableData, below: LeagueTableData?, above: LeagueTableData? = null): Movements {
         val rows = sorted(own.rows)
-        val zones = zonesFor(own.league, rows.size)
-        val down = zones.filter { it.kind == ZoneKind.RELEGATION }
-            .flatMap { z -> (z.from..z.to).mapNotNull { rows.getOrNull(it - 1)?.club } }
+        val down = downPlaces(own.league, rows)
         val upFrom = upPlaces(own.league, rows)
         val upInto = if (below != null) upPlaces(below.league, sorted(below.rows)) else emptyList()
-        return Movements(down, upInto, upFrom, leagueBelow(own.league) ?: below?.league, leagueAbove(own.league))
+        val downInto = if (above != null) downPlaces(above.league, sorted(above.rows)) else emptyList()
+        return Movements(down, upInto, upFrom, leagueBelow(own.league) ?: below?.league, leagueAbove(own.league) ?: above?.league, downInto)
+    }
+
+    private fun downPlaces(league: String, rows: List<TableRow>): List<String> =
+        zonesFor(league, rows.size).filter { it.kind == ZoneKind.RELEGATION }
+            .flatMap { z -> (z.from..z.to).mapNotNull { rows.getOrNull(it - 1)?.club } }
+
+    /** A domestic league (not a cup, a super cup or a European or international competition): its table decides the career's league. */
+    fun isDomesticLeague(name: String): Boolean {
+        val n = name.lowercase()
+        val not = listOf("champions", "europa", "conference", "cup", "copa", "coppa", "coupe", "pokal", "trophy", "shield", "supercup", "super cup", "supercopa", "supercoppa", "libertadores", "sudamericana", "international", "club world", "friendly", "women", "youth", "u21", "u23", "u19")
+        return n.isNotBlank() && not.none { n.contains(it) }
+    }
+
+    /**
+     * The table of the career's new league after the club itself went up or down: the clubs that moved with it are
+     * kept (tagged), the rest of the league is added by the person (or arrives from the game on PC).
+     */
+    fun tableAfterMove(newLeague: String, country: String, userClub: String, movedWithMe: List<String>, movement: String, existing: LeagueTableData?): LeagueTableData {
+        if (existing != null && existing.rows.size > 1) {
+            val rows = existing.rows.map { TableRow(club = it.club, isUser = it.isUser || it.club.equals(userClub, true), movement = it.movement) }
+            val withUser = if (rows.any { it.isUser }) rows else rows + TableRow(club = userClub, isUser = true, movement = movement)
+            return existing.copy(rows = withUser.sortedBy { it.club.lowercase() }, source = Source.MANUAL, updated = "")
+        }
+        val names = mutableSetOf(userClub.trim().lowercase())
+        val rows = mutableListOf(TableRow(club = userClub, isUser = true, movement = movement))
+        for (c in movedWithMe) if (c.isNotBlank() && names.add(c.trim().lowercase())) rows += TableRow(club = c.trim(), movement = movement)
+        return LeagueTableData(league = newLeague, country = country, rows = rows.sortedBy { it.club.lowercase() }, source = Source.MANUAL)
     }
 
     private fun upPlaces(league: String, rows: List<TableRow>): List<String> {

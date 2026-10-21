@@ -106,6 +106,20 @@ object CareerOps {
         return state.copy(leagueTables = listOf(next) + state.leagueTables.filterNot { it.league.equals(own.league, true) })
     }
 
+    /**
+     * The club itself went up or down (console): the career moves to [newLeague]. The clubs that moved with it come
+     * along, the rest of the new league is added by the person. Earlier seasons keep their own league.
+     */
+    fun moveLeague(state: AppState, newLeague: String, movedWithMe: List<String>, promoted: Boolean): AppState {
+        val name = newLeague.trim()
+        if (name.isEmpty() || name.equals(state.leagueName, true)) return state
+        val existing = state.leagueTables.firstOrNull { it.league.equals(name, true) }
+        val table = LeagueTables.tableAfterMove(name, state.country, state.clubName, movedWithMe, if (promoted) "promoted" else "relegated", existing)
+        val others = state.leagueTables.filterNot { it.league.equals(name, true) }
+            .map { t -> t.copy(rows = t.rows.filterNot { it.isUser || it.club.equals(state.clubName, true) }) }
+        return state.copy(leagueName = name, leagueTables = listOf(table) + others)
+    }
+
     // -- league tables (console) --------------------------------------------------------------------------------------
 
     fun ownTable(state: AppState): LeagueTableData =

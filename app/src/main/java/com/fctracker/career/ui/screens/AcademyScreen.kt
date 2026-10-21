@@ -30,129 +30,88 @@ import com.fctracker.career.AppState
 import com.fctracker.career.Player
 import com.fctracker.career.ui.theme.WinColor
 
-@OptIn(ExperimentalMaterial3Api::class)
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.School
+import androidx.compose.material.icons.filled.Sync
+
+/** Youth Academy: the prospects (from the game on PC, added by hand on console) and the scouting network. */
 @Composable
 fun AcademyScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
     val state by viewModel.state.collectAsState()
-    val viewingSeason = state.historicalSeasons.find { it.year == state.viewingSeasonYear }
-    val displayPlayers = viewingSeason?.players?.takeIf { it.isNotEmpty() } ?: state.players
-    val displayTransfers = viewingSeason?.transfers?.takeIf { it.isNotEmpty() } ?: state.transfers
-    val isArchived = state.viewingSeasonYear != null
-    var selectedTabIndex by remember { mutableStateOf(0) }
-    val tabs = listOf("Prospects", "Scouting Network")
-
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                title = { Text("Youth Academy", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground) },
-                navigationIcon = {
-                    IconButton(onClick = onMenuClick) {
-                        Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.primary)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground
-                )
-            )
+    val view = remember(state) { com.fctracker.career.logic.SeasonView.of(state) }
+    val console = state.platform == com.fctracker.career.Platform.CONSOLE
+    var tab by remember { mutableStateOf(0) }
+    var adding by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<Player?>(null) }
+    var releasing by remember { mutableStateOf<Player?>(null) }
+    val prospects = (view.academy + view.players.filter { it.isAcademy || it.status.equals("Academy", true) }).distinctBy { it.id }.sortedByDescending { it.potential }
+    val c = com.fctracker.career.ui.theme.FcTheme.colors
+    com.fctracker.career.ui.components.FcPage(
+        header = {
+            if (view.isArchived) Box(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)) { com.fctracker.career.ui.components.ArchivedBanner("${view.label} · ${view.leagueName}", { viewModel.setViewingSeasonYear(null) }) }
+            com.fctracker.career.ui.components.FcTopBar("Youth Academy", sub = "${prospects.size} prospects${if (view.isArchived) " · ${view.label}" else ""}", onNav = onMenuClick)
+        },
+        fab = if (!view.isArchived && tab == 0) ({ com.fctracker.career.ui.components.Fab("Add prospect", { adding = true }) }) else null
+    ) {
+        item { com.fctracker.career.ui.components.SoftTabs(listOf("Prospects", "Scouting network"), tab, { tab = it }) }
+        if (tab == 1) {
+            item { ScoutingNetworkTab() }
+            return@FcPage
         }
-    ) { padding ->
-        Column(modifier = Modifier.padding(padding).imePadding().fillMaxSize()) {
-            TabRow(
-                selectedTabIndex = selectedTabIndex,
-                containerColor = MaterialTheme.colorScheme.surface,
-                contentColor = MaterialTheme.colorScheme.primary
-            ) {
-                tabs.forEachIndexed { index, title ->
-                    Tab(
-                        selected = selectedTabIndex == index,
-                        onClick = { selectedTabIndex = index },
-                        text = { Text(title, fontWeight = FontWeight.Bold) }
-                    )
+        if (!view.isArchived) item {
+            if (console) com.fctracker.career.ui.components.Notice(com.fctracker.career.ui.components.Tone.INFO, "You add youth players yourself", "On console, add each prospect your scouts bring in: name, position, age, OVR and potential.")
+            else com.fctracker.career.ui.components.Notice(com.fctracker.career.ui.components.Tone.GOOD, "Added from your game", "New academy players arrive by themselves: the capture script reads your youth academy in Live Editor and sends name, position, age, OVR and potential.", icon = Icons.Default.Sync)
+        }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                com.fctracker.career.ui.components.SectionHeader("Youth prospects", Modifier.weight(1f), sub = if (view.isArchived) "End of ${view.label}" else null, icon = Icons.Default.School)
+                if (!view.isArchived) com.fctracker.career.ui.components.FcButton("Generate", { adding = true }, kind = com.fctracker.career.ui.components.ButtonKind.SECONDARY, icon = Icons.Default.Refresh, small = true)
+            }
+        }
+        if (prospects.isEmpty()) item { com.fctracker.career.ui.components.EmptyCard("No players in Youth Academy.") }
+        prospects.chunked(2).forEach { pair ->
+            item {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    pair.forEach { p ->
+                        AcademyPlayerCard(p, Modifier.weight(1f), archived = view.isArchived,
+                            onClick = { if (!view.isArchived) editing = p },
+                            onPromote = { viewModel.promoteAcademyPlayer(p) },
+                            onRelease = { releasing = p })
+                    }
+                    if (pair.size == 1) Spacer(Modifier.weight(1f))
                 }
             }
-            
-            when (selectedTabIndex) {
-                0 -> ProspectsTab(state, displayPlayers, viewModel)
-                1 -> ScoutingNetworkTab()
-            }
         }
+        if (view.isArchived) item { com.fctracker.career.ui.components.Muted("No Promote, Release or add buttons in an archived season.", 11.sp) }
+    }
+    if (adding) EditYouthPlayerDialog(startYear = state.startYear, onDismiss = { adding = false }, onUpdate = { viewModel.addPlayer(it) })
+    editing?.let { p ->
+        EditYouthPlayerDialog(startYear = state.startYear, player = p, onDismiss = { editing = null }, onUpdate = { viewModel.updatePlayer(it); editing = null }, onDelete = { viewModel.deletePlayer(p.id); editing = null })
+    }
+    releasing?.let { p ->
+        com.fctracker.career.ui.components.ConfirmDialog("Release ${p.displayName}?", "He leaves the academy.", "Release", { viewModel.removeAcademyPlayer(p.id) }, { releasing = null })
     }
 }
 
+/** A prospect: headshot, name, position and age, OVR and potential, Promote and Release. */
 @Composable
-fun ProspectsTab(state: com.fctracker.career.AppState, displayPlayers: List<com.fctracker.career.Player>, viewModel: MainViewModel) {
-    var showYouthForm by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-    var playerToEdit by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<com.fctracker.career.Player?>(null) }
-    Box(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Youth Prospects", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                Button(onClick = { showYouthForm = true }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)) {
-                    Text("Generate Prospect", fontSize = 12.sp)
-                }
-            }
-            val academyPlayers = displayPlayers.filter { it.isAcademy }
-            if (academyPlayers.isEmpty()) {
-                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Text("No players in Youth Academy.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(2),
-                    modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    items(academyPlayers, key = { it.id }) { player ->
-                        AcademyPlayerCard(
-                            player,
-                            onClick = { playerToEdit = player },
-                            onPromote = { 
-                                viewModel.updatePlayer(player.copy(isAcademy = false, isPromoted = true))
-                                playerToEdit = null
-                            },
-                            onRelease = { 
-                                viewModel.deletePlayer(player.id)
-                                playerToEdit = null
-                            }
-                        )
-                    }
-                }
+fun AcademyPlayerCard(player: Player, modifier: Modifier = Modifier, archived: Boolean = false, onClick: () -> Unit = {}, onPromote: () -> Unit = {}, onRelease: () -> Unit = {}) {
+    val c = com.fctracker.career.ui.theme.FcTheme.colors
+    com.fctracker.career.ui.components.FcCard(modifier, padding = 12.dp, gap = 10.dp, onClick = onClick) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            com.fctracker.career.ui.components.Headshot(player.headshotUrl, player.displayName, 40.dp, youth = true)
+            Column(Modifier.weight(1f)) {
+                com.fctracker.career.ui.components.FcText(player.displayName, 13.sp, FontWeight.Bold, maxLines = 1)
+                com.fctracker.career.ui.components.Muted("${player.primaryPosition} · Age ${player.age}", 11.sp, maxLines = 1)
             }
         }
-        FloatingActionButton(
-            onClick = { showYouthForm = true },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .navigationBarsPadding()
-                .padding(16.dp),
-            containerColor = MaterialTheme.colorScheme.primary
-        ) {
-            Icon(Icons.Default.Add, "Add Youth Player", tint = MaterialTheme.colorScheme.onPrimary)
+        Row(Modifier.fillMaxWidth()) {
+            Column(Modifier.weight(1f)) { com.fctracker.career.ui.components.Muted("OVR", 10.sp); com.fctracker.career.ui.components.Figure("${player.overall}", 24.sp) }
+            Column(horizontalAlignment = Alignment.End) { com.fctracker.career.ui.components.Muted("POT", 10.sp); com.fctracker.career.ui.components.Figure(player.potentialRange ?: "${player.potential}", 24.sp, c.good) }
         }
-        if (showYouthForm) {
-            EditYouthPlayerDialog(startYear = state.startYear, onDismiss = { showYouthForm = false }, onUpdate = { viewModel.addPlayer(it) })
-        }
-        if (playerToEdit != null) {
-            EditYouthPlayerDialog(
-                startYear = state.startYear,
-                player = playerToEdit,
-                onDismiss = { playerToEdit = null },
-                onUpdate = { updatedPlayer -> 
-                    viewModel.updatePlayer(updatedPlayer)
-                    playerToEdit = null
-                },
-                onDelete = {
-                    viewModel.deletePlayer(playerToEdit!!.id)
-                    playerToEdit = null
-                }
-            )
+        if (!archived) Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            com.fctracker.career.ui.components.FcButton("Promote", onPromote, Modifier.weight(1f), small = true)
+            com.fctracker.career.ui.components.FcButton("Release", onRelease, Modifier.weight(1f), kind = com.fctracker.career.ui.components.ButtonKind.SECONDARY, small = true)
         }
     }
 }
@@ -179,7 +138,7 @@ fun ScoutingNetworkTab() {
         "Any" to listOf("Brazil", "France", "Spain", "Germany", "Argentina")
     )
     
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+    Column(modifier = Modifier.fillMaxWidth()) {
         Text("Scout Instructions", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
         Spacer(modifier = Modifier.height(8.dp))
         Text("Select the type of player you are looking for, and we will recommend the best countries to send your scouts to.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -272,69 +231,3 @@ fun ScoutingNetworkTab() {
     }
 }
 
-@Composable
-fun AcademyPlayerCard(player: Player, onClick: (() -> Unit)? = null, onPromote: (() -> Unit)? = null, onRelease: (() -> Unit)? = null) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
-            .padding(16.dp)
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-            Box(
-                modifier = Modifier
-                    .size(60.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.Person, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp))
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = "${player.displayName}",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onBackground
-            )
-            Text(
-                text = "${player.primaryPosition} • Age ${player.age}",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("OVR", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(player.overall.toString(), fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("POT", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(player.potential.toString(), fontSize = 14.sp, fontWeight = FontWeight.Bold, color = WinColor)
-                }
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(
-                    onClick = { onPromote?.invoke() },
-                    modifier = Modifier.weight(1f).height(36.dp),
-                    contentPadding = PaddingValues(0.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
-                ) {
-                    Text("Promote", fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold)
-                }
-                Button(
-                    onClick = { onRelease?.invoke() },
-                    modifier = Modifier.weight(1f).height(36.dp),
-                    contentPadding = PaddingValues(0.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-                ) {
-                    Text("Release", fontSize = 11.sp, color = MaterialTheme.colorScheme.onErrorContainer, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-    }
-}

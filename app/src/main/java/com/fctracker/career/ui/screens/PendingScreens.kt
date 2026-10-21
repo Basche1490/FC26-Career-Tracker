@@ -14,7 +14,6 @@ import com.fctracker.career.ui.components.NavIcon
 @Composable fun MilestonesScreen(viewModel: MainViewModel, onBack: () -> Unit) = Pending("Milestones", NavIcon.BACK, onBack)
 @Composable fun WidgetsScreen(onBack: () -> Unit) = Pending("Widgets", NavIcon.BACK, onBack)
 @Composable fun ThemingScreen(viewModel: MainViewModel, onBack: () -> Unit) = Pending("Club colours", NavIcon.BACK, onBack)
-@Composable fun SeasonSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, nav: (String) -> Unit) = SeasonSummaryScreen(viewModel, onMenuClick)
 @Composable fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, openPlayer: (String) -> Unit) = CareerSummaryScreen(viewModel, onMenuClick)
 @Composable fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, nav: (String) -> Unit) = SettingsScreen(viewModel, onMenuClick)
 @Composable fun OnboardingScreen(viewModel: MainViewModel) = OnboardingScreen(viewModel) { manager, club, country, league, startYear, currencySymbol, primary, secondary, logo, isExistingTeam, aiAgent, aiApiUrl, aiApiKey ->
