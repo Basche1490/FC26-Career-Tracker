@@ -319,7 +319,7 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
             initializeGameData(isExistingTeam, clubName)
         }
         persistData()
-        if (!app.syncPrefs.setupGuideDone) _setupPrompt.value = true
+        if (!app.syncPrefs.setupGuideDone && _state.value.platform != Platform.CONSOLE) _setupPrompt.value = true
     }
     var allEafcPlayers: List<EafcPlayer> = emptyList()
         private set
@@ -1202,6 +1202,9 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
      * Answers one message. Questions about anything but the career are answered by the app itself and never sent;
      * the rest go to the AI agent with everything the app holds.
      */
+    /** The assistant's conversation, kept while the app is open (not saved). */
+    val assistantChat = androidx.compose.runtime.mutableStateListOf<com.fctracker.career.ai.ChatTurn>()
+
     fun askAssistant(message: String, mode: String, history: List<com.fctracker.career.ai.ChatTurn>, onReply: (String, Boolean) -> Unit) {
         val s = _state.value
         val step = com.fctracker.career.ai.Assistant.prepare(s, savedNotes.toList(), message, mode, history)

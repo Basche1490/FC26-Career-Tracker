@@ -1,9 +1,5 @@
 package com.fctracker.career
 
-import coil.Coil
-import coil.ImageLoader
-import coil.decode.SvgDecoder
-import okhttp3.OkHttpClient
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -59,27 +55,6 @@ class MainActivity : ComponentActivity() {
     private val mainViewModel: MainViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        val okHttpClient = OkHttpClient.Builder()
-            .addNetworkInterceptor { chain ->
-                val original = chain.request()
-                val builder = original.newBuilder()
-                builder.header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-                if (original.url.host.contains("futbin")) {
-                    builder.header("Referer", "https://www.futbin.com/")
-                }
-                chain.proceed(builder.build())
-            }
-            .build()
-
-        val imageLoader = ImageLoader.Builder(this)
-            .okHttpClient(okHttpClient)
-            .components {
-                add(SvgDecoder.Factory())
-            }
-            .crossfade(true)
-            .allowHardware(false)
-            .build()
-        Coil.setImageLoader(imageLoader)
 
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -212,7 +187,7 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
                             composable("recap") { RecapScreen(viewModel, null, back) }
                             composable("recap/{season}") { entry -> RecapScreen(viewModel, entry.arguments?.getString("season")?.toIntOrNull(), back) }
                             composable("career_summary") { CareerSummaryScreen(viewModel, openDrawer, { id -> goDetail("player/$id") }, nav) }
-                            composable("assistant") { AssistantScreen(viewModel, openDrawer) }
+                            composable("assistant") { AssistantScreen(viewModel, openDrawer, nav) }
                             composable("milestones") { MilestonesScreen(viewModel, back) }
                             composable("widgets") { WidgetsScreen(back) }
                             composable("theming") { ThemingScreen(viewModel, back) }

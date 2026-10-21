@@ -1,436 +1,265 @@
 package com.fctracker.career.ui.screens
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
-
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.BookmarkAdd
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.StickyNote2
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import com.fctracker.career.MainViewModel
-import com.fctracker.career.ai.AiClient
+import com.fctracker.career.Note
+import com.fctracker.career.ai.Assistant
+import com.fctracker.career.ai.ChatTurn
+import com.fctracker.career.logic.CareerOps
+import com.fctracker.career.ui.components.ButtonKind
+import com.fctracker.career.ui.components.ConfirmDialog
+import com.fctracker.career.ui.components.FcButton
+import com.fctracker.career.ui.components.FcCard
+import com.fctracker.career.ui.components.FcChip
+import com.fctracker.career.ui.components.FcDialog
+import com.fctracker.career.ui.components.FcField
+import com.fctracker.career.ui.components.FcIconButton
+import com.fctracker.career.ui.components.FcLabel
+import com.fctracker.career.ui.components.FcSelectField
+import com.fctracker.career.ui.components.FcText
+import com.fctracker.career.ui.components.FcTopBar
+import com.fctracker.career.ui.components.Muted
+import com.fctracker.career.ui.components.Notice
+import com.fctracker.career.ui.components.Pill
+import com.fctracker.career.ui.components.SectionHeader
+import com.fctracker.career.ui.components.Tone
+import com.fctracker.career.ui.theme.FcTheme
 
-@OptIn(ExperimentalMaterial3Api::class)
+const val MAX_NOTES = 5
+
+/** What the assistant reads: every page of the app (shown on the "Knows your whole career" card). */
+val ASSISTANT_KNOWS = listOf(
+    "Matches and lineups", "Fixtures", "League table", "Squad, contracts, wages", "Injuries", "Formation", "Transfers and budget",
+    "Youth academy", "Stats and awards", "Cup runs", "Europe ranking", "Around the World", "Objectives", "Past seasons", "Club history", "Your notes"
+)
+
+private fun isProblem(text: String) = text.startsWith("API key needed") || text.startsWith("Error:") || text.startsWith("Error ")
+
+/** The AI assistant: answers questions about this career only, from everything the app holds. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun AssistantScreen(viewModel: com.fctracker.career.MainViewModel, onMenuClick: () -> Unit) {
+fun AssistantScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, nav: (String) -> Unit = {}) {
     val state by viewModel.state.collectAsState()
-    val aiApiKey by viewModel.aiApiKey.collectAsState()
-    val viewingSeason = state.historicalSeasons.find { it.year == state.viewingSeasonYear }
-    val displayPlayers = viewingSeason?.players?.takeIf { it.isNotEmpty() } ?: state.players
-    val displayMatches = viewingSeason?.matches?.takeIf { it.isNotEmpty() } ?: state.recentMatches
-    val displayTransfers = viewingSeason?.transfers?.takeIf { it.isNotEmpty() } ?: state.transfers
-    val squadValue = displayPlayers.sumOf { it.valueM }
-    val displayYear = state.viewingSeasonYear ?: state.startYear
-    var chatText by remember { mutableStateOf("") }
-    val coroutineScope = rememberCoroutineScope()
-    var showNotesModal by remember { mutableStateOf(false) }
-    
-    var chatHistory by remember { mutableStateOf(listOf(
-        com.fctracker.career.ui.screens.ChatMessage("assistant", "Hello boss! I've analyzed the squad and upcoming fixtures. Let me know if you need tactical advice or scouting recommendations.")
-    )) }
-    
-    var showSaveNoteContent by remember { mutableStateOf<String?>(null) }
-    
-    LaunchedEffect(Unit) {
-        chatHistory = listOf(com.fctracker.career.ui.screens.ChatMessage("assistant", "Hello boss! I've analyzed the squad and upcoming fixtures. Let me know if you need tactical advice or scouting recommendations."))
+    val apiKey by viewModel.aiApiKey.collectAsState()
+    val c = FcTheme.colors
+    val chat = viewModel.assistantChat
+    var mode by remember { mutableStateOf(Assistant.MODE_CHAT) }
+    var talkTo by remember { mutableStateOf("") }
+    var text by remember { mutableStateOf("") }
+    var waiting by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf<String?>(null) }
+    var showNotes by remember { mutableStateOf(false) }
+    val list = rememberLazyListState()
+    val next = CareerOps.nextFixture(state)
+    val squadNames = state.players.filter { isActivePlayer(it) }.sortedByDescending { it.overall }.map { it.displayName }
+    val prompts = when (mode) {
+        Assistant.MODE_PRESS -> listOf("Pre-match press conference${next?.let { " before ${it.opponent}" } ?: ""}", "Press conference after the last match", "Questions about the season so far")
+        Assistant.MODE_PLAYER -> listOf("How do you feel about your playing time?", "Talk about your contract", "What do you think of the team's form?")
+        else -> listOfNotNull(next?.let { "Analyse ${it.opponent}" } ?: "Analyse next opponent", "Lineup advice", "Contracts to renew", "Who should I sell?", "Academy players ready to step up", "Where should I strengthen?")
     }
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                title = { Text("AI Assistant", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground) },
-                navigationIcon = {
-                    IconButton(onClick = onMenuClick) {
-                        Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.primary)
+    fun send(message: String) {
+        val m = message.trim()
+        if (m.isEmpty() || waiting) return
+        val full = if (mode == Assistant.MODE_PLAYER && talkTo.isNotBlank()) "(Talking to $talkTo) $m" else m
+        val history = chat.toList()
+        chat.add(ChatTurn("user", full))
+        text = ""
+        waiting = true
+        viewModel.askAssistant(full, mode, history) { reply, local ->
+            val problem = isProblem(reply)
+            // A question the app answered itself (or one that failed) is kept out of the agent's conversation.
+            if (local || problem) {
+                val i = chat.indexOfLast { it.role == "user" && it.text == full }
+                if (i >= 0) chat[i] = chat[i].copy(local = true)
+            }
+            chat.add(ChatTurn("assistant", reply, local || problem))
+            waiting = false
+        }
+    }
+
+    LaunchedEffect(chat.size, waiting) { if (chat.isNotEmpty()) list.animateScrollToItem(list.layoutInfo.totalItemsCount.coerceAtLeast(1) - 1) }
+
+    Column(Modifier.fillMaxSize().background(c.bg).imePadding()) {
+        Column(Modifier.statusBarsPadding()) {
+            FcTopBar(
+                "AI Assistant",
+                sub = "${state.aiAgent.substringBefore(" -").ifBlank { "AI" }} · knows your career",
+                onNav = onMenuClick,
+                actions = {
+                    Box {
+                        FcIconButton(Icons.Default.StickyNote2, "Saved notes (${viewModel.savedNotes.size})", { showNotes = true }, border = false)
+                        if (viewModel.savedNotes.isNotEmpty()) Box(Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 4.dp).clip(RoundedCornerShape(8.dp)).background(c.accent).padding(horizontal = 5.dp)) {
+                            FcText("${viewModel.savedNotes.size}", 10.sp, FontWeight.Bold, c.onAccent)
+                        }
                     }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground
-                )
+                }
             )
         }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .padding(padding)
-                .imePadding()
-                .fillMaxSize()
-        ) {
-            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Saved Tactical Notes (${viewModel.savedNotes.size})", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    TextButton(onClick = { showNotesModal = true }) {
-                        Text("View Notes")
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                if (viewModel.savedNotes.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.surface)
-                            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
-                            .padding(16.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("No notes saved.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FcChip("Press conference", mode == Assistant.MODE_PRESS, { mode = if (mode == Assistant.MODE_PRESS) Assistant.MODE_CHAT else Assistant.MODE_PRESS })
+                    FcChip("Player chat", mode == Assistant.MODE_PLAYER, { mode = if (mode == Assistant.MODE_PLAYER) Assistant.MODE_CHAT else Assistant.MODE_PLAYER })
                 }
             }
-            LazyColumn(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
+            if (mode == Assistant.MODE_PLAYER) item {
+                FcSelectField("Talking to", talkTo.ifBlank { "Choose a player" }, squadNames, { talkTo = it }, hint = "The assistant answers as this player, from his numbers and contract.")
+            }
+            if (apiKey.isBlank()) item {
+                Notice(Tone.WARN, "API key needed", "Add the key of your AI agent (${state.aiAgent}) in Settings. Questions about anything other than your career are still answered here, without the agent.",
+                    icon = Icons.Default.Key, actions = { FcButton("Open Settings", { nav("settings") }, small = true) })
+            }
+            if (chat.isEmpty()) {
                 item {
-                    Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = false,
-                            onClick = {
-                                chatHistory = listOf(
-                                    com.fctracker.career.ui.screens.ChatMessage("user", "Start Press Conference"),
-                                    com.fctracker.career.ui.screens.ChatMessage("assistant", "The journalists have arrived. Let's begin the press conference. We're ready for your questions, boss.")
-                                )
-                            },
-                            label = { Text("Press Conference", fontSize = 12.sp) }
-                        )
-                        FilterChip(
-                            selected = false,
-                            onClick = {
-                                chatHistory = listOf(
-                                    com.fctracker.career.ui.screens.ChatMessage("user", "Start Player Chat"),
-                                    com.fctracker.career.ui.screens.ChatMessage("assistant", "Boss, I need to talk to you about my playing time...")
-                                )
-                            },
-                            label = { Text("Player Chat", fontSize = 12.sp) }
-                        )
+                    FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
+                        SectionHeader("Knows your whole career", icon = Icons.Default.SmartToy)
+                        Muted("Every question is answered from what the app holds, page by page:", 12.sp)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { ASSISTANT_KNOWS.forEach { Pill(it, Tone.MUTED) } }
                     }
                 }
-                items(chatHistory) { msg ->
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = if (msg.role == "user") Alignment.End else Alignment.Start
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(0.8f)
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(if (msg.role == "user") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                                .padding(12.dp)
-                        ) {
-                            Text(msg.text, color = if (msg.role == "user") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        if (msg.role == "assistant") {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            TextButton(onClick = { 
-                                val fullChat = chatHistory.joinToString("\n\n") { if (it.role == "user") "You: ${it.text}" else "Assistant: ${it.text}" }
-                                showSaveNoteContent = fullChat 
-                            }, contentPadding = PaddingValues(0.dp)) {
-                                Text("Save Note", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
-                            }
-                        }
+                item {
+                    FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
+                        FcLabel("ONLY ABOUT YOUR CAREER")
+                        Bubble("This is to help me make better decisions: what is 1+1?", mine = true)
+                        Bubble("I only help with your ${state.clubName} career. Ask me about your squad, matches, transfers or tactics, for example: “Who should start against ${next?.opponent ?: "your next opponent"}?”", mine = false)
+                        Muted("Questions about anything else, however they are worded, get this short answer instead. Nothing outside the career is sent to the AI agent.", 11.sp)
                     }
                 }
             }
-            if (aiApiKey.isBlank()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.85f),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            Icons.Default.Info,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = "API key needed",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
+            itemsIndexed(chat.toList()) { _, t ->
+                Bubble(t.text, mine = t.role == "user", local = t.local, onSave = if (t.role == "assistant" && !t.local) ({ saving = t.text }) else null)
             }
-            LazyRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                val suggestions = listOf("Analyze Next Opponent", "Lineup Advice", "Scouting Recs")
-                items(suggestions) { text ->
-                    AssistChip(
-                        onClick = { chatText = text },
-                        label = { Text(text) }
-                    )
-                }
+            if (waiting) item { Bubble("Thinking…", mine = false, local = true) }
+        }
+        Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                itemsIndexed(prompts) { _, p -> FcChip(p, false, { send(p) }) }
             }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = chatText,
-                    onValueChange = { chatText = it },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Ask the AI Assistant...") },
-                    shape = RoundedCornerShape(24.dp),
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Send),
-                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = {
-                        if (chatText.isNotBlank()) {
-                            val userText = chatText
-                            chatHistory = chatHistory + com.fctracker.career.ui.screens.ChatMessage("user", userText)
-                            chatText = ""
-                            chatHistory = chatHistory + com.fctracker.career.ui.screens.ChatMessage("assistant", "Thinking...")
-                            coroutineScope.launch {
-                                val contextStr = """
-System Context: You are an expert AI assistant for a football manager app. 
-Only answer questions related to football, managing a club, tactics, players, and the current career mode save. If asked about unrelated topics, politely decline and remind the user that you are a football manager assistant.
-If the user says 'Press Conference', act as a tough journalist asking post-match questions based on the recent matches and team performance.
-If the user says 'Player Chat', act as an unhappy player asking about their playtime or contract.
-Act accordingly based on the persona of ${state.aiAgent}. 
-
--- CLUB PROFILE --
-Current Club: ${state.clubName}
-Manager: ${state.managerName}
-League: ${state.leagueName} (${state.country})
-Year: ${displayYear}
-Budget: ${state.currencySymbol}${state.transferBudget}M
-Squad Value: ${state.currencySymbol}${squadValue}M
-
--- ROSTER & ACADEMY (${displayPlayers.size} players) --
-${displayPlayers.joinToString("\n") { "- ${it.displayName} (OVR: ${it.overall}, POT: ${it.potential}, Pos: ${it.primaryPosition}, Age: ${it.age}, Status: ${it.status}, Academy: ${it.isAcademy}, Injured: ${it.isInjured}, Form: ${it.form}, Morale: ${it.morale}, Apps: ${it.matchesPlayed}, G: ${it.goals}, A: ${it.assists}, AvgR: ${it.averageRating})" }}
-
--- MATCH HISTORY --
-${displayMatches.joinToString("\n") { "- vs ${it.opponentName} (${it.competition}, ${it.matchDate}): ${it.goalsFor}-${it.goalsAgainst} (${it.resultBadge}). MOTM: ${it.motmName}. xG: ${it.expectedGoals} - ${it.expectedGoalsAgainst}" }}
-
--- TRANSFERS --
-${displayTransfers.joinToString("\n") { "- ${it.date}: ${it.type} - ${it.playerName} (Fee: ${state.currencySymbol}${it.feeM}M) with ${it.fromToClub}" }}
-
--- TROPHIES & AWARDS --
-Trophies: ${state.teamTrophies.joinToString(", ") { it.name }}
-Player Awards: ${state.playerAwards.joinToString(", ") { "${it.name} (${it.playerId}, ${it.monthYear})" }}
-"""
-                                val fullPrompt = "$contextStr\n\nUser Question: $userText"
-                                val reply = AiClient.ask(fullPrompt, state.aiAgent, state.aiApiUrl, aiApiKey, state.aiModel)
-                                chatHistory = chatHistory.dropLast(1) + com.fctracker.career.ui.screens.ChatMessage("assistant", reply)
-                            }
-                        }
-                    }),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.background,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.background
-                    )
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                IconButton(
-                    onClick = { 
-                        if (chatText.isNotBlank()) {
-                            val userText = chatText
-                            chatHistory = chatHistory + com.fctracker.career.ui.screens.ChatMessage("user", userText)
-                            chatText = ""
-                            chatHistory = chatHistory + com.fctracker.career.ui.screens.ChatMessage("assistant", "Thinking...")
-                            coroutineScope.launch {
-                                val contextStr = """
-System Context: You are an expert AI assistant for a football manager app. 
-Only answer questions related to football, managing a club, tactics, players, and the current career mode save. If asked about unrelated topics, politely decline and remind the user that you are a football manager assistant.
-If the user says 'Press Conference', act as a tough journalist asking post-match questions based on the recent matches and team performance.
-If the user says 'Player Chat', act as an unhappy player asking about their playtime or contract.
-Act accordingly based on the persona of ${state.aiAgent}. 
-
--- CLUB PROFILE --
-Current Club: ${state.clubName}
-Manager: ${state.managerName}
-League: ${state.leagueName} (${state.country})
-Year: ${displayYear}
-Budget: ${state.currencySymbol}${state.transferBudget}M
-Squad Value: ${state.currencySymbol}${squadValue}M
-
--- ROSTER & ACADEMY (${displayPlayers.size} players) --
-${displayPlayers.joinToString("\n") { "- ${it.displayName} (OVR: ${it.overall}, POT: ${it.potential}, Pos: ${it.primaryPosition}, Age: ${it.age}, Status: ${it.status}, Academy: ${it.isAcademy}, Injured: ${it.isInjured}, Form: ${it.form}, Morale: ${it.morale}, Apps: ${it.matchesPlayed}, G: ${it.goals}, A: ${it.assists}, AvgR: ${it.averageRating})" }}
-
--- MATCH HISTORY --
-${displayMatches.joinToString("\n") { "- vs ${it.opponentName} (${it.competition}, ${it.matchDate}): ${it.goalsFor}-${it.goalsAgainst} (${it.resultBadge}). MOTM: ${it.motmName}. xG: ${it.expectedGoals} - ${it.expectedGoalsAgainst}" }}
-
--- TRANSFERS --
-${displayTransfers.joinToString("\n") { "- ${it.date}: ${it.type} - ${it.playerName} (Fee: ${state.currencySymbol}${it.feeM}M) with ${it.fromToClub}" }}
-
--- TROPHIES & AWARDS --
-Trophies: ${state.teamTrophies.joinToString(", ") { it.name }}
-Player Awards: ${state.playerAwards.joinToString(", ") { "${it.name} (${it.playerId}, ${it.monthYear})" }}
-"""
-                                val fullPrompt = "$contextStr\n\nUser Question: $userText"
-                                val reply = AiClient.ask(fullPrompt, state.aiAgent, state.aiApiUrl, aiApiKey, state.aiModel)
-                                chatHistory = chatHistory.dropLast(1) + com.fctracker.career.ui.screens.ChatMessage("assistant", reply)
-                            }
-                        }
-                    },
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.onPrimary)
-                }
+            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                FcField("Message", text, { text = it.take(1500) }, Modifier.weight(1f), placeholder = "Ask about your career…", singleLine = false)
+                FcIconButton(Icons.AutoMirrored.Filled.Send, "Send message", { send(text) }, size = 48.dp, background = c.accent, tint = c.onAccent, border = false)
             }
         }
     }
-    if (showNotesModal) {
-        NotesModal(viewModel = viewModel, onDismiss = { showNotesModal = false })
+
+    saving?.let { content ->
+        SaveNoteDialog(content, canSave = viewModel.savedNotes.size < MAX_NOTES, onSave = { title, body -> viewModel.addNote(title, body); saving = null }, onDismiss = { saving = null })
     }
-    
-    showSaveNoteContent?.let { contentToSave ->
-        SaveNoteDialog(
-            initialContent = contentToSave,
-            onSave = { title, newContent ->
-                if (viewModel.savedNotes.size < 5) {
-                    viewModel.addNote(title, newContent)
-                }
-                showSaveNoteContent = null
-            },
-            onDismiss = { showSaveNoteContent = null },
-            canSave = viewModel.savedNotes.size < 5
-        )
-    }
+    if (showNotes) NotesDialog(viewModel, onDismiss = { showNotes = false })
 }
 
 @Composable
-fun SaveNoteDialog(initialContent: String, onSave: (String, String) -> Unit, onDismiss: () -> Unit, canSave: Boolean) {
-    var title by remember { mutableStateOf("New Tactical Note") }
-    var content by remember { mutableStateOf(initialContent) }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surface).padding(16.dp)) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Save Note", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                if (!canSave) {
-                    Text("Note limit reached (5/5). Please delete an existing note first.", color = MaterialTheme.colorScheme.error)
-                }
-                OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Title") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                OutlinedTextField(value = content, onValueChange = { content = it }, label = { Text("Content") }, modifier = Modifier.fillMaxWidth().height(150.dp))
-                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                    TextButton(onClick = onDismiss) { Text("Cancel") }
-                    Button(onClick = { onSave(title, content) }, enabled = canSave && title.isNotBlank()) { Text("Save") }
-                }
-            }
-        }
-    }
-}
-
-
-@Composable
-fun NotesModal(viewModel: com.fctracker.career.MainViewModel, onDismiss: () -> Unit) {
-    var selectedNoteId by remember { mutableStateOf<String?>(null) }
-    var editingNoteId by remember { mutableStateOf<String?>(null) }
-    var editTitle by remember { mutableStateOf("") }
-    var editContent by remember { mutableStateOf("") }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 500.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(16.dp)
+private fun Bubble(text: String, mine: Boolean, local: Boolean = false, onSave: (() -> Unit)? = null) {
+    val c = FcTheme.colors
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+        Column(
+            Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = if (mine) 18.dp else 6.dp, bottomEnd = if (mine) 6.dp else 18.dp))
+                .background(if (mine) c.accent else c.surface2).let { if (!mine) it.border(1.dp, c.border, RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 6.dp, bottomEnd = 18.dp)) else it }
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (selectedNoteId == null) {
-                    item { Text("Select a Note to View", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White) }
-                    items(viewModel.savedNotes, key = { it.id }) { note ->
-                        DarkCard(modifier = Modifier.fillMaxWidth().clickable { selectedNoteId = note.id }) {
-                            Text(note.title, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.padding(8.dp))
-                        }
-                    }
-                    if (viewModel.savedNotes.isEmpty()) {
-                        item { Text("No notes saved.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    }
-                    item {
-                        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
-                            Button(onClick = onDismiss) { Text("Close") }
-                        }
-                    }
-                } else {
-                    val note = viewModel.savedNotes.find { it.id == selectedNoteId }
-                    if (note == null) {
-                        item { Text("Note not found.") }
-                        item { Button(onClick = { selectedNoteId = null }) { Text("Back") } }
-                    } else {
-                        item {
-                            if (editingNoteId == note.id) {
-                                OutlinedTextField(value = editTitle, onValueChange = { editTitle = it }, label = { Text("Title") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                                Spacer(modifier = Modifier.height(8.dp))
-                                OutlinedTextField(value = editContent, onValueChange = { editContent = it }, label = { Text("Content") }, modifier = Modifier.fillMaxWidth().height(150.dp))
-                                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                                    TextButton(onClick = { editingNoteId = null }) { Text("Cancel") }
-                                    Button(onClick = { 
-                                        viewModel.updateNote(note.id, editTitle, editContent)
-                                        editingNoteId = null
-                                    }) { Text("Save") }
-                                }
-                            } else {
-                                Text(note.title, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 18.sp)
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(note.content, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
-                                    TextButton(onClick = { selectedNoteId = null }) { Text("Back", color = Color.White) }
-                                    Row(horizontalArrangement = Arrangement.End) {
-                                        TextButton(onClick = { 
-                                            editTitle = note.title
-                                            editContent = note.content
-                                            editingNoteId = note.id
-                                        }) { Text("Edit") }
-                                        TextButton(onClick = { 
-                                            viewModel.removeNote(note)
-                                            selectedNoteId = null 
-                                        }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-                                    }
-                                }
-                            }
-                        }
-                    }
+            FcText(text, 14.sp, color = if (mine) c.onAccent else if (local) c.muted else c.text, lineHeight = 20.sp)
+            if (onSave != null) {
+                Row(Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onSave).padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    androidx.compose.material3.Icon(Icons.Default.BookmarkAdd, null, tint = c.accent, modifier = Modifier.size(16.dp))
+                    FcText("Save note", 12.sp, FontWeight.SemiBold, c.accent)
                 }
             }
         }
     }
 }
 
+@Composable
+fun SaveNoteDialog(initialContent: String, canSave: Boolean, onSave: (String, String) -> Unit, onDismiss: () -> Unit) {
+    var title by remember { mutableStateOf("") }
+    var content by remember { mutableStateOf(initialContent) }
+    FcDialog("Save note", onDismiss, actions = {
+        FcButton("Cancel", onDismiss, kind = ButtonKind.SECONDARY, small = true)
+        FcButton("Save", { onSave(title.trim(), content.trim()) }, small = true, enabled = canSave && title.isNotBlank())
+    }) {
+        if (!canSave) Notice(Tone.WARN, "Note limit reached ($MAX_NOTES/$MAX_NOTES)", "Delete a note first: open your notes from the top of the page.", icon = Icons.Default.Lock)
+        FcField("Title", title, { title = it }, placeholder = "Plan against Hull City")
+        FcField("Note", content, { content = it }, singleLine = false, minLines = 4)
+        Muted("Your notes are part of what the assistant reads.", 11.sp)
+    }
+}
 
-data class ChatMessage(val role: String, val text: String)
+@Composable
+private fun NotesDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
+    var open by remember { mutableStateOf<Note?>(null) }
+    var editing by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf<Note?>(null) }
+    val note = open?.let { o -> viewModel.savedNotes.firstOrNull { it.id == o.id } }
+    if (note == null) {
+        FcDialog("Saved notes (${viewModel.savedNotes.size}/$MAX_NOTES)", onDismiss, actions = { FcButton("Close", onDismiss, small = true) }) {
+            if (viewModel.savedNotes.isEmpty()) Muted("No notes saved. Tap Save note under an answer to keep it.", 13.sp)
+            viewModel.savedNotes.forEach { n ->
+                FcCard(Modifier.fillMaxWidth(), padding = 12.dp, gap = 4.dp, onClick = { open = n; editing = false }) {
+                    FcText(n.title, 14.sp, FontWeight.SemiBold)
+                    Muted(n.content, 12.sp, maxLines = 2)
+                }
+            }
+        }
+    } else if (editing) {
+        var title by remember(note.id) { mutableStateOf(note.title) }
+        var content by remember(note.id) { mutableStateOf(note.content) }
+        FcDialog("Edit note", { editing = false }, actions = {
+            FcButton("Cancel", { editing = false }, kind = ButtonKind.SECONDARY, small = true)
+            FcButton("Save", { viewModel.updateNote(note.id, title.trim(), content.trim()); editing = false }, small = true, enabled = title.isNotBlank())
+        }) {
+            FcField("Title", title, { title = it })
+            FcField("Note", content, { content = it }, singleLine = false, minLines = 5)
+        }
+    } else {
+        FcDialog(note.title, { open = null }, actions = {
+            FcButton("Delete", { deleting = note }, kind = ButtonKind.DANGER, icon = Icons.Default.Delete, small = true)
+            FcButton("Edit", { editing = true }, kind = ButtonKind.SECONDARY, icon = Icons.Default.Edit, small = true)
+            FcButton("Back", { open = null }, small = true)
+        }) { FcText(note.content, 14.sp, lineHeight = 20.sp) }
+    }
+    deleting?.let { d -> ConfirmDialog("Delete this note?", d.title, "Delete", { viewModel.removeNote(d); open = null }, { deleting = null }) }
+}

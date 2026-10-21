@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">FC26 Tracker</string>
+    <string name="widget_crest">Club crest</string>
+    <string name="widget_form">Recent form</string>
+    <string name="widget_large_description">Next match, league position, form and the last result</string>
+    <string name="widget_small_description">League position, points and form</string>
 </resources>
