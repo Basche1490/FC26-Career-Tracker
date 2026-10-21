@@ -38,15 +38,27 @@ object AiClient {
         else -> "gpt-3.5-turbo"
     }
 
-    suspend fun ask(prompt: String, agent: String, apiUrl: String, apiKey: String, model: String = ""): String =
+    /** One earlier turn of the conversation: "user" or "assistant", and what was said. */
+    data class Turn(val role: String, val text: String)
+
+    /**
+     * Sends [prompt] (the newest message) with the [system] rules and data in the provider's own system slot, and
+     * the earlier [history] as real conversation turns.
+     */
+    suspend fun ask(prompt: String, agent: String, apiUrl: String, apiKey: String, model: String = "", system: String? = null, history: List<Turn> = emptyList()): String =
         withContext(Dispatchers.IO) {
             if (apiKey.isBlank()) return@withContext "API key needed. Please provide your API key in Settings."
             val chosenModel = model.trim().ifBlank { defaultModel(agent) }
+            // Providers want the conversation to start with the person and to alternate.
+            val turns = (history + Turn("user", prompt)).dropWhile { it.role != "user" }.fold(mutableListOf<Turn>()) { acc, t ->
+                if (acc.isNotEmpty() && acc.last().role == t.role) acc[acc.lastIndex] = Turn(t.role, acc.last().text + "\n\n" + t.text) else acc.add(t)
+                acc
+            }
             try {
                 val request = when {
-                    agent.contains("Gemini", true) -> geminiRequest(prompt, apiKey, chosenModel)
-                    agent.contains("Claude", true) -> claudeRequest(prompt, apiKey, chosenModel)
-                    else -> openAiStyleRequest(prompt, agent, apiUrl, apiKey, chosenModel)
+                    agent.contains("Gemini", true) -> geminiRequest(turns, system, apiKey, chosenModel)
+                    agent.contains("Claude", true) -> claudeRequest(turns, system, apiKey, chosenModel)
+                    else -> openAiStyleRequest(turns, system, agent, apiUrl, apiKey, chosenModel)
                 }
                 http.newCall(request).execute().use { response ->
                     val body = response.body?.string().orEmpty()
@@ -65,11 +77,13 @@ object AiClient {
 
     // -- requests ------------------------------------------------------------------------------------
 
-    private fun geminiRequest(prompt: String, apiKey: String, model: String): Request {
-        val body = JSONObject().put(
-            "contents",
-            JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt))))
-        )
+    private fun geminiRequest(turns: List<Turn>, system: String?, apiKey: String, model: String): Request {
+        val contents = JSONArray()
+        turns.forEach { t ->
+            contents.put(JSONObject().put("role", if (t.role == "user") "user" else "model").put("parts", JSONArray().put(JSONObject().put("text", t.text))))
+        }
+        val body = JSONObject().put("contents", contents)
+        if (!system.isNullOrBlank()) body.put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
         return Request.Builder()
             .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
             // The key goes in a header, not in the URL, so it never ends up in logs or proxies.
@@ -78,11 +92,14 @@ object AiClient {
             .build()
     }
 
-    private fun claudeRequest(prompt: String, apiKey: String, model: String): Request {
+    private fun claudeRequest(turns: List<Turn>, system: String?, apiKey: String, model: String): Request {
+        val messages = JSONArray()
+        turns.forEach { t -> messages.put(JSONObject().put("role", if (t.role == "user") "user" else "assistant").put("content", t.text)) }
         val body = JSONObject()
             .put("model", model)
             .put("max_tokens", 2048)
-            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
+            .put("messages", messages)
+        if (!system.isNullOrBlank()) body.put("system", system)
         return Request.Builder()
             .url("https://api.anthropic.com/v1/messages")
             .header("x-api-key", apiKey)
@@ -91,10 +108,13 @@ object AiClient {
             .build()
     }
 
-    private fun openAiStyleRequest(prompt: String, agent: String, apiUrl: String, apiKey: String, model: String): Request {
+    private fun openAiStyleRequest(turns: List<Turn>, system: String?, agent: String, apiUrl: String, apiKey: String, model: String): Request {
+        val messages = JSONArray()
+        if (!system.isNullOrBlank()) messages.put(JSONObject().put("role", "system").put("content", system))
+        turns.forEach { t -> messages.put(JSONObject().put("role", if (t.role == "user") "user" else "assistant").put("content", t.text)) }
         val body = JSONObject()
             .put("model", model)
-            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
+            .put("messages", messages)
         val url = when {
             agent == "Other" && apiUrl.isNotBlank() ->
                 if (apiUrl.endsWith("/chat/completions") || apiUrl.endsWith("/messages")) apiUrl

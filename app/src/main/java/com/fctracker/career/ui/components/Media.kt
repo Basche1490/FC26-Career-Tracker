@@ -235,8 +235,8 @@ fun OvrChart(labels: List<String>, values: List<Int>, modifier: Modifier = Modif
             drawPath(line, c.accent, style = Stroke(width = 2.5.dp.toPx(), join = StrokeJoin.Round))
             pts.forEachIndexed { i, p ->
                 val last = i == pts.lastIndex
-                drawCircle(if (last) c.accent else c.surface, radius = (if (last) 5 else 3.5).dp.toPx(), center = p)
-                drawCircle(c.accent, radius = (if (last) 5 else 3.5).dp.toPx(), center = p, style = Stroke(2.dp.toPx()))
+                drawCircle(if (last) c.accent else c.surface, radius = (if (last) 5.0 else 3.5).dp.toPx(), center = p)
+                drawCircle(c.accent, radius = (if (last) 5.0 else 3.5).dp.toPx(), center = p, style = Stroke(2.dp.toPx()))
             }
         }
         // value labels above each point, season labels under them

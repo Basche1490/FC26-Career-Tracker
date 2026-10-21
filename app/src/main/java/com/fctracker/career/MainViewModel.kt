@@ -17,6 +17,7 @@ import com.fctracker.career.telemetry.Health
 import com.fctracker.career.telemetry.LiveSyncService
 import com.fctracker.career.telemetry.NotificationPrefs
 import com.fctracker.career.telemetry.TelemetrySync
+import com.fctracker.career.logic.CareerOps
 
 
 class MainViewModel(application: android.app.Application) : androidx.lifecycle.AndroidViewModel(application) {
@@ -873,34 +874,11 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         _state.update { it.copy(viewingSeasonYear = year) }
     }
 
+    /** Archives the season with everything its pages show and starts the next one (see [CareerOps.endSeason]). */
     fun endSeason() {
-        _state.update { state ->
-            val finalPosition = state.recentMatches.filter { it.competition == state.leagueName }.maxByOrNull { it.matchDate }?.leaguePosition ?: 1
-            val completedSeason = HistoricalSeason(
-                year = state.startYear,
-                leagueName = state.leagueName,
-                finalPosition = finalPosition,
-                matches = state.recentMatches,
-                players = state.players,
-                transfers = state.transfers,
-                objectives = state.objectives
-            )
-            
-            // Reset for new season
-            val resetPlayers = state.players.map { 
-                val birthYear = try { it.birthDate?.split("-")?.get(0)?.toInt() ?: 2000 } catch(e: Exception) { 2000 }
-                val newAge = (state.startYear + 1) - birthYear
-                it.copy(matchesPlayed = 0, goals = 0, assists = 0, age = newAge) 
-            }
-            
-            state.copy(
-                historicalSeasons = state.historicalSeasons + completedSeason,
-                recentMatches = emptyList(),
-                transfers = emptyList(),
-                players = resetPlayers,
-                startYear = state.startYear + 1
-            )
-        }
+        if (_state.value.viewingSeasonYear != null) return
+        _state.update { CareerOps.endSeason(it) }
+        persistData()
     }
 
     fun addMatchResult(match: MatchResult) {
@@ -912,10 +890,10 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
                     player
                 }
             }
-            state.copy(
+            CareerOps.dropPlayedFixture(state.copy(
                 recentMatches = listOf(match) + state.recentMatches,
                 players = updatedPlayers
-            )
+            ), match)
         }
     }
     
@@ -1006,6 +984,206 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         _state.update { current ->
             val updatedMap = updatedPlayers.associateBy { it.id }
             current.copy(players = current.players.map { updatedMap[it.id] ?: it })
+        }
+    }
+
+
+    // =================================================================================================================
+    // The final design
+    // =================================================================================================================
+
+    /** Runs a change to the season's data; an archived season is read-only, so nothing happens while one is shown. */
+    private fun edit(block: (AppState) -> AppState) {
+        if (_state.value.viewingSeasonYear != null) return
+        _state.update(block)
+    }
+
+    fun setPlatform(platform: String) {
+        _state.update { it.copy(platform = if (platform == Platform.CONSOLE) Platform.CONSOLE else Platform.PC) }
+        if (platform == Platform.CONSOLE && app.syncPrefs.backgroundSync) setBackgroundSync(false)
+        persistData()
+    }
+
+    fun setUseClubColours(on: Boolean) { _state.update { it.copy(useClubColours = on) }; persistData() }
+
+    fun setClubColours(primary: String, secondary: String) { _state.update { it.copy(primaryColorHex = primary, secondaryColorHex = secondary) }; persistData() }
+
+    /** Club profile from Settings and onboarding. */
+    fun updateClubProfile(
+        clubName: String, managerName: String, leagueName: String, country: String, currencySymbol: String,
+        primaryColorHex: String, secondaryColorHex: String, clubCrestUrl: String, isExistingTeam: Boolean, useClubColours: Boolean
+    ) {
+        _state.update {
+            it.copy(
+                clubName = clubName.trim().ifBlank { it.clubName }, managerName = managerName.trim(), leagueName = leagueName.trim().ifBlank { it.leagueName },
+                country = country, currencySymbol = currencySymbol.split(" ")[0], primaryColorHex = primaryColorHex, secondaryColorHex = secondaryColorHex,
+                clubCrestUrl = clubCrestUrl.trim(), isExistingTeam = isExistingTeam, useClubColours = useClubColours
+            )
+        }
+        persistData()
+    }
+
+    fun updateAiSettings(agent: String, apiUrl: String, apiKey: String?, model: String) {
+        _state.update { it.copy(aiAgent = agent, aiApiUrl = apiUrl.trim(), aiModel = model.trim()) }
+        if (apiKey != null) store.setAiApiKey(apiKey)
+        persistData()
+    }
+
+    /** Copies the chosen image into the app's own storage, so it stays when the original is moved or deleted. */
+    fun importCrestImage(uri: android.net.Uri, onDone: (Boolean) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = try {
+                val dir = java.io.File(getApplication<android.app.Application>().filesDir, "crests").apply { mkdirs() }
+                val target = java.io.File(dir, "crest_${store.activeSaveSlot}_${System.currentTimeMillis()}.img")
+                getApplication<android.app.Application>().contentResolver.openInputStream(uri)?.use { input ->
+                    target.outputStream().use { out -> input.copyTo(out) }
+                } ?: throw java.io.IOException("could not open the image")
+                if (target.length() > 6_000_000L) { target.delete(); throw java.io.IOException("image too large") }
+                val old = _state.value.clubCrestFile
+                _state.update { it.copy(clubCrestFile = target.absolutePath) }
+                if (old.isNotBlank() && old != target.absolutePath) java.io.File(old).delete()
+                persistData()
+                true
+            } catch (e: Exception) {
+                false
+            }
+            withContext(Dispatchers.Main) { onDone(ok) }
+        }
+    }
+
+    fun removeCrestImage() {
+        val old = _state.value.clubCrestFile
+        _state.update { it.copy(clubCrestFile = "") }
+        if (old.isNotBlank()) java.io.File(old).delete()
+        persistData()
+    }
+
+    fun updateClubInfo(info: ClubInfo) { _state.update { it.copy(clubInfo = info) }; persistData() }
+
+    fun saveOwnHistory(text: String) {
+        _state.update { it.copy(clubInfo = it.clubInfo.copy(history = text.trim(), historySource = if (text.isBlank()) "" else "own")) }
+        persistData()
+    }
+
+    /** A real club's history: the first part of its Wikipedia article (needs the internet). */
+    fun fetchWikipediaHistory(onDone: (String?) -> Unit) {
+        val club = _state.value.clubName
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = com.fctracker.career.ai.ClubHistory.fetchWikipedia(club)
+            if (result != null) {
+                _state.update { it.copy(clubInfo = it.clubInfo.copy(history = result.text, historySource = "wikipedia", historyUrl = result.url)) }
+                persistData()
+            }
+            withContext(Dispatchers.Main) { onDone(result?.text) }
+        }
+    }
+
+    /** The person's own club: the AI writes a history from their answers (only the answers and the facts are sent). */
+    fun writeHistoryWithAi(answers: Map<String, String>, onDone: (String?, String?) -> Unit) {
+        val s = _state.value
+        viewModelScope.launch(Dispatchers.IO) {
+            val (system, prompt) = com.fctracker.career.ai.ClubHistory.aiPrompt(s, answers)
+            val reply = com.fctracker.career.ai.AiClient.ask(prompt, s.aiAgent, s.aiApiUrl, store.aiApiKey.value, s.aiModel, system = system)
+            val failed = reply.startsWith("Error") || reply.startsWith("API key needed") || reply.startsWith("The AI ") || com.fctracker.career.ai.AiGuard.isOffTopicReply(reply)
+            if (!failed) {
+                _state.update { it.copy(clubInfo = it.clubInfo.copy(history = reply.trim(), historySource = "ai", aiAnswers = answers)) }
+                persistData()
+            }
+            withContext(Dispatchers.Main) { if (failed) onDone(null, reply) else onDone(reply.trim(), null) }
+        }
+    }
+
+    fun setWageBudget(k: Double) { _state.update { it.copy(wageBudgetK = k.coerceAtLeast(0.0)) }; persistData() }
+    fun setMilestonePrefs(p: MilestonePrefs) { _state.update { it.copy(milestonePrefs = p) }; persistData() }
+    fun setRecapExcluded(pages: List<Int>) { _state.update { it.copy(recapExcludedPages = pages.distinct().sorted()) }; persistData() }
+    fun dismissWorldReminder(season: Int) { _state.update { it.copy(worldReminderDismissed = season) }; persistData() }
+
+    // -- fixtures, tables, injuries, notes, awards, winners, ranking -----------------------------------------------
+
+    fun addFixture(f: Fixture) { edit { CareerOps.addFixture(it, f) }; persistData() }
+    fun updateFixture(f: Fixture) { edit { CareerOps.updateFixture(it, f) }; persistData() }
+    fun deleteFixture(id: String) { edit { CareerOps.deleteFixture(it, id) }; persistData() }
+
+    fun saveTableRow(league: String, oldClub: String, row: TableRow) { edit { CareerOps.editRow(it, league, oldClub, row) }; persistData() }
+    fun addTableClub(league: String, club: String) {
+        edit { s ->
+            val t = s.leagueTables.firstOrNull { it.league.equals(league, true) } ?: CareerOps.ownTable(s)
+            CareerOps.updateTable(s, com.fctracker.career.logic.LeagueTables.addClub(t, club, club.equals(s.clubName, true)))
+        }
+        persistData()
+    }
+    fun removeTableClub(league: String, club: String) {
+        edit { s -> s.leagueTables.firstOrNull { it.league.equals(league, true) }?.let { CareerOps.updateTable(s, com.fctracker.career.logic.LeagueTables.removeClub(it, club)) } ?: s }
+        persistData()
+    }
+    fun renameTableClub(league: String, old: String, new: String) {
+        edit { s -> s.leagueTables.firstOrNull { it.league.equals(league, true) }?.let { CareerOps.updateTable(s, com.fctracker.career.logic.LeagueTables.renameClub(it, old, new)) } ?: s }
+        persistData()
+    }
+    /** Console: the person's own row from their logged league matches. */
+    fun fillOwnRowFromMatches() {
+        edit { s ->
+            val t = CareerOps.ownTable(s)
+            val row = com.fctracker.career.logic.LeagueTables.rowFromMatches(s.clubName, s.recentMatches, s.leagueName)
+            val exists = t.rows.any { it.isUser || it.club.equals(s.clubName, true) }
+            val rows = if (exists) t.rows.map { if (it.isUser || it.club.equals(s.clubName, true)) row else it } else t.rows + row
+            CareerOps.updateTable(s, t.copy(rows = rows, source = Source.MANUAL))
+        }
+        persistData()
+    }
+    fun applyNewSeasonClubs(leaving: List<String>, promotedIn: List<String>, relegatedIn: List<String>) {
+        edit { CareerOps.applyNewSeasonClubs(it, leaving, promotedIn, relegatedIn) }
+        persistData()
+    }
+
+    fun setInjury(playerId: String, name: String, start: String?, back: String?, followGame: Boolean, note: String?) {
+        edit { CareerOps.setInjury(it, playerId, name, start, back, followGame, note) }
+        persistData()
+    }
+    fun clearInjury(playerId: String) { edit { CareerOps.clearInjury(it, playerId) }; persistData() }
+
+    fun addPlayerNote(playerId: String, text: String) { edit { CareerOps.addPlayerNote(it, playerId, text) }; persistData() }
+    fun deletePlayerNote(id: String) { edit { CareerOps.deletePlayerNote(it, id) }; persistData() }
+
+    fun addAward(a: AwardEntry) { edit { CareerOps.addAward(it, a) }; persistData() }
+    fun deleteAward(id: String) { edit { CareerOps.deleteAward(it, id) }; persistData() }
+
+    fun addWorldWinner(w: WorldWinner) { _state.update { CareerOps.addWorldWinner(it, w) }; persistData() }
+    fun deleteWorldWinner(season: Int, competition: String) { _state.update { CareerOps.deleteWorldWinner(it, season, competition) }; persistData() }
+    fun addWorldTopScorer(t: WorldTopScorer) { _state.update { CareerOps.addWorldTopScorer(it, t) }; persistData() }
+
+    fun setOwnCoefficient(season: Int, points: Double) { edit { CareerOps.setOwnCoefficient(it, season, points) }; persistData() }
+    fun addCoefficientClub(c: ClubCoefficient) {
+        edit { s -> s.copy(coefficients = (s.coefficients.filterNot { it.club.equals(c.club, true) } + c).sortedWith(compareBy({ if (it.rank > 0) it.rank else Int.MAX_VALUE }, { -it.total }))) }
+        persistData()
+    }
+    fun removeCoefficientClub(club: String) { edit { s -> s.copy(coefficients = s.coefficients.filterNot { it.club.equals(club, true) }) }; persistData() }
+
+    /** "Use my team sheet from the game": false when the sheet names too few players the app knows. */
+    fun useGameTeamSheet(): Boolean {
+        val applied = CareerOps.applyTeamSheet(_state.value) ?: return false
+        val placed = com.fctracker.career.ui.screens.applySmartFormation(applied.players, applied.activeFormation) ?: applied.players
+        _state.update { it.copy(activeFormation = applied.activeFormation, players = placed) }
+        persistData()
+        return true
+    }
+
+    // -- the assistant ----------------------------------------------------------------------------------------------
+
+    /**
+     * Answers one message. Questions about anything but the career are answered by the app itself and never sent;
+     * the rest go to the AI agent with everything the app holds.
+     */
+    fun askAssistant(message: String, mode: String, history: List<com.fctracker.career.ai.ChatTurn>, onReply: (String, Boolean) -> Unit) {
+        val s = _state.value
+        val step = com.fctracker.career.ai.Assistant.prepare(s, savedNotes.toList(), message, mode, history)
+        when (step) {
+            is com.fctracker.career.ai.Assistant.Step.Local -> onReply(step.reply, true)
+            is com.fctracker.career.ai.Assistant.Step.Send -> viewModelScope.launch(Dispatchers.IO) {
+                val reply = com.fctracker.career.ai.AiClient.ask(step.prompt, s.aiAgent, s.aiApiUrl, store.aiApiKey.value, s.aiModel, system = step.system, history = step.history)
+                val final = com.fctracker.career.ai.Assistant.finish(s, reply)
+                withContext(Dispatchers.Main) { onReply(final, final != reply.trim()) }
+            }
         }
     }
 
