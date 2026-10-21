@@ -1,4 +1,4 @@
--- FC26 Table Census v1.2.0 - read-only inventory of the game data FC26 Career Tracker could use.
+-- FC26 Table Census v1.3.0 - read-only inventory of the game data FC26 Career Tracker could use.
 --
 -- Writes to Documents\FC26 Export:
 --   FC26_census_<date>_<time>.txt         the report: a season-end check (league champions, cup finals, awards, cup
@@ -7,21 +7,17 @@
 --   FC26_census_progress.txt              what the script is doing right now, written before every step
 --   FC26_census_skip.txt                  steps that crashed the game in an earlier run (they are skipped)
 --
--- Live Editor has no "list every table" command, so the census asks for every table name the game is known or likely
--- to use. A name that does not exist simply comes back empty.
+-- It asks Live Editor for the game's own list of tables (GetDBTablesNames) and goes through that list. Only if Live
+-- Editor cannot give the list does it fall back to asking for names the game is likely to use.
 --
 -- It only reads. Nothing in the game or the save is changed. If the game ever closes while it runs, start the game,
 -- load the career and run the census again: it reads FC26_census_progress.txt, skips the step that stopped the game
 -- last time, says which one in the report, and carries on.
 --
--- Version 1.0.0 crashed the game straight away for one player. It listed folders of Live Editor through
--- getFileList / getDirectoryList with a folder that may not exist, and looked inside Live Editor's own objects;
--- 1.1.0 does neither, does the season-end check first (it only uses what the other scripts already use every day),
--- and leaves the unknown table names for last. 1.1.0 then closed the game too, straight after the league tables: it
--- asked GetDBTableRows for the award table, which is empty early in a season, and nothing had ever asked it for an
--- empty table before. 1.2.0 counts a table's records first and never asks GetDBTableRows for an empty one. It also
--- reads its files the way the other scripts do (read("*a")).
---
+-- History: 1.0.0 and 1.1.0 closed the game. The progress file of 1.1.0 shows where: asking Live Editor for a table
+-- called "transfers", a name that came from the guessed list. 1.3.0 uses the game's own list, never asks for
+-- "transfers", and keeps every lookup, count and column list as a separate step so a crash points at one call.
+
 -- Best run twice: once now, and once in June of an in-game season (after the cup finals, before 1 July), because
 -- the game replaces the fixture list, and with it every cup final, when the new season starts.
 
@@ -32,7 +28,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 Table Census must be executed while a career is loaded")
 
-local VERSION = "1.2.0"
+local VERSION = "1.3.0"
 
 local user_profile = os.getenv("USERPROFILE") or ""
 local ROOT = (user_profile ~= "" and user_profile or ".") .. "\\Documents\\FC26 Export"
@@ -306,6 +302,63 @@ local function shootout(v)
     return v
 end
 
+-- Names never to ask for: asking Live Editor for them closed the game (census 1.1.0, 21 Oct 2026).
+local NEVER = { transfers = true }
+
+-- Turns what a Live Editor list function returns into a list of strings, whatever shape it comes in.
+local function to_names(res)
+    local out = {}
+    if type(res) ~= "table" then return out end
+    local function pick(v, k)
+        if type(v) == "string" then return v end
+        if type(v) == "table" then
+            for _, key in ipairs({ "name", "tablename", "shortname", "fieldname", "field" }) do
+                if type(v[key]) == "string" then return v[key] end
+            end
+        end
+        if type(k) == "string" then return k end
+        return nil
+    end
+    for k, v in pairs(res) do
+        local name = pick(v, k)
+        if name and name ~= "" then out[#out + 1] = name end
+    end
+    table.sort(out)
+    return out
+end
+
+-- The game's own list of tables, or nil when Live Editor cannot give it.
+local function names_from_game()
+    if type(GetDBTablesNames) ~= "function" then return nil, "Live Editor has no GetDBTablesNames" end
+    local ok, res = pcall(GetDBTablesNames)
+    if not ok then return nil, "GetDBTablesNames failed: " .. tostring(res) end
+    local names = to_names(res)
+    if #names == 0 then return nil, "GetDBTablesNames returned nothing" end
+    return names, nil
+end
+
+-- Column names from the game's description of a table (no rows are read), or nil.
+local function fields_of(name)
+    if type(GetDBTableFields) ~= "function" then return nil end
+    local ok, res = pcall(GetDBTableFields, name)
+    if not ok then return nil end
+    local names = to_names(res)
+    if #names == 0 then return nil end
+    return names
+end
+
+local function hex_colour(r, g, b)
+    r, g, b = tonumber(r), tonumber(g), tonumber(b)
+    if not (r and g and b) then return "?" end
+    return string.format("#%02x%02x%02x", math.max(0, math.min(255, r)), math.max(0, math.min(255, g)), math.max(0, math.min(255, b)))
+end
+
+local function comp_name_by_id(id)
+    local ok, name = pcall(function() return GetCompetitionNameByID(tonumber(id)) end)
+    if ok and name and tostring(name) ~= "" then return tostring(name) end
+    return nil
+end
+
 -- ---------------------------------------------------------------------------------------------------------
 -- Names to ask for
 -- ---------------------------------------------------------------------------------------------------------
@@ -427,12 +480,124 @@ section("Environment", function()
     for i = 1, #names, 8 do w("  " .. table.concat(names, ", ", i, math.min(i + 7, #names))) end
 end)
 
+local game_names, game_names_why = nil, nil
+
+section("The game's own list of tables (GetDBTablesNames)", function()
+    local ok, res = step("list GetDBTablesNames", function()
+        local n, why = names_from_game()
+        return { names = n, why = why }
+    end)
+    local names = ok and res and res.names or nil
+    local why = ok and res and res.why or res
+    if names then
+        game_names = names
+        w("tables in the game's list: " .. #names)
+        for i = 1, #names, 6 do w("  " .. table.concat(names, ", ", i, math.min(i + 5, #names))) end
+    else
+        game_names_why = tostring(why)
+        w("not available: " .. game_names_why)
+    end
+end)
+
+-- Rows of a table as plain rows, through GetDBTableRows (only for a table that has records).
+local function plain_rows(name)
+    local ok, rows = step("rows " .. name, function() return rows_of(name) end)
+    if not ok or type(rows) ~= "table" then return nil end
+    local out = {}
+    for i = 1, #rows do out[i] = plain_row(rows[i]) end
+    return out
+end
+
+local TOP_LEAGUES = { { 13, "Premier League" }, { 53, "LALIGA EA SPORTS" }, { 31, "Serie A" }, { 19, "Bundesliga" }, { 16, "Ligue 1" } }
+
+section("Who holds each competition (competition table: competitionchampionid)", function()
+    local rows = plain_rows("competition")
+    if not rows then w("competition table not read") return end
+    w("rows: " .. #rows .. "   (id, name, holder, real competition, women's, importance, goal-scoring record)")
+    table.sort(rows, function(a, b) return (tonumber(a.competitionid) or 0) < (tonumber(b.competitionid) or 0) end)
+    for _, r in ipairs(rows) do
+        local holder = tonumber(r.competitionchampionid) or 0
+        w(string.format("  %5s  %-34s holder=%s%s  real=%s women=%s importance=%s record=%s",
+            show(r.competitionid), comp_name_by_id(r.competitionid) or "?", show(r.competitionchampionid),
+            is_id(holder) and (" " .. tname(holder)) or "", show(r.isrealcompetition), show(r.iswomencompetition),
+            show(r.competitionimportance), show(r.goalscoringrecord)))
+    end
+end)
+
+section("Club honours, colours and rivals (teams table) for the top 5 leagues and your club", function()
+    local rows = plain_rows("teams")
+    if not rows then w("teams table not read") return end
+    local league_of = {}
+    local tbl = get_table("leagueteamlinks")
+    if tbl then
+        local rec = tbl:GetFirstRecord()
+        while rec and rec > 0 do
+            local ok1, tid = pcall(function() return tbl:GetRecordFieldValue(rec, "teamid") end)
+            local ok2, lid = pcall(function() return tbl:GetRecordFieldValue(rec, "leagueid") end)
+            if ok1 and ok2 then league_of[tonumber(tid) or 0] = tonumber(lid) end
+            rec = tbl:GetNextValidRecord()
+        end
+    end
+    local wanted = {}
+    for _, l in ipairs(TOP_LEAGUES) do wanted[l[1]] = l[2] end
+    local picked = {}
+    for _, r in ipairs(rows) do
+        local tid = tonumber(r.teamid) or 0
+        if tid == managed_tid or wanted[league_of[tid] or -1] then picked[#picked + 1] = r end
+    end
+    table.sort(picked, function(a, b)
+        local la, lb = league_of[tonumber(a.teamid) or 0] or 0, league_of[tonumber(b.teamid) or 0] or 0
+        if la ~= lb then return la < lb end
+        return tostring(a.teamname) < tostring(b.teamname)
+    end)
+    w("clubs: " .. #picked .. "   (league titles, domestic cups, Champions League / Europa League / Conference League wins, founded, rival, colours, popularity)")
+    for _, r in ipairs(picked) do
+        local tid = tonumber(r.teamid) or 0
+        w(string.format("  %-26s league=%-4s titles=%s cups=%s ucl=%s uel=%s uecl=%s prev_el_champ=%s founded=%s rival=%s colours=%s %s %s popularity=%s",
+            tname(tid), show(league_of[tid]), show(r.leaguetitles), show(r.domesticcups), show(r.uefa_cl_wins), show(r.uefa_el_wins),
+            show(r.uefa_uecl_wins), show(r.prev_el_champ), show(r.foundationyear), is_id(tonumber(r.rivalteam)) and tname(r.rivalteam) or show(r.rivalteam),
+            hex_colour(r.teamcolor1r, r.teamcolor1g, r.teamcolor1b), hex_colour(r.teamcolor2r, r.teamcolor2g, r.teamcolor2b),
+            hex_colour(r.teamcolor3r, r.teamcolor3g, r.teamcolor3b), show(r.popularity)))
+    end
+end)
+
+section("Budgets, manager, stadium and suspensions", function()
+    -- only the function that needs no arguments; the others want a team and are left alone
+    if type(rawget(_G, "GetUserTransferBudget")) == "function" then
+        local ok, v = step("call GetUserTransferBudget", function() return GetUserTransferBudget() end)
+        w("GetUserTransferBudget() = " .. (ok and show(v) or ("failed: " .. tostring(v))))
+    end
+    for _, name in ipairs({ "career_managerpref", "career_managerinfo", "playersuspensions", "stadiumassignments", "career_squadranking" }) do
+        local rows = plain_rows(name)
+        if rows then
+            w(name .. ": " .. #rows .. " rows")
+            for i = 1, math.min(#rows, 25) do
+                w(string.format("  #%d  %s", i, describe_row(rows[i], 70)))
+                local note = annotate(rows[i])
+                if note ~= "" then w("        " .. note) end
+            end
+        else
+            w(name .. ": not read")
+        end
+    end
+    local links = plain_rows("teamstadiumlinks")
+    if links and managed_tid > 0 then
+        for _, l in ipairs(links) do
+            if tonumber(l.teamid) == managed_tid then
+                local sid = tonumber(l.stadiumid)
+                w("your club's stadium id: " .. show(sid))
+                for _, st in ipairs(plain_rows("stadiums") or {}) do
+                    if tonumber(st.stadiumid) == sid then w("  stadium: " .. show(st.name) .. ", capacity " .. show(st.capacity)) end
+                end
+            end
+        end
+    end
+end)
+
 -- ---------------------------------------------------------------------------------------------------------
 -- Season-end check: what an "Around the World" page and the season summary would be built from. First, because it
 -- only uses tables and memory the other scripts already read.
 -- ---------------------------------------------------------------------------------------------------------
-local TOP_LEAGUES = { { 13, "Premier League" }, { 53, "LALIGA EA SPORTS" }, { 31, "Serie A" }, { 19, "Bundesliga" }, { 16, "Ligue 1" } }
-
 section("Season-end check 1: league tables and champions (leagueteamlinks)", function()
     local list = {}
     local tbl = get_table("leagueteamlinks")
@@ -586,34 +751,44 @@ end)
 section("Every table the game answers to", function()
     local wanted, order = {}, {}
     local function want(name)
-        name = tostring(name):lower()
-        if name ~= "" and not wanted[name] then
-            wanted[name] = true
+        name = tostring(name)
+        local key = name:lower()
+        if name ~= "" and not wanted[key] and not NEVER[key] then
+            wanted[key] = true
             order[#order + 1] = name
         end
     end
-    for _, name in ipairs(KNOWN) do want(name) end
-    for _, word in ipairs(WORDS) do
-        want(word)
-        if not word:find("^career_") then want("career_" .. word) end
+    if game_names then
+        for _, name in ipairs(game_names) do want(name) end
+        w("names asked: " .. #order .. " (the game's own list)")
+    else
+        for _, name in ipairs(KNOWN) do want(name) end
+        for _, word in ipairs(WORDS) do
+            want(word)
+            if not word:find("^career_") then want("career_" .. word) end
+        end
+        for _, name in ipairs(EXTRA_NAMES) do want(name) end
+        w("names asked: " .. #order .. " (guessed: " .. tostring(game_names_why) .. ")")
     end
-    for _, name in ipairs(EXTRA_NAMES) do want(name) end
-    w("names asked: " .. #order)
 
     local found, skipped = {}, {}
     for i, name in ipairs(order) do
-        local ok, info = step("table " .. name, function()
-            local tbl = get_table(name)
-            if not tbl then return nil end
-            return { rows = count_records(tbl, 200000) }
-        end)
+        local ok, tbl = step("table " .. name, function() return get_table(name) end)
         if not ok and skip["table " .. name] then
             skipped[#skipped + 1] = name
-        elseif ok and info then
-            info.columns = {}
-            if info.rows > 0 and info.rows <= BIG_TABLE then
-                local ok2, rows = step("columns " .. name, function() return rows_of(name) end)
-                if ok2 and rows and rows[1] then info.columns = sorted_keys(plain_row(rows[1])) end
+        elseif ok and tbl then
+            local okc, n = step("count " .. name, function() return count_records(tbl, 200000) end)
+            if not okc then
+                if skip["count " .. name] then skipped[#skipped + 1] = name .. " (count)" end
+                n = -1
+            end
+            local info = { rows = n, columns = {} }
+            local okf, cols = step("fields " .. name, function() return fields_of(name) end)
+            if okf and cols then
+                info.columns = cols
+            elseif n > 0 and n <= BIG_TABLE then
+                local okr, rows = step("columns " .. name, function() return rows_of(name) end)
+                if okr and rows and rows[1] then info.columns = sorted_keys(plain_row(rows[1])) end
             end
             existing[name] = info
             found[#found + 1] = name
