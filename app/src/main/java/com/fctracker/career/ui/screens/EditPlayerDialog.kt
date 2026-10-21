@@ -84,7 +84,14 @@ internal fun nicknameToKeep(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: List<com.fctracker.career.EafcPlayer> = emptyList(), onDismiss: () -> Unit, onUpdate: (Player) -> Unit, onDelete: (() -> Unit)? = null, referenceDate: String? = null) {
+fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: List<com.fctracker.career.EafcPlayer> = emptyList(), onDismiss: () -> Unit, onUpdate: (Player) -> Unit, onDelete: (() -> Unit)? = null, referenceDate: String? = null, console: Boolean = false) {
+    var shirtNumber by remember { mutableStateOf(player?.number?.takeIf { it > 0 }?.toString() ?: "") }
+    var squadRole by remember { mutableStateOf(player?.squadRole ?: "") }
+    var contractEnd by remember { mutableStateOf(player?.contractEnd ?: "") }
+    var loanDirection by remember { mutableStateOf(player?.loanDirection ?: "") }
+    var loanClub by remember { mutableStateOf(player?.loanClub ?: "") }
+    var loanEnd by remember { mutableStateOf(player?.loanEnd ?: "") }
+    var loanOption by remember { mutableStateOf(player?.loanOptionToBuy ?: false) }
     var name by remember { mutableStateOf(player?.name ?: "") }
     var nickname by remember { mutableStateOf(player?.nickname ?: "") }
     var primaryPosition by remember { mutableStateOf(player?.primaryPosition ?: "CM") }
@@ -254,8 +261,30 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                     OutlinedTextField(value = wageK, onValueChange = { wageK = it }, label = { Text("Weekly Wage (€K)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
                 }
 
-                // What the game itself says about the contract and any loan (read-only, never typed in).
-                if (player != null) FromTheGameSection(player, referenceDate)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = shirtNumber, onValueChange = { v -> shirtNumber = v.filter { it.isDigit() }.take(2) }, label = { Text("Shirt number") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                    Box(Modifier.weight(1f)) { DropdownField("Squad role", squadRole.ifBlank { "Not set" }, listOf("Not set", "Crucial", "Important", "Rotation", "Sporadic", "Prospect")) { squadRole = if (it == "Not set") "" else it } }
+                }
+                Text(
+                    "On PC the shirt number, squad role and wage follow the game; you can still change them here.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                // What the game says about the contract and any loan: read from the career on PC, typed in on console.
+                if (console) {
+                    Text("Contract & loan", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    com.fctracker.career.ui.components.FcDateField("Contract ends", contractEnd.ifBlank { null }, { contractEnd = it })
+                    DropdownField("On loan", when (loanDirection) { "in" -> "Loaned in (to us)"; "out" -> "Loaned out (from us)"; else -> "Not on loan" }, listOf("Not on loan", "Loaned in (to us)", "Loaned out (from us)")) {
+                        loanDirection = when (it) { "Loaned in (to us)" -> "in"; "Loaned out (from us)" -> "out"; else -> "" }
+                    }
+                    if (loanDirection.isNotBlank()) {
+                        OutlinedTextField(value = loanClub, onValueChange = { loanClub = it }, label = { Text(if (loanDirection == "in") "On loan from" else "On loan to") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                        com.fctracker.career.ui.components.FcDateField("Loan ends", loanEnd.ifBlank { null }, { loanEnd = it })
+                        com.fctracker.career.ui.components.FcCheckRow("Option to buy", loanOption, { loanOption = it })
+                    }
+                    Text("On console these fields are open for you to fill in. On PC the capture script reads them from your career.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else if (player != null) FromTheGameSection(player, referenceDate)
 
                 // The original player a regen is based on. It is saved with the player: it starts from what was saved
                 // (blank when nothing was), never from the regen's own name.
@@ -503,7 +532,14 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                             regenOriginalName = savedOriginal,
                             isAcademy = if (isRetired) false else isAcademyPlayer,
                             isStartingXI = if (isRetired) false else player.isStartingXI,
-                            status = status
+                            status = status,
+                            number = shirtNumber.toIntOrNull() ?: 0,
+                            squadRole = squadRole.ifBlank { null },
+                            contractEnd = if (console) contractEnd.ifBlank { null } else player.contractEnd,
+                            loanDirection = if (console) loanDirection.ifBlank { null } else player.loanDirection,
+                            loanClub = if (console) loanClub.ifBlank { null } else player.loanClub,
+                            loanEnd = if (console) loanEnd.ifBlank { null } else player.loanEnd,
+                            loanOptionToBuy = if (console) loanOption else player.loanOptionToBuy
                         ) ?: Player(
                             name = name.trim(),
                             nickname = savedNickname,
@@ -526,7 +562,14 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
                             isRegen = isRegen,
                             regenOriginalName = savedOriginal,
                             isAcademy = isAcademyPlayer,
-                            status = status
+                            status = status,
+                            number = shirtNumber.toIntOrNull() ?: 0,
+                            squadRole = squadRole.ifBlank { null },
+                            contractEnd = contractEnd.ifBlank { null },
+                            loanDirection = loanDirection.ifBlank { null },
+                            loanClub = loanClub.ifBlank { null },
+                            loanEnd = loanEnd.ifBlank { null },
+                            loanOptionToBuy = loanOption
                         )
                         onUpdate(newPlayer)
                         onDismiss()

@@ -49,326 +49,6 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
-    val state by viewModel.state.collectAsState()
-    var showMatchForm by remember { mutableStateOf(false) }
-    var matchToEdit by remember { mutableStateOf<MatchResult?>(null) }
-    var selectedCompetitionFilter by remember { mutableStateOf(MatchInsights.ALL_COMPETITIONS) }
-    var resultFilter by remember { mutableStateOf(ResultFilter.ALL) }
-    var matchToDelete by remember { mutableStateOf<MatchResult?>(null) }
-
-    
-    // Calendar Logic
-    val startYear = state.startYear
-    val startCal = Calendar.getInstance().apply {
-        set(Calendar.YEAR, startYear)
-        set(Calendar.MONTH, Calendar.JULY)
-        set(Calendar.DAY_OF_MONTH, 1)
-    }
-    val endCal = Calendar.getInstance().apply {
-        set(Calendar.YEAR, startYear + 1)
-        set(Calendar.MONTH, Calendar.JUNE)
-        set(Calendar.DAY_OF_MONTH, 30)
-    }
-    
-    // Determine active month based on the latest match, falling back to start month
-        val displayMatches = if (state.viewingSeasonYear != null) {
-        state.historicalSeasons.find { it.year == state.viewingSeasonYear }?.matches ?: emptyList()
-    } else {
-        state.recentMatches
-    }
-    val isArchived = state.viewingSeasonYear != null
-
-    // History filters: a competition (this season may not have the one that was picked) and a result chip.
-    val competitionOptions = remember(displayMatches) { MatchInsights.competitions(displayMatches) }
-    val activeCompetition = if (selectedCompetitionFilter in competitionOptions) selectedCompetitionFilter else MatchInsights.ALL_COMPETITIONS
-    val competitionMatches = remember(displayMatches, activeCompetition) { MatchInsights.byCompetition(displayMatches, activeCompetition) }
-    val visibleMatches = remember(competitionMatches, resultFilter) { competitionMatches.filter { MatchInsights.fits(it, resultFilter) } }
-    val estimatedInList = remember(competitionMatches) { MatchInsights.estimatedCount(competitionMatches) }
-
-    val df = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-    val monthFmt = SimpleDateFormat("yyyy-MM", Locale.getDefault())
-    
-    var currentMonthCal by remember(displayMatches.size) { 
-        mutableStateOf(
-            if (displayMatches.isNotEmpty()) {
-                val latest = displayMatches.first().matchDate
-                try {
-                    val d = df.parse(latest)
-                    if (d != null) {
-                        Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply { time = d; set(Calendar.DAY_OF_MONTH, 1) }
-                    } else {
-                        startCal.clone() as Calendar
-                    }
-                } catch(e: Exception) {
-                    startCal.clone() as Calendar
-                }
-            } else {
-                startCal.clone() as Calendar
-            }
-        ) 
-    }
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize().imePadding().navigationBarsPadding()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(20.dp)
-                    .statusBarsPadding(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onMenuClick) {
-                    Icon(Icons.Default.Menu, "Menu", tint = MaterialTheme.colorScheme.primary)
-                }
-                Text("Matches & Fixtures", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                StatusPill(viewModel)
-            }
-            
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                item {
-                    Text("Fixture Calendar", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                }
-                
-                item {
-                    FixtureCalendar(
-                        currentMonthCal = currentMonthCal,
-                        onMonthChange = { newCal -> currentMonthCal = newCal },
-                        startCal = startCal,
-                        endCal = endCal,
-                        matches = displayMatches,
-                        onDateClick = { m -> matchToEdit = m; showMatchForm = true }
-                    )
-                }
-                
-                item { Spacer(Modifier.height(8.dp)) }
-                item {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("Match History", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        var expanded by remember { mutableStateOf(false) }
-                        Box {
-                            TextButton(onClick = { expanded = true }) {
-                                Text(activeCompetition, color = MaterialTheme.colorScheme.primary)
-                                Icon(Icons.Default.ArrowDropDown, contentDescription = "Filter by competition", tint = MaterialTheme.colorScheme.primary)
-                            }
-                            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                                competitionOptions.forEach { comp ->
-                                    DropdownMenuItem(
-                                        text = { Text(comp) },
-                                        onClick = { selectedCompetitionFilter = comp; expanded = false }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (state.historicalSeasons.isNotEmpty()) {
-                    item {
-                        SeasonChips(state, onSelect = { viewModel.setViewingSeasonYear(it) })
-                    }
-                }
-
-                if (competitionMatches.isNotEmpty()) {
-                    item { MatchSummaryCard(MatchInsights.record(competitionMatches), MatchInsights.form(competitionMatches)) }
-                    item {
-                        ResultChips(
-                            selected = resultFilter,
-                            estimatedCount = estimatedInList,
-                            onSelect = { resultFilter = it }
-                        )
-                    }
-                }
-
-                items(visibleMatches) { match ->
-                    SwipeableMatchCard(
-                        match = match,
-                        state = state,
-                        swipeEnabled = !isArchived,
-                        onEdit = { if (!isArchived) { matchToEdit = match; showMatchForm = true } },
-                        onAskDelete = { if (!isArchived) matchToDelete = match }
-                    )
-                }
-                if (visibleMatches.isEmpty()) {
-                    item {
-                        if (displayMatches.isEmpty()) {
-                            Text("No matches played yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        } else {
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("No matches fit these filters.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                TextButton(onClick = {
-                                    resultFilter = ResultFilter.ALL
-                                    selectedCompetitionFilter = MatchInsights.ALL_COMPETITIONS
-                                }) { Text("Clear filters") }
-                            }
-                        }
-                    }
-                }
-                item { Spacer(Modifier.height(80.dp)) }
-            }
-        }
-        
-        if (!isArchived) {
-            FloatingActionButton(
-                onClick = { matchToEdit = null; showMatchForm = true },
-            modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(16.dp),
-            containerColor = MaterialTheme.colorScheme.primary
-        ) {
-            Icon(Icons.Default.Add, "Log Match", tint = MaterialTheme.colorScheme.onPrimary)
-        }
-        }
-        
-        val pendingDelete = matchToDelete
-        if (pendingDelete != null) {
-            AlertDialog(
-                onDismissRequest = { matchToDelete = null },
-                title = { Text("Delete this match?") },
-                text = {
-                    Text(
-                        "${pendingDelete.goalsFor}-${pendingDelete.goalsAgainst} ${if (pendingDelete.isHome) "vs" else "at"} " +
-                            "${pendingDelete.opponentName} on ${pendingDelete.matchDate} will be removed from your match history. This cannot be undone."
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        viewModel.deleteMatchResult(pendingDelete.id)
-                        matchToDelete = null
-                    }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-                },
-                dismissButton = { TextButton(onClick = { matchToDelete = null }) { Text("Keep it") } }
-            )
-        }
-
-        if (showMatchForm) {
-            MatchFormModal(
-                viewModel = viewModel, 
-                state = state, 
-                initialMatch = matchToEdit,
-                onDismiss = { showMatchForm = false }, 
-                onSave = { match -> 
-                    if (matchToEdit != null) viewModel.updateMatchResult(match) 
-                    else viewModel.addMatchResult(match)
-                    showMatchForm = false 
-                }
-            )
-        }
-    }
-}
-
-@Composable
-fun FixtureCalendar(currentMonthCal: Calendar, onMonthChange: (Calendar) -> Unit, startCal: Calendar, endCal: Calendar, matches: List<MatchResult>,
-    onDateClick: (MatchResult) -> Unit
-) {
-    val monthFmt = SimpleDateFormat("MMMM yyyy", Locale.getDefault())
-    val df = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-    
-    val matchesByDate = matches.groupBy { it.matchDate }
-    
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
-            .padding(16.dp)
-    ) {
-        Column {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = {
-                    val prev = currentMonthCal.clone() as Calendar
-                    prev.add(Calendar.MONTH, -1)
-                    if (prev.timeInMillis >= startCal.timeInMillis || (prev.get(Calendar.YEAR) == startCal.get(Calendar.YEAR) && prev.get(Calendar.MONTH) == startCal.get(Calendar.MONTH))) {
-                        onMonthChange(prev)
-                    }
-                }) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Prev Month", tint = Color.White)
-                }
-                Text(monthFmt.format(currentMonthCal.time), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, fontSize = 16.sp)
-                IconButton(onClick = {
-                    val next = currentMonthCal.clone() as Calendar
-                    next.add(Calendar.MONTH, 1)
-                    if (next.timeInMillis <= endCal.timeInMillis || (next.get(Calendar.YEAR) == endCal.get(Calendar.YEAR) && next.get(Calendar.MONTH) == endCal.get(Calendar.MONTH))) {
-                        onMonthChange(next)
-                    }
-                }) {
-                    Icon(Icons.Default.ArrowForward, contentDescription = "Next Month", tint = Color.White)
-                }
-            }
-            
-            Spacer(Modifier.height(8.dp))
-            
-            // Days of week
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat").forEach {
-                    Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                }
-            }
-            
-            Spacer(Modifier.height(8.dp))
-            
-            val cal = currentMonthCal.clone() as Calendar
-            cal.set(Calendar.DAY_OF_MONTH, 1)
-            val firstDayOfWeek = cal.get(Calendar.DAY_OF_WEEK) - 1 // 0 for Sun
-            val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
-            
-            val totalCells = firstDayOfWeek + daysInMonth
-            val rows = Math.ceil(totalCells / 7.0).toInt()
-            
-            Column {
-                for (r in 0 until rows) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                        for (c in 0 until 7) {
-                            val cellIndex = r * 7 + c
-                            val day = cellIndex - firstDayOfWeek + 1
-                            if (day in 1..daysInMonth) {
-                                val dateStr = String.format("%04d-%02d-%02d", cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, day)
-                                val dayMatches = matchesByDate[dateStr] ?: emptyList()
-                                
-                                val matchOnDay = dayMatches.firstOrNull()
-                                val dayColor = if (matchOnDay != null) {
-                                    when (matchOnDay.resultBadge) {
-                                        "W" -> com.fctracker.career.ui.theme.WinColor
-                                        "D" -> com.fctracker.career.ui.theme.DrawColor
-                                        else -> com.fctracker.career.ui.theme.LossColor
-                                    }
-                                } else { Color.Transparent }
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .aspectRatio(1f)
-                                        .padding(2.dp)
-                                        .clip(CircleShape)
-                                        .background(dayColor)
-                                        .clickable(enabled = matchOnDay != null) {
-                                            if (matchOnDay != null) onDateClick(matchOnDay)
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = day.toString(), 
-                                        color = if (dayMatches.isNotEmpty()) MaterialTheme.colorScheme.onPrimary else Color.White,
-                                        fontSize = 12.sp
-                                    )
-                                }
-                            } else {
-                                Spacer(modifier = Modifier.weight(1f).aspectRatio(1f).padding(2.dp))
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 @Composable
 fun MatchResultCard(match: MatchResult, state: AppState?, onEdit: () -> Unit, onDelete: () -> Unit) {
     var showEstimatedInfo by remember { mutableStateOf(false) }
@@ -589,7 +269,7 @@ fun getCompetitionsForCountry(country: String): List<String> {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: MatchResult?, onDismiss: () -> Unit, onSave: (MatchResult) -> Unit) {
     var matchDate by remember { mutableStateOf(initialMatch?.matchDate ?: "") }
@@ -997,49 +677,39 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                                     val calculatedAssists = performances.values.flatMap { it.goalAssisters }.count { it == perf.playerId }
                                     val totalAssists = perf.assists + calculatedAssists
                                     val cameOn = perf.subInMinute != null
+                                    val rowPlayer = state.players.firstOrNull { it.id == perf.playerId }
+                                    val fc = com.fctracker.career.ui.theme.FcTheme.colors
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(start = if (cameOn) 18.dp else 0.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                                            .padding(8.dp)
+                                            .clip(RoundedCornerShape(16.dp))
+                                            .background(fc.surface)
+                                            .border(1.dp, fc.border, RoundedCornerShape(16.dp))
+                                            .padding(horizontal = 12.dp, vertical = 10.dp)
                                     ) {
                                         Column {
-                                            Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
-                                                Text(
-                                                    positionOf(perf)?.uppercase() ?: "",
-                                                    fontSize = 10.sp,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.width(30.dp)
-                                                )
-                                                Text(shownName, color = Color.White, modifier = Modifier.weight(1f))
-                                                // The symbols: man of the match, goals, assists (boot), saves, cards, substitutions
-                                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                                    if (isMotm) Icon(Icons.Default.Star, "Man of the match", tint = Color(0xFFFFD700), modifier = Modifier.size(16.dp))
-                                                    repeat(perf.goals) { Icon(Icons.Default.SportsSoccer, "Goal", tint = Color.White, modifier = Modifier.size(16.dp)) }
-                                                    repeat(totalAssists) { Icon(SoccerBootIcon, "Assist", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(17.dp)) }
-                                                    // The glove marks a clean sheet only, so it is never shown when the other side scored
-                                                    val isKeeper = positionOf(perf)?.equals("GK", ignoreCase = true) == true
-                                                    if (isKeeper && (goalsAgainst.toIntOrNull() ?: 0) == 0) Text("\uD83E\uDDE4", fontSize = 13.sp)
-                                                    if (isKeeper && perf.saves > 0) Text("${perf.saves} saves", fontSize = 11.sp, color = Color(0xFF00E676))
-                                                    if (perf.yellowCard) Box(modifier = Modifier.size(10.dp, 14.dp).background(Color.Yellow))
-                                                    if (perf.redCard) Box(modifier = Modifier.size(10.dp, 14.dp).background(Color.Red))
-                                                    if (perf.subInMinute != null) {
-                                                        Icon(Icons.Default.ArrowDropUp, "Subbed on", tint = Color(0xFF4CAF50), modifier = Modifier.size(20.dp))
-                                                        Text("${perf.subInMinute}'", fontSize = 11.sp, color = Color(0xFF4CAF50))
-                                                    }
-                                                    if (perf.subOutMinute != null) {
-                                                        Icon(Icons.Default.ArrowDropDown, "Subbed off", tint = Color(0xFFF44336), modifier = Modifier.size(20.dp))
-                                                        Text("${perf.subOutMinute}'", fontSize = 11.sp, color = Color(0xFFF44336))
+                                            Row(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                Text(positionOf(perf)?.uppercase() ?: "", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = fc.muted, modifier = Modifier.width(30.dp))
+                                                com.fctracker.career.ui.components.Headshot(rowPlayer?.headshotUrl, shownName, 34.dp)
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(shownName, color = fc.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                                    // The symbols: man of the match, goals, assists (boot), saves, clean sheet, cards, substitutions
+                                                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                        val isKeeper = positionOf(perf)?.equals("GK", ignoreCase = true) == true
+                                                        if (isMotm) LineupSymbol("MOTM", fc.warn) { Icon(Icons.Default.Star, null, tint = fc.warn, modifier = Modifier.size(14.dp)) }
+                                                        if (perf.goals > 0) LineupSymbol("${perf.goals}", fc.muted) { Icon(Icons.Default.SportsSoccer, "Goal", tint = fc.muted, modifier = Modifier.size(14.dp)) }
+                                                        if (totalAssists > 0) LineupSymbol(if (totalAssists == 1) "1 assist" else "$totalAssists assists", fc.muted) { Icon(SoccerBootIcon, "Assist", tint = fc.muted, modifier = Modifier.size(14.dp)) }
+                                                        if (isKeeper && perf.saves > 0) LineupSymbol("${perf.saves} saves", fc.muted) { Icon(Icons.Default.Shield, null, tint = fc.muted, modifier = Modifier.size(14.dp)) }
+                                                        if (isKeeper && (goalsAgainst.toIntOrNull() ?: 0) == 0) LineupSymbol("Clean sheet", fc.good) { Icon(Icons.Default.Check, null, tint = fc.good, modifier = Modifier.size(14.dp)) }
+                                                        if (perf.yellowCard) LineupSymbol("Yellow card", fc.warn) { com.fctracker.career.ui.components.BookingCard(false, 14.dp) }
+                                                        if (perf.redCard) LineupSymbol("Red card", fc.bad) { com.fctracker.career.ui.components.BookingCard(true, 14.dp) }
+                                                        perf.subInMinute?.let { m -> LineupSymbol("On $m'", fc.good) { Icon(Icons.Default.SwapVert, null, tint = fc.good, modifier = Modifier.size(14.dp)) } }
+                                                        perf.subOutMinute?.let { m -> LineupSymbol("Off $m'", fc.muted) { Icon(Icons.Default.SwapVert, null, tint = fc.muted, modifier = Modifier.size(14.dp)) } }
                                                     }
                                                 }
-                                                Spacer(Modifier.width(10.dp))
-                                                Text(
-                                                    if (perf.rating > 0) String.format(Locale.US, "%.1f", perf.rating) else "–",
-                                                    color = MaterialTheme.colorScheme.primary,
-                                                    fontWeight = FontWeight.Bold
-                                                )
+                                                if (perf.rating > 0) com.fctracker.career.ui.components.RatingChip(perf.rating) else Text("–", color = fc.muted)
+                                                Icon(if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown, null, tint = fc.muted, modifier = Modifier.size(18.dp))
                                             }
                                             if (expanded) {
                                                 PlayerPerformanceEditor(
@@ -1224,16 +894,8 @@ fun PlayerPerformanceEditor(
                 modifier = Modifier.fillMaxWidth()
             )
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Rating: ${String.format("%.1f", perf.rating)}", color = Color.White, modifier = Modifier.width(100.dp))
-            Slider(
-                value = perf.rating.toFloat(),
-                onValueChange = { onUpdate(perf.copy(rating = (it * 10).toInt() / 10.0)) },
-                valueRange = 1f..10f,
-                modifier = Modifier.weight(1f)
-            )
-        }
-        
+        com.fctracker.career.ui.components.RatingEditor(perf.rating, { onUpdate(perf.copy(rating = it)) })
+
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = perf.goals.toString(), 
@@ -1864,169 +1526,12 @@ internal fun EstimatedChip(onClick: () -> Unit) {
     }
 }
 
-/** One result of the form guide: a coloured disc with W, D or L. */
-@Composable
-private fun FormDot(result: String) {
-    val color = when (result) {
-        "W" -> WinColor
-        "D" -> DrawColor
-        else -> LossColor
-    }
-    Box(
-        modifier = Modifier.size(24.dp).clip(CircleShape).background(color),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(result, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1A1C18))
-    }
-}
 
-/** Played, W/D/L, goals and the last five results (the newest on the right) of the matches shown below. */
+/** One symbol under a lineup name: an icon and a short word ("2", "1 assist", "Off 77'"). */
 @Composable
-private fun MatchSummaryCard(record: MatchInsights.Record, form: List<String>) {
-    DarkCard(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    "${record.played} played   ${record.won}W ${record.drawn}D ${record.lost}L",
-                    fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground
-                )
-                val gd = record.goalDifference
-                Text(
-                    "Goals ${record.goalsFor}-${record.goalsAgainst} (${if (gd > 0) "+" else ""}$gd)   ${record.points} pts",
-                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (form.isNotEmpty()) {
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("Form", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(4.dp))
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        modifier = Modifier.semantics(mergeDescendants = true) {
-                            contentDescription = "Last ${form.size} results, oldest first: ${form.joinToString(", ")}"
-                        }
-                    ) {
-                        form.forEach { FormDot(it) }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ResultChips(selected: ResultFilter, estimatedCount: Int, onSelect: (ResultFilter) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        ResultFilter.values().forEach { filter ->
-            // The Estimated chip only appears when there is something to find (or while it is the active filter).
-            if (filter != ResultFilter.ESTIMATED || estimatedCount > 0 || selected == filter) {
-                FilterChip(
-                    selected = selected == filter,
-                    onClick = { onSelect(filter) },
-                    label = { Text(if (filter == ResultFilter.ESTIMATED) "Estimated ($estimatedCount)" else filter.label, fontSize = 12.sp) }
-                )
-            }
-        }
-    }
-}
-
-/** The seasons of the career: the one on screen is highlighted, a tap switches (the same switch as on the Dashboard). */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SeasonChips(state: AppState, onSelect: (Int?) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        state.historicalSeasons.map { it.year }.sortedDescending().forEach { year ->
-            FilterChip(
-                selected = state.viewingSeasonYear == year,
-                onClick = { onSelect(year) },
-                label = { Text(MatchInsights.seasonLabel(year), fontSize = 12.sp) }
-            )
-        }
-        FilterChip(
-            selected = state.viewingSeasonYear == null,
-            onClick = { onSelect(null) },
-            label = { Text("${MatchInsights.seasonLabel(state.startYear)} (current)", fontSize = 12.sp) }
-        )
-    }
-}
-
-/**
- * A match card you can swipe: to the right opens it for editing, to the left asks to delete it (the person confirms
- * in a dialog). The card always springs back. The tap on the card and the bin icon do the same, so nothing depends
- * on the gesture.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SwipeableMatchCard(
-    match: MatchResult,
-    state: AppState,
-    swipeEnabled: Boolean,
-    onEdit: () -> Unit,
-    onAskDelete: () -> Unit
-) {
-    if (!swipeEnabled) {
-        MatchResultCard(match = match, state = state, onEdit = onEdit, onDelete = onAskDelete)
-        return
-    }
-    val currentEdit by rememberUpdatedState(onEdit)
-    val currentDelete by rememberUpdatedState(onAskDelete)
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            when (value) {
-                SwipeToDismissBoxValue.StartToEnd -> currentEdit()
-                SwipeToDismissBoxValue.EndToStart -> currentDelete()
-                SwipeToDismissBoxValue.Settled -> Unit
-            }
-            false
-        }
-    )
-    SwipeToDismissBox(
-        state = dismissState,
-        backgroundContent = {
-            val direction = dismissState.dismissDirection
-            val deleting = direction == SwipeToDismissBoxValue.EndToStart
-            val background = when (direction) {
-                SwipeToDismissBoxValue.StartToEnd -> MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
-                SwipeToDismissBoxValue.EndToStart -> MaterialTheme.colorScheme.error.copy(alpha = 0.25f)
-                SwipeToDismissBoxValue.Settled -> Color.Transparent
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(background)
-                    .padding(horizontal = 20.dp),
-                contentAlignment = if (deleting) Alignment.CenterEnd else Alignment.CenterStart
-            ) {
-                if (direction != SwipeToDismissBoxValue.Settled) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            if (deleting) Icons.Default.Delete else Icons.Default.Edit,
-                            contentDescription = null,
-                            tint = if (deleting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            if (deleting) "Delete" else "Edit",
-                            fontWeight = FontWeight.Bold,
-                            color = if (deleting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            }
-        }
-    ) {
-        MatchResultCard(match = match, state = state, onEdit = onEdit, onDelete = onAskDelete)
+internal fun LineupSymbol(text: String, color: Color, icon: @Composable () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        icon()
+        Text(text, fontSize = 11.sp, color = color)
     }
 }

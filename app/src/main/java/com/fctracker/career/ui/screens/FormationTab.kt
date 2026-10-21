@@ -167,7 +167,9 @@ fun FormationTab(
     onSwapPlayers: (String, String) -> Unit = { _, _ -> },
     onPlayerClick: ((Player) -> Unit)? = null,
     activeFormation: String = "4-3-3",
-    onActiveFormationChange: (String) -> Unit = {}
+    onActiveFormationChange: (String) -> Unit = {},
+    header: @Composable () -> Unit = {},
+    readOnly: Boolean = false
 ) {
     val eligiblePlayers = remember(players) {
         players.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }
@@ -204,6 +206,7 @@ fun FormationTab(
 
     Box(modifier = modifier.fillMaxSize().padding(16.dp).onGloballyPositioned { rootPos = it.positionInRoot() }) {
         Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+            header()
             Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     @OptIn(ExperimentalMaterial3Api::class)

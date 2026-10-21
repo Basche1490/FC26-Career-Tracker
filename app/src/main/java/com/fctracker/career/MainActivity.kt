@@ -23,7 +23,20 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.compose.currentBackStackEntryAsState
-import com.fctracker.career.ui.screens.DashboardScreen
+import com.fctracker.career.ui.screens.HomeScreen
+import com.fctracker.career.ui.screens.PlayerProfileScreen
+import com.fctracker.career.ui.screens.WorldScreen
+import com.fctracker.career.ui.screens.RecapScreen
+import com.fctracker.career.ui.screens.MilestonesScreen
+import com.fctracker.career.ui.screens.WidgetsScreen
+import com.fctracker.career.ui.screens.ThemingScreen
+import com.fctracker.career.ui.screens.ClubHistoryEditScreen
+import com.fctracker.career.ui.components.GlassBottomBar
+import com.fctracker.career.ui.components.LocalOpenDrawer
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.runtime.CompositionLocalProvider
 import com.fctracker.career.ui.screens.OnboardingScreen
 import com.fctracker.career.ui.screens.SquadScreen
 import com.fctracker.career.ui.screens.AcademyScreen
@@ -102,52 +115,23 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** Routes that show the floating bar at the bottom, and which of its four places each one lights up. */
+private val NO_BAR_ROUTES = setOf("setup", "recap", "club_history_edit", "widgets")
+
+private fun barPlace(route: String?): String? = when {
+    route == null -> null
+    route.startsWith("player") -> "squad"
+    route in setOf("dashboard", "matches", "squad", "transfers") -> route
+    route == "milestones" -> "dashboard"
+    else -> null
+}
+
 @Composable
 fun MainApp(viewModel: MainViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val pendingRoute by viewModel.pendingRoute.collectAsState()
 
-    FCTheme(primaryHex = state.primaryColorHex, secondaryHex = state.secondaryColorHex) {
-        val navController = rememberNavController()
-
-        val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-        val scope = rememberCoroutineScope()
-        
-        val focusManager = LocalFocusManager.current
-
-        LaunchedEffect(drawerState.isOpen) {
-            if (drawerState.isOpen) {
-                focusManager.clearFocus()
-            }
-        }
-        
-        // Handle navigation triggered by clicking a notification
-        LaunchedEffect(pendingRoute, state.isOnboarded) {
-            val route = pendingRoute
-            if (!route.isNullOrBlank() && state.isOnboarded) {
-                try {
-                    drawerState.close()
-                    if (route == "connection" || route == "setup") {
-                        // Opened from a status pill on some screen: stack it on top, so Back returns to that screen.
-                        navController.navigate(route) { launchSingleTop = true }
-                    } else {
-                        navController.navigate(route) {
-                            popUpTo(navController.graph.startDestinationId) {
-                                saveState = true
-                            }
-                            launchSingleTop = true
-                            restoreState = true
-                        }
-                    }
-                } catch (e: Exception) {
-                    try {
-                        navController.navigate(route)
-                    } catch (e2: Exception) {}
-                }
-                viewModel.clearPendingRoute()
-            }
-        }
-        
+    FCTheme(primaryHex = state.primaryColorHex, secondaryHex = state.secondaryColorHex, useClubColours = state.useClubColours) {
         // Request Notification Permission on Android 13+
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             val launcher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -158,80 +142,92 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
             }
         }
 
-    LaunchedEffect(state.isOnboarded) {
-        if (state.isOnboarded) {
+        if (!state.isOnboarded) {
+            OnboardingScreen(viewModel)
+            return@FCTheme
+        }
+
+        val navController = rememberNavController()
+        val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+        val scope = rememberCoroutineScope()
+        val focusManager = LocalFocusManager.current
+        val backStack by navController.currentBackStackEntryAsState()
+        val currentRoute = backStack?.destination?.route
+
+        LaunchedEffect(drawerState.isOpen) {
+            if (drawerState.isOpen) focusManager.clearFocus()
+        }
+
+        val openDrawer: () -> Unit = { scope.launch { drawerState.open() } }
+        // Top-level places replace each other (Back goes to Home); detail pages stack on top.
+        val goTop: (String) -> Unit = { route ->
             try {
-                navController.navigate("dashboard") {
-                    popUpTo(navController.graph.id) { inclusive = false }
+                navController.navigate(route) {
+                    popUpTo(navController.graph.startDestinationId) { saveState = true }
                     launchSingleTop = true
+                    restoreState = true
                 }
             } catch (e: Exception) {
-                // Ignore during initial NavHost graph attachment
             }
         }
-    }
+        val goDetail: (String) -> Unit = { route -> try { navController.navigate(route) { launchSingleTop = true } } catch (e: Exception) {} }
+        val back: () -> Unit = { if (!navController.popBackStack()) goTop("dashboard") }
+        val topLevel = setOf("dashboard", "squad", "academy", "transfers", "matches", "season_summary", "world", "career_summary", "assistant", "settings", "connection")
+        val nav: (String) -> Unit = { r -> if (r.substringBefore("/") in topLevel) goTop(r) else goDetail(r) }
 
-    if (!state.isOnboarded) {
-        OnboardingScreen(viewModel, 
-            onComplete = { manager, club, country, league, startYear, currencySymbol, primary, secondary, logo, isExistingTeam, aiAgent, aiApiUrl, aiApiKey ->
-                viewModel.completeOnboarding(manager, club, country, league, startYear, currencySymbol, primary, secondary, logo, isExistingTeam, aiAgent, aiApiUrl, aiApiKey)
-                try {
-                    navController.navigate("dashboard") {
-                        popUpTo(navController.graph.id) { inclusive = false }
-                        launchSingleTop = true
-                    }
-                } catch (e: Exception) {}
+        // Handle navigation triggered by clicking a notification, or by a status pill on some screen.
+        LaunchedEffect(pendingRoute) {
+            val route = pendingRoute
+            if (!route.isNullOrBlank()) {
+                drawerState.close()
+                if (route == "connection" || route == "setup") goDetail(route) else nav(route)
+                viewModel.clearPendingRoute()
             }
-        )
-    } else {
-        ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            val navBackStackEntry by navController.currentBackStackEntryAsState()
-            val currentRoute = navBackStackEntry?.destination?.route ?: "dashboard"
-            AppDrawer(
-                state = state,
-                currentRoute = currentRoute,
-                navigateTo = { route ->
-                    scope.launch {
-                        drawerState.close()
-                        navController.navigate(route) {
-                            popUpTo(navController.graph.startDestinationId)
-                            launchSingleTop = true
+        }
+
+        CompositionLocalProvider(LocalOpenDrawer provides openDrawer) {
+            ModalNavigationDrawer(
+                drawerState = drawerState,
+                scrimColor = com.fctracker.career.ui.theme.FcScrim,
+                drawerContent = {
+                    AppDrawer(
+                        viewModel = viewModel,
+                        state = state,
+                        currentRoute = currentRoute ?: "dashboard",
+                        navigateTo = { route -> scope.launch { drawerState.close(); nav(route) } }
+                    )
+                }
+            ) {
+                Column(Modifier.fillMaxSize().background(com.fctracker.career.ui.theme.FcBg)) {
+                    Box(Modifier.weight(1f)) {
+                        NavHost(navController = navController, startDestination = "dashboard") {
+                            composable("dashboard") { HomeScreen(viewModel, nav) }
+                            composable("squad") { SquadScreen(viewModel, openDrawer) { id -> goDetail("player/$id") } }
+                            composable("player/{id}") { entry -> PlayerProfileScreen(viewModel, entry.arguments?.getString("id").orEmpty(), back) }
+                            composable("academy") { AcademyScreen(viewModel, openDrawer) }
+                            composable("transfers") { TransfersScreen(viewModel, openDrawer) }
+                            composable("matches") { MatchesScreen(viewModel, openDrawer) }
+                            composable("season_summary") { SeasonSummaryScreen(viewModel, openDrawer, nav) }
+                            composable("world") { WorldScreen(viewModel, openDrawer) }
+                            composable("recap") { RecapScreen(viewModel, back) }
+                            composable("career_summary") { CareerSummaryScreen(viewModel, openDrawer) { id -> goDetail("player/$id") } }
+                            composable("assistant") { AssistantScreen(viewModel, openDrawer) }
+                            composable("milestones") { MilestonesScreen(viewModel, back) }
+                            composable("widgets") { WidgetsScreen(back) }
+                            composable("theming") { ThemingScreen(viewModel, back) }
+                            composable("club_history_edit") { ClubHistoryEditScreen(viewModel, back) }
+                            composable("connection") {
+                                ConnectionScreen(viewModel, onOpenSetup = { goDetail("setup") }) { openDrawer() }
+                            }
+                            composable("setup") { SetupGuideScreen(viewModel) { back() } }
+                            composable("settings") { SettingsScreen(viewModel, openDrawer, nav) }
                         }
                     }
-                }
-            )
-        }
-    ) {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            NavHost(navController = navController, startDestination = "dashboard") {
-                composable("dashboard") { DashboardScreen(viewModel, onNavigate = { route -> scope.launch { navController.navigate(route) } }) { scope.launch { drawerState.open() } } }
-                composable("squad") { SquadScreen(viewModel) { scope.launch { drawerState.open() } } }
-                composable("academy") { AcademyScreen(viewModel) { scope.launch { drawerState.open() } } }
-                composable("transfers") { TransfersScreen(viewModel) { scope.launch { drawerState.open() } } }
-                composable("matches") { MatchesScreen(viewModel) { scope.launch { drawerState.open() } } }
-                composable("season_summary") { SeasonSummaryScreen(viewModel) { scope.launch { drawerState.open() } } }
-                composable("career_summary") { CareerSummaryScreen(viewModel) { scope.launch { drawerState.open() } } }
-                composable("assistant") { AssistantScreen(viewModel) { scope.launch { drawerState.open() } } }
-                composable("connection") {
-                    ConnectionScreen(
-                        viewModel,
-                        onOpenSetup = { scope.launch { navController.navigate("setup") } }
-                    ) { scope.launch { drawerState.open() } }
-                }
-                composable("setup") {
-                    SetupGuideScreen(viewModel) {
-                        if (!navController.popBackStack()) {
-                            navController.navigate("dashboard") { launchSingleTop = true }
-                        }
+                    if (currentRoute != null && currentRoute !in NO_BAR_ROUTES) {
+                        GlassBottomBar(current = barPlace(currentRoute), onSelect = { goTop(it) })
                     }
                 }
-                composable("settings") { SettingsScreen(viewModel) { scope.launch { drawerState.open() } } }
             }
         }
     }
-    }
-}
-
 }
