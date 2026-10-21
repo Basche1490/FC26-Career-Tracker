@@ -1,4 +1,4 @@
--- FC26 Table Census v1.3.0 - read-only inventory of the game data FC26 Career Tracker could use.
+-- FC26 Table Census v1.4.0 - read-only inventory of the game data FC26 Career Tracker could use.
 --
 -- Writes to Documents\FC26 Export:
 --   FC26_census_<date>_<time>.txt         the report: a season-end check (league champions, cup finals, awards, cup
@@ -7,8 +7,8 @@
 --   FC26_census_progress.txt              what the script is doing right now, written before every step
 --   FC26_census_skip.txt                  steps that crashed the game in an earlier run (they are skipped)
 --
--- It asks Live Editor for the game's own list of tables (GetDBTablesNames) and goes through that list. Only if Live
--- Editor cannot give the list does it fall back to asking for names the game is likely to use.
+-- It asks Live Editor for the game's own list of tables (GetDBTablesNames) and the columns of each (GetDBTableFields),
+-- and opens only the tables the tracker could use.
 --
 -- It only reads. Nothing in the game or the save is changed. If the game ever closes while it runs, start the game,
 -- load the career and run the census again: it reads FC26_census_progress.txt, skips the step that stopped the game
@@ -17,6 +17,10 @@
 -- History: 1.0.0 and 1.1.0 closed the game. The progress file of 1.1.0 shows where: asking Live Editor for a table
 -- called "transfers", a name that came from the guessed list. 1.3.0 uses the game's own list, never asks for
 -- "transfers", and keeps every lookup, count and column list as a separate step so a crash points at one call.
+-- 1.3.0 then closed the game while counting the rows of "scenarioevents", a table of no use here. So 1.4.0 no longer
+-- opens every table: it lists every table's columns from the game's description (GetDBTableFields, which never
+-- opened a table and never failed), and only opens the tables the tracker could use, all of which earlier runs
+-- already opened without trouble.
 
 -- Best run twice: once now, and once in June of an in-game season (after the cup finals, before 1 July), because
 -- the game replaces the fixture list, and with it every cup final, when the new season starts.
@@ -28,7 +32,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 Table Census must be executed while a career is loaded")
 
-local VERSION = "1.3.0"
+local VERSION = "1.4.0"
 
 local user_profile = os.getenv("USERPROFILE") or ""
 local ROOT = (user_profile ~= "" and user_profile or ".") .. "\\Documents\\FC26 Export"
@@ -44,7 +48,7 @@ local BIG_TABLE = 3000
 local SAMPLE_ROWS = 3
 
 local lines = {}
-local csv_lines = { "table,rows,columns" }
+local csv_lines = { "table,columns" }
 
 local function flush()
     local f = io.open(OUT_PATH, "wb")
@@ -303,7 +307,7 @@ local function shootout(v)
 end
 
 -- Names never to ask for: asking Live Editor for them closed the game (census 1.1.0, 21 Oct 2026).
-local NEVER = { transfers = true }
+local NEVER = { transfers = true, scenarioevents = true }
 
 -- Turns what a Live Editor list function returns into a list of strings, whatever shape it comes in.
 local function to_names(res)
@@ -360,71 +364,9 @@ local function comp_name_by_id(id)
 end
 
 -- ---------------------------------------------------------------------------------------------------------
--- Names to ask for
--- ---------------------------------------------------------------------------------------------------------
--- Tables the capture scripts already read every day: asked for first.
-local KNOWN = {
-    "players", "teams", "leagues", "leagueteamlinks", "teamplayerlinks", "playerloans", "fixtures", "career_users",
-    "career_calendar", "career_playercontract", "career_youthplayers", "career_playergrowthuserseason",
-    "career_playerlastmatchhistory", "career_playermatchratinghistory", "career_playerawards",
-    "career_competitionprogress", "career_managerhistory", "career_playerinfo", "career_scouts",
-}
-
--- Words that game tables are, or might be, named after. Each is tried as it is and with "career_" in front.
-local WORDS = {
-    "users", "calendar", "playercontract", "presignedcontract", "youthplayers", "youthplayerattributes",
-    "regenplayerattributes", "playergrowthuserseason", "playerlastmatchhistory", "playermatchratinghistory",
-    "playerawards", "competitionprogress", "managerhistory", "managerinfo", "managerpref", "scouts", "scoutmission",
-    "scoutmissions", "youthscouts", "squadranking",
-    -- squad database
-    "playernames", "dcplayernames", "editedplayernames", "teamkits", "teamstadiumlinks", "stadiums", "stadiumassignments",
-    "formations", "teamsheets", "default_teamsheets", "defaultteamsheets", "defaultteamdata", "manager", "managers",
-    "referee", "referees", "leaguerefereelinks", "nations", "nationalteams", "rowteamnationlinks", "teamnationlinks",
-    "teamballs", "playerboots", "boots", "balls", "kits", "rivals", "teamrivals", "rivalries", "derbies", "previousteam",
-    "previousteams", "playerpositionzones", "playerformdiff", "teamformdiff", "competition", "competitions", "compobj",
-    "compobjs", "competitionteamlinks", "compteamlinks", "competitiontrophies", "trophies", "trophy",
-    "audionation", "smallsidedteams", "customformations", "mentalities", "defaultmentalities", "teamtactics",
-    "playstyles", "playerplaystyles", "traits", "playertraits", "roles", "playerroles",
-    -- results, tables and history: what an "Around the World" page needs
-    "standings", "leaguestandings", "competitionstandings", "leaguetable", "leaguetables",
-    "matches", "results", "matchresults", "matchhistory", "matchstats", "matchreports", "schedule", "schedules",
-    "history", "leaguehistory", "competitionhistory", "cuphistory", "seasonhistory", "teamhistory", "clubhistory",
-    "pastwinners", "winners", "competitionwinners", "leaguewinners", "cupwinners", "champions", "titles",
-    "trophycabinet", "teamtrophies", "clubtrophies", "playertrophies", "trophyhistory", "honours", "honors",
-    "cupprogress", "cupdraws", "knockout", "brackets", "groups", "groupstandings",
-    -- awards and statistics
-    "awards", "teamawards", "monthlyawards", "seasonawards", "playerofthemonth", "managerofthemonth", "teamoftheweek",
-    "teamoftheseason", "totw", "tots", "goldenboot", "ballondor", "playerstats", "playerseasonstats", "seasonstats",
-    "stats", "statistics", "teamstats", "teamseasonstats", "leaguestats", "competitionstats", "topscorers",
-    "goalscorers", "playercareerstats", "careerstats", "playerhistory", "playermatchstats",
-    -- squad state
-    "injuries", "injury", "playerinjuries", "playerinjury", "playerinjuryhistory", "injuryhistory", "medical",
-    "playerform", "playermorale", "morale", "playerstatus", "playerinfo", "playersharpness", "sharpness", "fitness",
-    "playerfitness", "squadrole", "squadroles", "playerdevelopment", "development", "playergrowth", "training",
-    "trainingplans", "playertraining", "suspensions", "playersuspensions", "bans",
-    -- money and deals
-    "finances", "finance", "budget", "budgets", "transferbudget", "wagebudget", "teamfinances", "clubfinances",
-    "financialsummary", "incomes", "expenses", "revenue", "sponsors", "contracts", "loans", "loanhistory",
-    "transfers", "transferhistory", "transferoffers", "transferdeals", "offers", "incomingoffers", "outgoingoffers",
-    "activetransfers", "loanoffers", "shortlist", "playeragents", "agents", "releaseclauses", "negotiations",
-    -- board, story and the rest of career mode
-    "boardobjectives", "objectives", "seasonobjectives", "clubobjectives", "objectiveprogress", "jobsecurity",
-    "news", "newsfeed", "newsitems", "emails", "inbox", "messages", "boardmessages", "pressconference",
-    "unexpectedevents", "events", "staff", "coaches", "playerperformancebonuses", "bonuses",
-    "playasplayer", "createaclub", "createdclub", "customteams",
-}
-
-local EXTRA_NAMES = {
-    "career_fixtures", "career_standings", "career_leaguestandings", "career_trophywinners", "career_competitionwinners",
-    "career_seasonsummary", "career_seasonreview", "career_endofseason", "career_awardwinners",
-    "career_playerseasonstats", "career_playercareerstats",
-}
-
--- ---------------------------------------------------------------------------------------------------------
 -- Report
 -- ---------------------------------------------------------------------------------------------------------
 local managed_tid = 0
-local existing = {}          -- name -> { rows = n, columns = {...} }
 
 section("Environment", function()
     w("FC26 Table Census " .. VERSION .. " - " .. os.date("%Y-%m-%d %H:%M:%S"))
@@ -748,95 +690,135 @@ end)
 -- ---------------------------------------------------------------------------------------------------------
 -- Every table: the known ones first, then every other name. Each table is its own step.
 -- ---------------------------------------------------------------------------------------------------------
-section("Every table the game answers to", function()
-    local wanted, order = {}, {}
-    local function want(name)
-        name = tostring(name)
-        local key = name:lower()
-        if name ~= "" and not wanted[key] and not NEVER[key] then
-            wanted[key] = true
-            order[#order + 1] = name
-        end
+-- ---------------------------------------------------------------------------------------------------------
+-- Tables the tracker could use: opened and shown. Every one was opened without trouble by census 1.1.0 or 1.3.0.
+-- ---------------------------------------------------------------------------------------------------------
+local function squad_ids()
+    local ids = {}
+    local tpl = get_table("teamplayerlinks")
+    if not tpl or managed_tid == 0 then return ids end
+    local rec = tpl:GetFirstRecord()
+    while rec and rec > 0 do
+        local ok1, tid = pcall(function() return tpl:GetRecordFieldValue(rec, "teamid") end)
+        local ok2, pid = pcall(function() return tpl:GetRecordFieldValue(rec, "playerid") end)
+        if ok1 and ok2 and tonumber(tid) == managed_tid then ids[tonumber(pid) or 0] = true end
+        rec = tpl:GetNextValidRecord()
     end
-    if game_names then
-        for _, name in ipairs(game_names) do want(name) end
-        w("names asked: " .. #order .. " (the game's own list)")
-    else
-        for _, name in ipairs(KNOWN) do want(name) end
-        for _, word in ipairs(WORDS) do
-            want(word)
-            if not word:find("^career_") then want("career_" .. word) end
-        end
-        for _, name in ipairs(EXTRA_NAMES) do want(name) end
-        w("names asked: " .. #order .. " (guessed: " .. tostring(game_names_why) .. ")")
-    end
+    return ids
+end
 
-    local found, skipped = {}, {}
-    for i, name in ipairs(order) do
-        local ok, tbl = step("table " .. name, function() return get_table(name) end)
-        if not ok and skip["table " .. name] then
-            skipped[#skipped + 1] = name
-        elseif ok and tbl then
-            local okc, n = step("count " .. name, function() return count_records(tbl, 200000) end)
-            if not okc then
-                if skip["count " .. name] then skipped[#skipped + 1] = name .. " (count)" end
-                n = -1
+section("Injuries (career_playerlastgrowth: injurydate, injuryduration)", function()
+    local ok, squad = step("rows teamplayerlinks squad", squad_ids)
+    if not ok then squad = {} end
+    local ok2, list = step("rows career_playerlastgrowth", function()
+        local out = {}
+        local tbl = get_table("career_playerlastgrowth")
+        if not tbl then return out end
+        local rec = tbl:GetFirstRecord()
+        while rec and rec > 0 do
+            local row = {}
+            for _, f in ipairs({ "playerid", "injurydate", "injuryduration", "growthdate", "initialcurveoffset" }) do
+                local okf, v = pcall(function() return tbl:GetRecordFieldValue(rec, f) end)
+                if okf then row[f] = v end
             end
-            local info = { rows = n, columns = {} }
-            local okf, cols = step("fields " .. name, function() return fields_of(name) end)
-            if okf and cols then
-                info.columns = cols
-            elseif n > 0 and n <= BIG_TABLE then
-                local okr, rows = step("columns " .. name, function() return rows_of(name) end)
-                if okr and rows and rows[1] then info.columns = sorted_keys(plain_row(rows[1])) end
-            end
-            existing[name] = info
-            found[#found + 1] = name
-            csv_lines[#csv_lines + 1] = csv_cell(name) .. "," .. info.rows .. "," .. csv_cell(table.concat(info.columns, " "))
+            out[#out + 1] = row
+            rec = tbl:GetNextValidRecord()
         end
-        if i % 40 == 0 then flush() end
+        return out
+    end)
+    if not ok2 or type(list) ~= "table" then w("not read: " .. tostring(list)) return end
+    local values, injured, mine = {}, 0, {}
+    for _, r in ipairs(list) do
+        local d, dur = tonumber(r.injurydate) or 0, tonumber(r.injuryduration) or 0
+        if d > 0 or dur > 0 then injured = injured + 1 end
+        local key = tostring(r.injuryduration)
+        values[key] = (values[key] or 0) + 1
+        if squad[tonumber(r.playerid) or 0] then mine[#mine + 1] = r end
     end
-    table.sort(found)
-    w("tables that exist: " .. #found)
-    for _, name in ipairs(found) do
-        local e = existing[name]
-        local cols = #e.columns > 0 and table.concat(e.columns, ", ")
-            or (e.rows > BIG_TABLE and "(not loaded: more than " .. BIG_TABLE .. " rows)") or (e.rows == 0 and "(empty)" or "(columns not readable)")
-        w(string.format("  %-40s rows=%-7d %s", name, e.rows, cols))
+    w("rows: " .. #list .. ", with an injury date or duration: " .. injured)
+    local keys = {}
+    for k in pairs(values) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b) return (tonumber(a) or 0) < (tonumber(b) or 0) end)
+    local parts = {}
+    for i = 1, math.min(#keys, 30) do parts[#parts + 1] = keys[i] .. " (x" .. values[keys[i]] .. ")" end
+    w("injuryduration values: " .. table.concat(parts, ", "))
+    w("your squad (" .. #mine .. " players):")
+    table.sort(mine, function(a, b) return (tonumber(a.injurydate) or 0) > (tonumber(b.injurydate) or 0) end)
+    for _, r in ipairs(mine) do
+        w(string.format("  %-26s injurydate=%s (%s) injuryduration=%s growthdate=%s (%s)", pname(r.playerid), show(r.injurydate),
+            decode_date(r.injurydate) or "-", show(r.injuryduration), show(r.growthdate), decode_date(r.growthdate) or "-"))
     end
-    if #skipped > 0 then w("not asked, because asking stopped the game before: " .. table.concat(skipped, ", ")) end
 end)
 
-section("A few rows of each table that is not huge (career tables: rows mentioning your club first)", function()
-    local names = {}
-    for name, e in pairs(existing) do
-        if e.rows > 0 and e.rows <= BIG_TABLE then names[#names + 1] = name end
-    end
-    table.sort(names)
-    for _, name in ipairs(names) do
-        local ok, rows = step("rows " .. name, function() return rows_of(name) end)
-        if ok and rows and #rows > 0 then
-            w("")
-            w("-- " .. name .. " (" .. #rows .. " rows)")
-            local picked, used = {}, {}
-            if name:find("^career_") and managed_tid > 0 then
-                for i, r in ipairs(rows) do
-                    if #picked >= SAMPLE_ROWS then break end
-                    local row = plain_row(r)
-                    if mentions_team(row, managed_tid) then picked[#picked + 1] = { i = i, row = row } used[i] = true end
-                end
-            end
-            for i, r in ipairs(rows) do
-                if #picked >= SAMPLE_ROWS * 2 or i > SAMPLE_ROWS then break end
-                if not used[i] then picked[#picked + 1] = { i = i, row = plain_row(r) } end
-            end
-            for _, item in ipairs(picked) do
-                w(string.format("  #%d  %s", item.i, describe_row(item.row, 60)))
-                local note = annotate(item.row)
+section("Events, awards, agreed deals, transfer list, coefficients", function()
+    local function dump(name, limit, filter)
+        local rows = plain_rows(name)
+        if not rows then w(name .. ": not read") return end
+        local shown = 0
+        w(name .. ": " .. #rows .. " rows" .. (#rows == 0 and " (empty: nothing to show yet)" or ""))
+        for i, r in ipairs(rows) do
+            if shown >= limit then w("  ...") break end
+            if not filter or filter(r) then
+                shown = shown + 1
+                local extra = ""
+                if r.compobjid then extra = " [" .. cname(r.compobjid) .. "]" end
+                w(string.format("  #%d  %s%s", i, describe_row(r, 40), extra))
+                local note = annotate(r)
                 if note ~= "" then w("        " .. note) end
             end
         end
     end
+    dump("persistent_events", 40)
+    dump("career_managerawards", 20)
+    dump("career_teamofweek", 20)
+    dump("career_youthplayerhistory", 20)
+    dump("career_transferblock", 30)
+    dump("career_presignedcontract", 20)
+    dump("playersuspensions", 20)
+    dump("prevcompetitionstats", 40)
+    local squad = squad_ids()
+    dump("player_grudgelove", 30, function(r) return squad[tonumber(r.playerid) or 0] or tonumber(r.emotional_teamid) == managed_tid end)
+    local coeff = plain_rows("clubcoefficients")
+    if coeff then
+        table.sort(coeff, function(a, b) return (tonumber(a.points) or 0) > (tonumber(b.points) or 0) end)
+        w("clubcoefficients: " .. #coeff .. " rows (top 10, and yours)")
+        for i, r in ipairs(coeff) do
+            if i <= 10 or tonumber(r.teamid) == managed_tid then
+                w(string.format("  %2d. %-26s points=%s years=%s/%s/%s/%s/%s", i, tname(r.teamid), show(r.points), show(r.year1), show(r.year2), show(r.year3), show(r.year4), show(r.year5)))
+            end
+        end
+    end
+end)
+
+-- ---------------------------------------------------------------------------------------------------------
+-- Every table's columns, from the game's description of it. No table is opened here.
+-- ---------------------------------------------------------------------------------------------------------
+section("Every table's columns (from the game's description; no table is opened)", function()
+    local names = game_names
+    if not names then
+        w("the game's list of tables was not available (" .. tostring(game_names_why) .. "), so there is nothing to describe")
+        return
+    end
+    if type(GetDBTableFields) ~= "function" then w("Live Editor has no GetDBTableFields") return end
+    local described, skipped = 0, {}
+    for i, name in ipairs(names) do
+        if NEVER[name:lower()] then
+            skipped[#skipped + 1] = name
+        else
+            local ok, cols = step("fields " .. name, function() return fields_of(name) end)
+            if not ok and skip["fields " .. name] then
+                skipped[#skipped + 1] = name
+            else
+                cols = (ok and cols) or {}
+                described = described + 1
+                w(string.format("  %-36s %s", name, #cols > 0 and table.concat(cols, ", ") or "(no columns given)"))
+                csv_lines[#csv_lines + 1] = csv_cell(name) .. "," .. csv_cell(table.concat(cols, " "))
+            end
+        end
+        if i % 40 == 0 then flush() end
+    end
+    w("tables described: " .. described)
+    if #skipped > 0 then w("left alone (they closed the game in an earlier run): " .. table.concat(skipped, ", ")) end
 end)
 
 local done = "FC26 Table Census finished. Report written to: " .. OUT_PATH .. " and " .. CSV_PATH

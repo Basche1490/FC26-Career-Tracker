@@ -557,6 +557,12 @@ local function census_data(empty_awards)
                          { competitionid = 41, competitionchampionid = -1, isrealcompetition = 1, iswomencompetition = 0 } }
     data.career_managerpref = { { managerprefid = 1, transferbudget = 8133637, wagebudget = 412000 } }
     data.playersuspensions = { { playerid = 3, teamid = MANAGED, games = 2 } }
+    data.career_playerlastgrowth = { { playerid = 1, injurydate = 162830, injuryduration = 21, growthdate = 162800 },
+                                     { playerid = 3, injurydate = 0, injuryduration = 0, growthdate = 162800 },
+                                     { playerid = 2, injurydate = 162700, injuryduration = 7, growthdate = 162800 } }
+    data.persistent_events = { { id = 1, eventid = 4, compobjid = 469, team1id = 900, team2id = 902, eventdate = 162500 } }
+    data.scenarioevents = { { a = 1 } }   -- counting its rows closed a real game
+    data.audiostadium = { { b = 1 } }     -- of no use to the tracker: described, never opened
     data.career_presignedcontract = {}   -- an empty table: GetDBTableRows must never be asked for one (1.1.0 closed a game there)
     return data
 end
@@ -674,10 +680,27 @@ for _, mode in ipairs({ { true, true, "with GetDBTableRows, the game's table lis
     print("   mode: " .. mode[3])
     local ok, err, report, csv, n_tables, progress, skipfile, empty_asked, asked = run_census(mode[1], mode[2], nil, false, mode[1])
     check(ok, "census runs to the end", err)
-    check(not asked["transfers"], "the table called 'transfers' is never asked for (it closed a real game)")
+    check(#empty_asked == 0, "GetDBTableRows is never asked for an empty table", table.concat(empty_asked, ", "))
+    check(report:find("SECTION FAILED", 1, true) == nil, "no section failed", report:match("SECTION FAILED[^\r\n]*"))
+    check(report:find("Managed team: 115486 Torquay AFC", 1, true) ~= nil, "managed team is found")
+    check(not asked["transfers"] and not asked["scenarioevents"], "the tables that closed a real game are never opened")
+    check(not asked["audiostadium"], "a table of no use to the tracker is never opened")
+    check(progress:match("finished%s*$") ~= nil, "the progress file ends with 'finished'")
+    check(skipfile == "", "nothing is skipped after a normal run")
+    check(report:find("last season's winner: Juventus (champion flag=1, now in league 31)", 1, true) ~= nil, "last season's league winner is shown")
+    check(report:find("last season's winner: Monaco", 1, true) == nil, "a team promoted as champion of another league is not called this league's winner")
+    check(report:find("your league (league 14)", 1, true) ~= nil and report:find("now 1. Leicester City", 1, true) ~= nil,
+        "the managed team's own league is added with its leader")
+    check(report:find("Marc Palomino%s+injurydate=162830 %(2028%-08%-06%) injuryduration=21") ~= nil, "an injured player of your squad is shown with the date and length",
+        report:match("Marc Palomino[^\r\n]*"))
+    check(report:find("rows: 3, with an injury date or duration: 2", 1, true) ~= nil, "injured players across the game are counted")
+    check(report:find("your squad (2 players)", 1, true) ~= nil and report:find("Anwar Missaoui%s+injurydate") == nil, "only your squad is listed by name")
     if mode[1] then
         check(report:find("tables in the game's list: " .. (n_tables + 1), 1, true) ~= nil, "the game's own list of tables is used", report:match("tables in the game's list: %d+"))
-        check(not asked["career_injuries"] and not asked["standings"], "with the game's list, no guessed names are asked")
+        check(report:find("tables described: " .. (n_tables - 1), 1, true) ~= nil, "every table but the two that closed a game is described", report:match("tables described: %d+"))
+        check(report:find("left alone (they closed the game in an earlier run): scenarioevents, transfers", 1, true) ~= nil, "the two are named")
+        check(report:find("leagueteamlinks%s+[^\r\n]*currenttableposition") ~= nil, "columns come from the game's description")
+        check(csv:find("^table,columns") ~= nil and csv:find("career_users,", 1, true) ~= nil, "the CSV lists every table's columns")
         check(report:find("Serie A Cup%s+holder=900 Juventus") ~= nil, "competition holders are shown with the club's name", report:match("Serie A Cup[^\r\n]*"))
         check(report:find("Torquay AFC%s+league=14%s+titles=0") ~= nil and report:find("colours=#0b57d0 #ffffff", 1, true) ~= nil,
             "club honours and colours are shown for your club", report:match("Torquay AFC%s+league[^\r\n]*"))
@@ -685,40 +708,16 @@ for _, mode in ipairs({ { true, true, "with GetDBTableRows, the game's table lis
         check(report:find("Juventus%s+league=31%s+titles=36") ~= nil, "clubs of the top 5 leagues are listed")
         check(report:find("GetUserTransferBudget() = 8133637", 1, true) ~= nil and report:find("wagebudget=412000", 1, true) ~= nil, "budgets are shown")
         check(report:find("games=2", 1, true) ~= nil, "suspensions are shown")
-    else
-        check(report:find("guessed: Live Editor has no GetDBTablesNames", 1, true) ~= nil, "without the game's list it says so and guesses")
-    end
-    check(#empty_asked == 0, "GetDBTableRows is never asked for an empty table", table.concat(empty_asked, ", "))
-    check(report:find("SECTION FAILED", 1, true) == nil, "no section failed", report:match("SECTION FAILED[^\r\n]*"))
-    check(report:find("Managed team: 115486 Torquay AFC", 1, true) ~= nil, "managed team is found")
-    check(report:find("tables that exist: " .. n_tables, 1, true) ~= nil, "every table of the pretend game is found (" .. n_tables .. ")",
-        report:match("tables that exist: %d+"))
-    check(report:find("getFileList", 1, true) == nil and report:find("LE.db methods", 1, true) == nil,
-        "Live Editor's folders and objects are left alone (1.0.0 crashed a game there)")
-    check(progress:find("start table playerloans", 1, true) ~= nil and progress:find("done table playerloans", 1, true) ~= nil,
-        "every table is written to the progress file before and after it is asked for")
-    check(progress:match("finished%s*$") ~= nil, "the progress file ends with 'finished'")
-    check(skipfile == "", "nothing is skipped after a normal run")
-    if mode[1] then
-        check(report:find("currenttableposition", 1, true) ~= nil, "columns are listed")
-        check(report:find("-- career_users (1 rows)", 1, true) ~= nil, "sample rows are shown")
-        check(report:find("clubteamid->Torquay AFC", 1, true) ~= nil, "sample rows show team names")
-        check(csv:find("career_users,1,", 1, true) ~= nil and csv:find("^table,rows,columns") ~= nil, "the CSV lists the tables")
+        check(report:find("persistent_events: 1 rows", 1, true) ~= nil and report:find("team1id->Juventus", 1, true) ~= nil, "events are shown with team names")
         check(report:find("typeid=3", 1, true) ~= nil, "awards are dumped in the season-end check")
-    else
-        check(report:find("(columns not readable)", 1, true) ~= nil, "without GetDBTableRows the columns are reported as not readable")
-    end
-    check(report:find("last season's winner: Juventus (champion flag=1, now in league 31)", 1, true) ~= nil, "last season's league winner is shown")
-    check(report:find("last season's winner: Monaco", 1, true) == nil, "a team promoted as champion of another league is not called this league's winner")
-    check(report:find("your league (league 14)", 1, true) ~= nil and report:find("now 1. Leicester City", 1, true) ~= nil,
-        "the managed team's own league is added with its leader")
-    if mode[2] then
         check(report:find("UEFA Champions League [91]", 1, true) ~= nil and report:find("2 played of   2  last: 2029-05-26  Juventus v Monaco  1-1 (pens 4-3)", 1, true) ~= nil,
             "a final won on penalties is shown with the shoot-out", report:match("UEFA Champions League[^\r\n]*"))
         check(report:find("Torquay AFC v Leicester City  2-0", 1, true) ~= nil and report:find("pens 255", 1, true) == nil,
             "255 in the shoot-out fields means no shoot-out", report:match("Emirates FA Cup[^\r\n]*"))
         check(report:find("(not decided yet) v (not decided yet)  not played", 1, true) ~= nil, "a final still to be played is shown as such")
     else
+        check(report:find("not available: Live Editor has no GetDBTablesNames", 1, true) ~= nil and report:find("nothing to describe", 1, true) ~= nil,
+            "without the game's list it says so and opens nothing else")
         check(report:find("fixture list not readable", 1, true) ~= nil, "no game memory here: the fixture check says so instead of failing")
     end
     check(report:find("=== end of report ===", 1, true) ~= nil, "the report is complete")
@@ -726,19 +725,19 @@ end
 
 print("   mode: the game closed during the last run")
 do
-    local before = "census 1.1.0 2026-10-21 12:40:00\r\nstart section Every table the game answers to\r\nstart table teams\r\ndone table teams\r\nstart table playerloans\r\n"
-    local ok, err, report, _, n_tables, progress, skipfile, empty_asked = run_census(true, false, before, true)
+    local before = "census 1.3.0 2026-10-21 13:20:23\r\nstart section Every table's columns\r\nstart fields teams\r\ndone fields teams\r\nstart fields playerloans\r\n"
+    local ok, err, report, _, n_tables, progress, skipfile, empty_asked = run_census(true, false, before, true, true)
     check(ok, "census runs to the end", err)
     check(#empty_asked == 0 and report:find("career_playerawards: 0 rows (empty: nothing to show yet)", 1, true) ~= nil,
         "an empty award table is reported as empty without asking GetDBTableRows", table.concat(empty_asked, ", "))
-    check(report:find("The last run stopped (the game closed) during: table playerloans", 1, true) ~= nil, "the report says where the last run stopped")
-    check(skipfile:find("table playerloans", 1, true) ~= nil and skipfile:find("table teams", 1, true) == nil, "only that step is put on the skip list")
-    check(progress:find("start table playerloans", 1, true) == nil and progress:find("start table teams", 1, true) ~= nil,
+    check(report:find("The last run stopped (the game closed) during: fields playerloans", 1, true) ~= nil, "the report says where the last run stopped")
+    check(skipfile:find("fields playerloans", 1, true) ~= nil and skipfile:find("fields teams", 1, true) == nil, "only that step is put on the skip list")
+    check(progress:find("start fields playerloans", 1, true) == nil and progress:find("start fields teams", 1, true) ~= nil,
         "the step is skipped this time, the others run")
-    check(report:find("tables that exist: " .. (n_tables - 1), 1, true) ~= nil, "the other tables are still found")
-    check(report:find("not asked, because asking stopped the game before: playerloans", 1, true) ~= nil, "the skipped table is named")
-    local ok2, _, report2 = run_census(true, false, nil)
-    check(ok2 and report2:find("Steps skipped because they stopped the game before: table playerloans", 1, true) ~= nil,
+    check(report:find("tables described: " .. (n_tables - 2), 1, true) ~= nil, "the other tables are still described", report:match("tables described: %d+"))
+    check(report:find("left alone (they closed the game in an earlier run): playerloans, scenarioevents, transfers", 1, true) ~= nil, "the skipped table is named")
+    local ok2, _, report2 = run_census(true, false, nil, false, true)
+    check(ok2 and report2:find("Steps skipped because they stopped the game before: fields playerloans", 1, true) ~= nil,
         "the skip list is kept for later runs")
 end
 os.remove(census_progress)
