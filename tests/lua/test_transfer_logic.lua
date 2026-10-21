@@ -547,72 +547,101 @@ local function census_data()
     }
     data.career_playerawards = { { playerid = 1, teamid = MANAGED, season = 4, typeid = 3, count = 1 } }
     data.career_competitionprogress = { { teamid = MANAGED, compobjid = 469, season = 4, stageid = 508, hasteamwon = 0 } }
-    -- a table no list knows about, named only in one of Live Editor's own Lua files
-    data.career_secretwinners = { { compobjid = 91, teamid = 900, season = 3 } }
     return data
 end
 
-local function run_census(with_api_rows, with_file_api)
+-- The game's fixture list in memory, laid out the way FC26_Snapshot.lua reads it (FCE data manager + 0x60 fixtures,
+-- + 0x88 standings). 255 in a shoot-out field means "no shoot-out".
+local function fake_memory()
+    local mem = {}
+    local function put(addr, v) mem[addr] = v end
+    local MANAGER, FIX_LIST, FIX, ST_LIST, ST = 1000, 2000, 3000, 4000, 5000
+    put(MANAGER + 0x60, FIX_LIST) put(FIX_LIST + 0x28, FIX)
+    put(MANAGER + 0x88, ST_LIST) put(ST_LIST + 0x28, ST)
+    local standings = { { 91, 900 }, { 91, 902 }, { 469, MANAGED }, { 469, 800 } }
+    put(ST_LIST + 0x1C, #standings)
+    for j, s in ipairs(standings) do
+        local a = ST + 0x18 * (j - 1)
+        put(a + 0x02, s[1]) put(a + 0x04, s[2]) put(a + 0x16, true)
+    end
+    local fixtures = {
+        -- date, competition, home standing, away standing, score, shoot-out, played
+        { 20281001, 91, 0, 1, 2, 0, 255, 255, true },
+        { 20290526, 91, 0, 1, 1, 1, 4, 3, true },        -- Champions League final, won on penalties
+        { 20290512, 469, 2, 3, 2, 0, 255, 255, true },   -- FA Cup final, no shoot-out
+        { 20290318, 585, -1, -1, 0, 0, 255, 255, false } -- Carabao Cup final, teams not decided yet
+    }
+    put(FIX_LIST + 0x1C, #fixtures)
+    for i, f in ipairs(fixtures) do
+        local a = FIX + 0x18 * (i - 1)
+        put(a + 0x00, f[1]) put(a + 0x08, f[2]) put(a + 0x0A, f[3]) put(a + 0x0C, f[4])
+        put(a + 0x0F, f[5]) put(a + 0x11, f[6]) put(a + 0x10, f[7]) put(a + 0x12, f[8]) put(a + 0x13, f[9]) put(a + 0x14, true)
+    end
+    local M = {}
+    function M:ReadMultilevelPointer() return MANAGER end
+    function M:ReadPointer(a) return mem[a] or 0 end
+    function M:ReadInt(a) return mem[a] or 0 end
+    function M:ReadShort(a) return mem[a] or 0 end
+    function M:ReadChar(a) return mem[a] or 0 end
+    function M:ReadBool(a) return mem[a] == true end
+    return M
+end
+
+local census_progress = os.tmpname()
+local census_skip = os.tmpname()
+os.remove(census_skip)
+
+local function run_census(with_api_rows, with_memory, progress_before)
     local out_path = os.tmpname() .. ".txt"
     local data = census_data()
     local n_tables = 0
     for _ in pairs(data) do n_tables = n_tables + 1 end
     install_env(data, with_api_rows, out_path)
-    _G.FC26_CENSUS_OUT_PATH = out_path
-    local real_open = io.open
-    local le_file = os.tmpname()
-    do
-        local f = real_open(le_file, "wb")
-        f:write('local t = LE.db:GetTable("career_secretwinners")\nlocal u = GetDBTableRows("players")\n')
-        f:close()
+    _G.FC26_CENSUS_OUT_PATH, _G.FC26_CENSUS_PROGRESS_PATH, _G.FC26_CENSUS_SKIP_PATH = out_path, census_progress, census_skip
+    if progress_before then
+        local f = io.open(census_progress, "wb") f:write(progress_before) f:close()
     end
-    if with_file_api then
-        _G.getFileList = function(folder, pattern)
-            if folder == "lua" then return { "lua\\helpers.lua", "readme.txt" } end
-            return {}
-        end
-        _G.getDirectoryList = function(folder)
-            if folder == "lua" then return { "imports", "." } end
-            return {}
-        end
-        io.open = function(path, mode)
-            if path == "lua\\helpers.lua" then return real_open(le_file, mode) end
-            return real_open(path, mode)
-        end
+    local saved_memory = package.loaded["imports/core/memory"]
+    if with_memory then
+        package.loaded["imports/core/memory"] = fake_memory()
+        _G.GetPlugin = function() return 1 end
+        _G.ENUM_djb2IFCEInterface_CLSS = 7
+        _G.GetCompetitionNameByObjID = function(id) return ({ [91] = "UEFA Champions League", [469] = "Emirates FA Cup", [585] = "Carabao Cup" })[id] end
     end
     local quiet_print = _G.print
     _G.print = function() end
     local ok, err = pcall(dofile, scripts .. "tools/FC26_TableCensus.lua")
     _G.print = quiet_print
-    io.open = real_open
-    _G.getFileList, _G.getDirectoryList, _G.FC26_CENSUS_OUT_PATH = nil, nil, nil
-    local report, csv = "", ""
-    local f = real_open(out_path, "rb")
-    if f then report = f:read("a") f:close() os.remove(out_path) end
-    local csv_path = out_path:gsub("%.txt$", "") .. "_tables.csv"
-    local c = real_open(csv_path, "rb")
-    if c then csv = c:read("a") c:close() os.remove(csv_path) end
-    os.remove(le_file)
-    return ok, err, report, csv, n_tables
+    package.loaded["imports/core/memory"] = saved_memory
+    _G.GetPlugin, _G.ENUM_djb2IFCEInterface_CLSS, _G.GetCompetitionNameByObjID = nil, nil, nil
+    _G.FC26_CENSUS_OUT_PATH, _G.FC26_CENSUS_PROGRESS_PATH, _G.FC26_CENSUS_SKIP_PATH = nil, nil, nil
+    local function slurp(path)
+        local f = io.open(path, "rb")
+        if not f then return "" end
+        local text = f:read("a")
+        f:close()
+        return text
+    end
+    local report, csv = slurp(out_path), slurp(out_path:gsub("%.txt$", "") .. "_tables.csv")
+    os.remove(out_path)
+    os.remove((out_path:gsub("%.txt$", "") .. "_tables.csv"))
+    return ok, err, report, csv, n_tables, slurp(census_progress), slurp(census_skip)
 end
 
-for _, mode in ipairs({ { true, true, "with GetDBTableRows and Live Editor's file functions" }, { false, false, "record by record, no file functions" } }) do
+for _, mode in ipairs({ { true, true, "with GetDBTableRows and the fixture list in memory" }, { false, false, "record by record, no game memory" } }) do
     print("   mode: " .. mode[3])
-    local ok, err, report, csv, n_tables = run_census(mode[1], mode[2])
+    local ok, err, report, csv, n_tables, progress, skipfile = run_census(mode[1], mode[2], nil)
     check(ok, "census runs to the end", err)
     check(report:find("SECTION FAILED", 1, true) == nil, "no section failed", report:match("SECTION FAILED[^\r\n]*"))
     check(report:find("Managed team: 115486 Torquay AFC", 1, true) ~= nil, "managed team is found")
-    check(report:find("LE.db methods", 1, true) ~= nil, "Live Editor's own functions are listed")
-    local expected = mode[2] and n_tables or (n_tables - 1) -- without the file functions the hidden table cannot be known
-    check(report:find("tables that exist: " .. expected, 1, true) ~= nil, "every table of the pretend game is found (" .. expected .. ")",
+    check(report:find("tables that exist: " .. n_tables, 1, true) ~= nil, "every table of the pretend game is found (" .. n_tables .. ")",
         report:match("tables that exist: %d+"))
-    if mode[2] then
-        check(report:find("career_secretwinners%s+rows=1%s+%[from Live Editor files%]") ~= nil,
-            "a table named only in Live Editor's files is found and marked")
-        check(report:find("found only in Live Editor's files; 1 Lua files read", 1, true) ~= nil, "Live Editor's Lua files are read")
-    else
-        check(report:find("its files were not read", 1, true) ~= nil, "no file functions: says so instead of starting a program")
-    end
+    check(report:find("getFileList", 1, true) == nil and report:find("LE.db methods", 1, true) == nil,
+        "Live Editor's folders and objects are left alone (1.0.0 crashed a game there)")
+    check(progress:find("start table playerloans", 1, true) ~= nil and progress:find("done table playerloans", 1, true) ~= nil,
+        "every table is written to the progress file before and after it is asked for")
+    check(progress:match("finished%s*$") ~= nil, "the progress file ends with 'finished'")
+    check(skipfile == "", "nothing is skipped after a normal run")
     if mode[1] then
         check(report:find("currenttableposition", 1, true) ~= nil, "columns are listed")
         check(report:find("-- career_users (1 rows)", 1, true) ~= nil, "sample rows are shown")
@@ -626,9 +655,35 @@ for _, mode in ipairs({ { true, true, "with GetDBTableRows and Live Editor's fil
     check(report:find("last season's winner: Monaco", 1, true) == nil, "a team promoted as champion of another league is not called this league's winner")
     check(report:find("your league (league 14)", 1, true) ~= nil and report:find("now 1. Leicester City", 1, true) ~= nil,
         "the managed team's own league is added with its leader")
-    check(report:find("fixture list not readable", 1, true) ~= nil, "no game memory here: the fixture check says so instead of failing")
+    if mode[2] then
+        check(report:find("UEFA Champions League [91]", 1, true) ~= nil and report:find("2 played of   2  last: 2029-05-26  Juventus v Monaco  1-1 (pens 4-3)", 1, true) ~= nil,
+            "a final won on penalties is shown with the shoot-out", report:match("UEFA Champions League[^\r\n]*"))
+        check(report:find("Torquay AFC v Leicester City  2-0", 1, true) ~= nil and report:find("pens 255", 1, true) == nil,
+            "255 in the shoot-out fields means no shoot-out", report:match("Emirates FA Cup[^\r\n]*"))
+        check(report:find("(not decided yet) v (not decided yet)  not played", 1, true) ~= nil, "a final still to be played is shown as such")
+    else
+        check(report:find("fixture list not readable", 1, true) ~= nil, "no game memory here: the fixture check says so instead of failing")
+    end
     check(report:find("=== end of report ===", 1, true) ~= nil, "the report is complete")
 end
+
+print("   mode: the game closed during the last run")
+do
+    local before = "census 1.1.0 2026-10-21 12:40:00\r\nstart section Every table the game answers to\r\nstart table teams\r\ndone table teams\r\nstart table playerloans\r\n"
+    local ok, err, report, _, n_tables, progress, skipfile = run_census(true, false, before)
+    check(ok, "census runs to the end", err)
+    check(report:find("The last run stopped (the game closed) during: table playerloans", 1, true) ~= nil, "the report says where the last run stopped")
+    check(skipfile:find("table playerloans", 1, true) ~= nil and skipfile:find("table teams", 1, true) == nil, "only that step is put on the skip list")
+    check(progress:find("start table playerloans", 1, true) == nil and progress:find("start table teams", 1, true) ~= nil,
+        "the step is skipped this time, the others run")
+    check(report:find("tables that exist: " .. (n_tables - 1), 1, true) ~= nil, "the other tables are still found")
+    check(report:find("not asked, because asking stopped the game before: playerloans", 1, true) ~= nil, "the skipped table is named")
+    local ok2, _, report2 = run_census(true, false, nil)
+    check(ok2 and report2:find("Steps skipped because they stopped the game before: table playerloans", 1, true) ~= nil,
+        "the skip list is kept for later runs")
+end
+os.remove(census_progress)
+os.remove(census_skip)
 
 
 -- ---------------------------------------------------------------------------------------------------------
