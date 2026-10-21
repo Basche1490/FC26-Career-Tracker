@@ -2,21 +2,50 @@ package com.fctracker.career.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val BackgroundDark = Color(0xFF0F0F0F)
-val SurfaceDark = Color(0xFF1C1B1F)
-val SurfaceVariantDark = Color(0xFF2B2930)
-val PrimaryDark = Color(0xFFD0BCFF)
-val OnPrimaryDark = Color(0xFF381E72)
-val OnBackgroundDark = Color(0xFFE6E1E5)
-val OnSurfaceVariantDark = Color(0xFF938F99)
-val OutlineDark = Color(0xFF313033)
+// The final design, "Story Analyst": a dark green-black palette with one accent (the club colour, or mint).
 
-val WinColor = Color(0xFFB4E380)
-val DrawColor = Color(0xFFFFE082)
-val LossColor = Color(0xFFF2B8B5)
+val FcBg = Color(0xFF0B0F0D)
+val FcSurface = Color(0xFF131A16)
+val FcSurface2 = Color(0xFF1B241F)
+val FcInset = Color(0xFF0E1411)
+val FcBorder = Color(0xFF28352E)
+val FcText = Color(0xFFE9F1EC)
+val FcMuted = Color(0xFF9CB1A5)
+val FcNavBg = Color(0xFF161F1A)
+val FcScrim = Color(0xC7020403)
+
+val FcMint = Color(0xFF62E0B0)
+val FcOnMint = Color(0xFF05140D)
+
+val FcGood = Color(0xFF7EE0A4)
+val FcGoodBg = Color(0xFF11301F)
+val FcWarn = Color(0xFFFFC857)
+val FcWarnBg = Color(0xFF3A2D0B)
+val FcBad = Color(0xFFFF8F86)
+val FcBadBg = Color(0xFF3C1816)
+val FcInfo = Color(0xFF7CC4FF)
+val FcInfoBg = Color(0xFF112A3D)
+val FcLive = Color(0xFF62E0B0)
+val FcLiveBg = Color(0xFF0F2A1F)
+val FcLiveLine = Color(0xFF235A44)
+
+// The names the existing screens use, mapped onto the final palette so every screen takes the new look.
+val BackgroundDark = FcBg
+val SurfaceDark = FcSurface
+val SurfaceVariantDark = FcSurface2
+val PrimaryDark = FcMint
+val OnPrimaryDark = FcOnMint
+val OnBackgroundDark = FcText
+val OnSurfaceVariantDark = FcMuted
+val OutlineDark = FcBorder
+
+// Results never take the club colour, and always come with W, D or L as well.
+val WinColor = FcGood
+val DrawColor = FcWarn
+val LossColor = FcBad
 
 // Connection and data-quality signals. Shapes and words always go with them, so colour is never the only cue.
-val StatusLive = Color(0xFF10B981)
-val StatusWarn = Color(0xFFFBBF24)
-val StatusDown = Color(0xFFEF4444)
-val StatusIdle = Color(0xFF94A3B8)
+val StatusLive = FcLive
+val StatusWarn = FcWarn
+val StatusDown = FcBad
+val StatusIdle = FcMuted

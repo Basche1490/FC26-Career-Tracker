@@ -127,7 +127,29 @@ data class Player(
     val loanEnd: String? = null,
     val loanOptionToBuy: Boolean = false,
     /** The game's own id for this player, remembered from a squad report so a renamed player is still recognised. */
-    val gamePlayerId: Int? = null
+    val gamePlayerId: Int? = null,
+    /** The squad role promised in the game: Crucial, Important, Rotation, Sporadic or Prospect. Null when not known. */
+    val squadRole: String? = null,
+    /** A contract bonus as the game describes it ("20 league goals"); null when none. */
+    val bonus: String? = null,
+    /** "game" when the injury came from the game, "manual" when the person added it. */
+    val injurySource: String? = null,
+    /**
+     * True: the injury's return date follows the game whenever the game changes it. False: the person changed it and
+     * their date stays until they turn this back on.
+     */
+    val injuryFollowGame: Boolean = true,
+    /** The return date the game gave (kept so the edit dialog can say "The game said about 31 Oct"). */
+    val injuryGameReturnDate: String? = null,
+    val injuryNote: String? = null,
+    /** Matches still to miss through suspension (0 = not suspended) and the day it ends, from the game. */
+    val suspendedGames: Int = 0,
+    val suspensionEnd: String? = null,
+    /** The overall rating at the end of each finished season. The current season is [overall]. */
+    val ratingHistory: List<SeasonRating> = emptyList(),
+    /** Today's attributes from the game (finishing, positioning...), and a copy from the start of the season. */
+    val attributes: Map<String, Int> = emptyMap(),
+    val seasonStartAttributes: Map<String, Int> = emptyMap()
 ) {
     val displayName: String get() = when {
         !customDisplayName.isNullOrBlank() -> customDisplayName
@@ -322,7 +344,20 @@ data class HistoricalSeason(
     val goalsFor: Int = 0,
     val goalsAgainst: Int = 0,
     /** The season's objectives as they stood when the season ended. Read-only once archived. */
-    val objectives: List<Objective> = emptyList()
+    val objectives: List<Objective> = emptyList(),
+    // Everything else the season pages show, kept so every page can show this season again (read-only).
+    val academyPlayers: List<Player> = emptyList(),
+    val leagueTables: List<LeagueTableData> = emptyList(),
+    val leaders: List<CompetitionLeaders> = emptyList(),
+    val squadStats: List<PlayerSeasonStat> = emptyList(),
+    val awards: List<AwardEntry> = emptyList(),
+    val coefficients: List<ClubCoefficient> = emptyList(),
+    val nationCoefficients: List<NationCoefficient> = emptyList(),
+    val milestones: List<Milestone> = emptyList(),
+    val transferBudget: Double = 0.0,
+    val wageBudgetK: Double = 0.0,
+    /** The trophies won this season (names), for the season list and the recap. */
+    val trophies: List<String> = emptyList()
 )
 
 data class LeagueTable(
@@ -443,5 +478,40 @@ data class AppState(
     val bridgeConnectionStatus: String = "Not Checked",
     val bridgeEventCount: Int = 0,
     /** The game's date (yyyy-MM-dd) as of the last squad report from the PC. Contract and loan time left is worked out against it. */
-    val careerDate: String? = null
+    val careerDate: String? = null,
+
+    // -- added for the final design -------------------------------------------------------------------------------
+    /** Where the person plays (see [Platform]). Console hides everything that needs the PC. */
+    val platform: String = Platform.PC,
+    /** The crest image the person uploaded, copied into the app's own storage (absolute path); blank when none. */
+    val clubCrestFile: String = "",
+    /** Club colours as the app's accent; off = the default mint. */
+    val useClubColours: Boolean = true,
+    val clubInfo: ClubInfo = ClubInfo(),
+    val fixtures: List<Fixture> = emptyList(),
+    /** Every league table the game reports (or the person keeps); the career's own league is among them. */
+    val leagueTables: List<LeagueTableData> = emptyList(),
+    val leaders: List<CompetitionLeaders> = emptyList(),
+    val squadStats: List<PlayerSeasonStat> = emptyList(),
+    val awards: List<AwardEntry> = emptyList(),
+    /** Winners of every finished season, kept for all seasons (each entry names its season). */
+    val worldWinners: List<WorldWinner> = emptyList(),
+    val worldTopScorers: List<WorldTopScorer> = emptyList(),
+    val coefficients: List<ClubCoefficient> = emptyList(),
+    val nationCoefficients: List<NationCoefficient> = emptyList(),
+    /** Console: the person's own European points per season ("2026" -> 12.5). */
+    val ownCoefficientPoints: Map<String, Double> = emptyMap(),
+    val playerNotes: List<PlayerNote> = emptyList(),
+    val milestones: List<Milestone> = emptyList(),
+    val milestonePrefs: MilestonePrefs = MilestonePrefs(),
+    /** The weekly wage budget in thousands. The game keeps it out of reach, so the person types it; 0 = not set. */
+    val wageBudgetK: Double = 0.0,
+    /** Recap pages the person switched off (page numbers, 1 to 10). */
+    val recapExcludedPages: List<Int> = emptyList(),
+    /** Console: the season whose June reminder to fill in Around the World was dismissed. */
+    val worldReminderDismissed: Int = 0,
+    /** The starting XI and bench picked in the game (PC), for "Use my team sheet from the game". */
+    val gameTeamSheet: TeamSheet? = null,
+    /** True once the milestones already reached when the app first looked were stored quietly (no alert flood). */
+    val milestonesPrimed: Boolean = false
 )

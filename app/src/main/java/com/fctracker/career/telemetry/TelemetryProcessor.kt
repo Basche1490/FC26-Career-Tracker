@@ -65,6 +65,7 @@ object TelemetryProcessor {
         crestUrlFor: (String) -> String = { "" },
         signedPlayer: (String) -> Player? = { null }
     ): TelemetryResult {
+        var base = state
         val events = state.liveEvents.toMutableList()
         val transfers = state.transfers.toMutableList()
         val matches = state.recentMatches.toMutableList()
@@ -174,6 +175,25 @@ object TelemetryProcessor {
                             hasNew = true
                         }
                     }
+                    "career" -> {
+                        // Fixtures, tables, statistics, injuries, awards, winners, the European ranking...: stored
+                        // quietly. A new injury is the one part that raises an alert.
+                        val before = base.copy(players = squad, academyPlayers = academy, careerDate = careerDate, activeInjuries = injuries)
+                        val r = CareerReport.apply(before, data)
+                        if (r.changed) {
+                            base = r.state
+                            squad = r.state.players.toMutableList()
+                            careerDate = r.state.careerDate
+                            injuries = r.state.activeInjuries
+                            hasNew = true
+                            for (who in r.newInjuries) {
+                                val p = squad.firstOrNull { it.displayName == who }
+                                val msg = "$who is injured${p?.injuryName?.let { " ($it)" } ?: ""}${p?.injuryReturnDate?.let { ", back about ${ContractTime.fullDate(it)}" } ?: ""}"
+                                if (events.none { it.title == "Injury" && it.message == msg }) events.add(LiveEvent("Injury", msg, timestamp))
+                                if (alert) notices.add(TelemetryNotice("Injury", msg, "squad", false))
+                            }
+                        }
+                    }
                     // Any other structured payload (for example a snapshot) is ignored, as before.
                 }
             } else if (trimmedMessage.isNotEmpty()) {
@@ -201,7 +221,7 @@ object TelemetryProcessor {
         if (!hasNew) return TelemetryResult(state, notices)
 
         return TelemetryResult(
-            state.copy(
+            base.copy(
                 liveEvents = events.sortedByDescending { it.timestamp }.take(MAX_LIVE_EVENTS),
                 transfers = transfers,
                 recentMatches = matches,

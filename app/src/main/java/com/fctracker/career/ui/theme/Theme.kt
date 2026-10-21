@@ -1,95 +1,124 @@
 package com.fctracker.career.ui.theme
 
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.platform.LocalContext
-import androidx.core.graphics.ColorUtils
+import androidx.compose.ui.unit.dp
+import com.fctracker.career.logic.Accent
 
-private val DarkColorScheme = darkColorScheme(
-    primary = PrimaryDark,
-    onPrimary = OnPrimaryDark,
-    background = BackgroundDark,
-    onBackground = OnBackgroundDark,
-    surface = SurfaceDark,
-    onSurface = OnBackgroundDark,
-    surfaceVariant = SurfaceVariantDark,
-    onSurfaceVariant = OnSurfaceVariantDark,
-    outline = OutlineDark
+/** The colours the design uses beyond Material's own scheme. Read with `FcTheme.colors`. */
+@Immutable
+data class FcColors(
+    val accent: Color = FcMint,
+    val onAccent: Color = FcOnMint,
+    /** The accent at low strength, for selected chips, icon tiles and the highlighted table row. */
+    val accentBg: Color = FcMint.copy(alpha = 0.14f),
+    val accentLine: Color = FcMint.copy(alpha = 0.4f),
+    val bg: Color = FcBg,
+    val surface: Color = FcSurface,
+    val surface2: Color = FcSurface2,
+    val inset: Color = FcInset,
+    val border: Color = FcBorder,
+    val text: Color = FcText,
+    val muted: Color = FcMuted,
+    val good: Color = FcGood,
+    val goodBg: Color = FcGoodBg,
+    val warn: Color = FcWarn,
+    val warnBg: Color = FcWarnBg,
+    val bad: Color = FcBad,
+    val badBg: Color = FcBadBg,
+    val info: Color = FcInfo,
+    val infoBg: Color = FcInfoBg,
+    val live: Color = FcLive,
+    val liveBg: Color = FcLiveBg,
+    val liveLine: Color = FcLiveLine,
+    val navBg: Color = FcNavBg,
+    val scrim: Color = FcScrim
 )
 
-// We'll map light colors to the dark scheme to enforce the "Elegant Dark" design.
-private val LightColorScheme = DarkColorScheme
+val LocalFcColors = staticCompositionLocalOf { FcColors() }
 
-/**
- * Ensures primary and secondary team colors maintain optimal visual contrast, clarity, and
- * vibrancy against dark surfaces, preventing muddy or invisible UI elements while faithfully
- * preserving the club's distinctive hue and tonal identity.
- */
-fun adjustColorForDarkTheme(color: Color, targetMinLightness: Float = 0.58f): Color {
-    val colorInt = android.graphics.Color.argb(
-        (color.alpha * 255).toInt().coerceIn(0, 255),
-        (color.red * 255).toInt().coerceIn(0, 255),
-        (color.green * 255).toInt().coerceIn(0, 255),
-        (color.blue * 255).toInt().coerceIn(0, 255)
-    )
-    val hsl = FloatArray(3)
-    ColorUtils.colorToHSL(colorInt, hsl)
-
-    // hsl[0] is Hue (0-360), hsl[1] is Saturation (0-1), hsl[2] is Lightness (0-1)
-    // If the color has low perceived luminance or low lightness (e.g., deep navy #132A75 or dark maroon #961F30),
-    // proportionally elevate its lightness so it stands out with crisp, premium clarity.
-    if (color.luminance() < 0.22f || hsl[2] < targetMinLightness) {
-        val boostedLightness = (targetMinLightness + (hsl[2] * 0.18f)).coerceIn(0.52f, 0.78f)
-        hsl[2] = boostedLightness
-        if (hsl[1] < 0.45f) {
-            hsl[1] = 0.45f // Keep rich, vibrant color saturation
-        }
-    }
-    return Color(ColorUtils.HSLToColor(hsl))
+object FcTheme {
+    val colors: FcColors
+        @Composable get() = LocalFcColors.current
 }
 
+fun parseHex(hex: String?): Color? = Accent.parse(hex)?.let { (r, g, b) -> Color(r.toFloat(), g.toFloat(), b.toFloat()) }
+
+/** Kept for code that lightens a club colour by hand; the accent itself now comes from [Accent.choose]. */
+fun adjustColorForDarkTheme(color: Color, @Suppress("UNUSED_PARAMETER") targetMinLightness: Float = 0.58f): Color {
+    val hex = "#%02X%02X%02X".format((color.red * 255).toInt(), (color.green * 255).toInt(), (color.blue * 255).toInt())
+    return parseHex(Accent.choose(hex, null).hex) ?: color
+}
+
+private val FcShapes = Shapes(
+    extraSmall = RoundedCornerShape(10.dp),
+    small = RoundedCornerShape(14.dp),
+    medium = RoundedCornerShape(18.dp),
+    large = RoundedCornerShape(22.dp),
+    extraLarge = RoundedCornerShape(28.dp)
+)
+
+/**
+ * The app's theme. With [useClubColours] on, the accent is the more colourful club colour, lightened until it reads
+ * on the dark background; otherwise (or when both club colours are black, white or grey) it is the default mint.
+ */
 @Composable
 fun FCTheme(
     primaryHex: String? = null,
     secondaryHex: String? = null,
-    darkTheme: Boolean = true,
+    useClubColours: Boolean = true,
+    @Suppress("UNUSED_PARAMETER") darkTheme: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    var customPrimary = PrimaryDark
-    var customSecondary = Color(0xFF03DAC6)
-    
-    try {
-        if (!primaryHex.isNullOrEmpty()) {
-            val parsed = Color(android.graphics.Color.parseColor(primaryHex))
-            customPrimary = adjustColorForDarkTheme(parsed, targetMinLightness = 0.58f)
-        }
-        if (!secondaryHex.isNullOrEmpty()) {
-            val parsed = Color(android.graphics.Color.parseColor(secondaryHex))
-            customSecondary = adjustColorForDarkTheme(parsed, targetMinLightness = 0.52f)
-        }
-    } catch(e: Exception) {}
+    val accentHex = remember(primaryHex, secondaryHex, useClubColours) {
+        if (useClubColours) Accent.choose(primaryHex, secondaryHex).hex else Accent.DEFAULT
+    }
+    val accent = parseHex(accentHex) ?: FcMint
+    val onAccent = parseHex(Accent.onColour(accentHex)) ?: FcOnMint
+    val colors = FcColors(accent = accent, onAccent = onAccent, accentBg = accent.copy(alpha = 0.14f), accentLine = accent.copy(alpha = 0.4f))
 
-    val colorScheme = darkColorScheme(
-        primary = customPrimary,
-        onPrimary = if (customPrimary.luminance() > 0.45f) Color.Black else Color.White,
-        secondary = customSecondary,
-        onSecondary = if (customSecondary.luminance() > 0.45f) Color.Black else Color.White,
-        background = BackgroundDark,
-        onBackground = OnBackgroundDark,
-        surface = SurfaceDark,
-        onSurface = OnBackgroundDark,
-        surfaceVariant = SurfaceVariantDark,
-        onSurfaceVariant = OnSurfaceVariantDark,
-        outline = OutlineDark
+    val scheme = darkColorScheme(
+        primary = accent,
+        onPrimary = onAccent,
+        primaryContainer = colors.accentBg,
+        onPrimaryContainer = accent,
+        secondary = accent,
+        onSecondary = onAccent,
+        secondaryContainer = FcSurface2,
+        onSecondaryContainer = FcText,
+        tertiary = FcInfo,
+        onTertiary = FcBg,
+        background = FcBg,
+        onBackground = FcText,
+        surface = FcSurface,
+        onSurface = FcText,
+        surfaceVariant = FcSurface2,
+        onSurfaceVariant = FcMuted,
+        surfaceContainerLowest = FcInset,
+        surfaceContainerLow = FcSurface,
+        surfaceContainer = FcSurface,
+        surfaceContainerHigh = FcSurface2,
+        surfaceContainerHighest = FcSurface2,
+        inverseSurface = FcText,
+        inverseOnSurface = FcBg,
+        outline = FcBorder,
+        outlineVariant = FcBorder,
+        error = FcBad,
+        onError = FcBg,
+        errorContainer = FcBadBg,
+        onErrorContainer = FcBad,
+        scrim = FcScrim
     )
 
-    MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
+    CompositionLocalProvider(LocalFcColors provides colors) {
+        MaterialTheme(colorScheme = scheme, typography = Typography, shapes = FcShapes, content = content)
+    }
 }
