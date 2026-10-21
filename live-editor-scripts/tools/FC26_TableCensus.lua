@@ -1,4 +1,4 @@
--- FC26 Table Census v1.1.0 - read-only inventory of the game data FC26 Career Tracker could use.
+-- FC26 Table Census v1.2.0 - read-only inventory of the game data FC26 Career Tracker could use.
 --
 -- Writes to Documents\FC26 Export:
 --   FC26_census_<date>_<time>.txt         the report: a season-end check (league champions, cup finals, awards, cup
@@ -17,7 +17,10 @@
 -- Version 1.0.0 crashed the game straight away for one player. It listed folders of Live Editor through
 -- getFileList / getDirectoryList with a folder that may not exist, and looked inside Live Editor's own objects;
 -- 1.1.0 does neither, does the season-end check first (it only uses what the other scripts already use every day),
--- and leaves the unknown table names for last.
+-- and leaves the unknown table names for last. 1.1.0 then closed the game too, straight after the league tables: it
+-- asked GetDBTableRows for the award table, which is empty early in a season, and nothing had ever asked it for an
+-- empty table before. 1.2.0 counts a table's records first and never asks GetDBTableRows for an empty one. It also
+-- reads its files the way the other scripts do (read("*a")).
 --
 -- Best run twice: once now, and once in June of an in-game season (after the cup finals, before 1 July), because
 -- the game replaces the fixture list, and with it every cup final, when the new season starts.
@@ -29,7 +32,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 Table Census must be executed while a career is loaded")
 
-local VERSION = "1.1.0"
+local VERSION = "1.2.0"
 
 local user_profile = os.getenv("USERPROFILE") or ""
 local ROOT = (user_profile ~= "" and user_profile or ".") .. "\\Documents\\FC26 Export"
@@ -75,7 +78,7 @@ local function read_lines(path)
     local out = {}
     local f = io.open(path, "rb")
     if not f then return out end
-    for line in (f:read("a") or ""):gmatch("[^\r\n]+") do out[#out + 1] = line end
+    for line in (f:read("*a") or ""):gmatch("[^\r\n]+") do out[#out + 1] = line end
     f:close()
     return out
 end
@@ -282,6 +285,14 @@ local function count_records(tbl, cap)
     return n
 end
 
+-- Rows through GetDBTableRows, but only for a table that has records: an empty table is never handed to it.
+-- Returns an empty list for a missing or empty table, nil when GetDBTableRows cannot be used.
+local function rows_of(name)
+    local tbl = get_table(name)
+    if not tbl or count_records(tbl, 1) == 0 then return {} end
+    return api_rows(name)
+end
+
 local function csv_cell(s)
     s = tostring(s or "")
     if s:find('[,"\r\n]') then s = '"' .. s:gsub('"', '""') .. '"' end
@@ -473,9 +484,9 @@ end)
 
 section("Season-end check 2: awards and cup runs", function()
     for _, name in ipairs({ "career_playerawards", "career_competitionprogress" }) do
-        local ok, rows = step("rows " .. name, function() return api_rows(name) end)
+        local ok, rows = step("rows " .. name, function() return rows_of(name) end)
         if ok and rows then
-            w(name .. ": " .. #rows .. " rows")
+            w(name .. ": " .. #rows .. " rows" .. (#rows == 0 and " (empty: nothing to show yet)" or ""))
             for i = 1, math.min(#rows, 60) do
                 local row = plain_row(rows[i])
                 w(string.format("  #%d  %s", i, describe_row(row, 30)))
@@ -601,7 +612,7 @@ section("Every table the game answers to", function()
         elseif ok and info then
             info.columns = {}
             if info.rows > 0 and info.rows <= BIG_TABLE then
-                local ok2, rows = step("columns " .. name, function() return api_rows(name) end)
+                local ok2, rows = step("columns " .. name, function() return rows_of(name) end)
                 if ok2 and rows and rows[1] then info.columns = sorted_keys(plain_row(rows[1])) end
             end
             existing[name] = info
@@ -628,7 +639,7 @@ section("A few rows of each table that is not huge (career tables: rows mentioni
     end
     table.sort(names)
     for _, name in ipairs(names) do
-        local ok, rows = step("rows " .. name, function() return api_rows(name) end)
+        local ok, rows = step("rows " .. name, function() return rows_of(name) end)
         if ok and rows and #rows > 0 then
             w("")
             w("-- " .. name .. " (" .. #rows .. " rows)")

@@ -537,7 +537,7 @@ end
 
 -- ---------------------------------------------------------------------------------------------------------
 print("3b. FC26_TableCensus.lua runs against a pretend game database")
-local function census_data()
+local function census_data(empty_awards)
     local data = build_data()
     data.leagueteamlinks = {
         { teamid = 900, leagueid = 31, prevleagueid = 31, currenttableposition = 1, points = 3, nummatchesplayed = 1, previousyeartableposition = 1, champion = 1 },
@@ -547,6 +547,8 @@ local function census_data()
     }
     data.career_playerawards = { { playerid = 1, teamid = MANAGED, season = 4, typeid = 3, count = 1 } }
     data.career_competitionprogress = { { teamid = MANAGED, compobjid = 469, season = 4, stageid = 508, hasteamwon = 0 } }
+    if empty_awards then data.career_playerawards = {} end   -- early in a season, as in the real save
+    data.career_presignedcontract = {}   -- an empty table: GetDBTableRows must never be asked for one (1.1.0 closed a game there)
     return data
 end
 
@@ -591,12 +593,20 @@ local census_progress = os.tmpname()
 local census_skip = os.tmpname()
 os.remove(census_skip)
 
-local function run_census(with_api_rows, with_memory, progress_before)
+local function run_census(with_api_rows, with_memory, progress_before, empty_awards)
     local out_path = os.tmpname() .. ".txt"
-    local data = census_data()
+    local data = census_data(empty_awards)
     local n_tables = 0
     for _ in pairs(data) do n_tables = n_tables + 1 end
     install_env(data, with_api_rows, out_path)
+    local empty_asked = {}
+    if _G.GetDBTableRows then
+        local real_rows = _G.GetDBTableRows
+        _G.GetDBTableRows = function(name)
+            if data[name] and #data[name] == 0 then empty_asked[#empty_asked + 1] = name end
+            return real_rows(name)
+        end
+    end
     _G.FC26_CENSUS_OUT_PATH, _G.FC26_CENSUS_PROGRESS_PATH, _G.FC26_CENSUS_SKIP_PATH = out_path, census_progress, census_skip
     if progress_before then
         local f = io.open(census_progress, "wb") f:write(progress_before) f:close()
@@ -625,13 +635,14 @@ local function run_census(with_api_rows, with_memory, progress_before)
     local report, csv = slurp(out_path), slurp(out_path:gsub("%.txt$", "") .. "_tables.csv")
     os.remove(out_path)
     os.remove((out_path:gsub("%.txt$", "") .. "_tables.csv"))
-    return ok, err, report, csv, n_tables, slurp(census_progress), slurp(census_skip)
+    return ok, err, report, csv, n_tables, slurp(census_progress), slurp(census_skip), empty_asked
 end
 
 for _, mode in ipairs({ { true, true, "with GetDBTableRows and the fixture list in memory" }, { false, false, "record by record, no game memory" } }) do
     print("   mode: " .. mode[3])
-    local ok, err, report, csv, n_tables, progress, skipfile = run_census(mode[1], mode[2], nil)
+    local ok, err, report, csv, n_tables, progress, skipfile, empty_asked = run_census(mode[1], mode[2], nil)
     check(ok, "census runs to the end", err)
+    check(#empty_asked == 0, "GetDBTableRows is never asked for an empty table", table.concat(empty_asked, ", "))
     check(report:find("SECTION FAILED", 1, true) == nil, "no section failed", report:match("SECTION FAILED[^\r\n]*"))
     check(report:find("Managed team: 115486 Torquay AFC", 1, true) ~= nil, "managed team is found")
     check(report:find("tables that exist: " .. n_tables, 1, true) ~= nil, "every table of the pretend game is found (" .. n_tables .. ")",
@@ -670,8 +681,10 @@ end
 print("   mode: the game closed during the last run")
 do
     local before = "census 1.1.0 2026-10-21 12:40:00\r\nstart section Every table the game answers to\r\nstart table teams\r\ndone table teams\r\nstart table playerloans\r\n"
-    local ok, err, report, _, n_tables, progress, skipfile = run_census(true, false, before)
+    local ok, err, report, _, n_tables, progress, skipfile, empty_asked = run_census(true, false, before, true)
     check(ok, "census runs to the end", err)
+    check(#empty_asked == 0 and report:find("career_playerawards: 0 rows (empty: nothing to show yet)", 1, true) ~= nil,
+        "an empty award table is reported as empty without asking GetDBTableRows", table.concat(empty_asked, ", "))
     check(report:find("The last run stopped (the game closed) during: table playerloans", 1, true) ~= nil, "the report says where the last run stopped")
     check(skipfile:find("table playerloans", 1, true) ~= nil and skipfile:find("table teams", 1, true) == nil, "only that step is put on the skip list")
     check(progress:find("start table playerloans", 1, true) == nil and progress:find("start table teams", 1, true) ~= nil,
