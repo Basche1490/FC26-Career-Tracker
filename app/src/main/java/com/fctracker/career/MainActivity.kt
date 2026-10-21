@@ -189,7 +189,7 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
                             composable("career_summary") { CareerSummaryScreen(viewModel, openDrawer, { id -> goDetail("player/$id") }, nav) }
                             composable("assistant") { AssistantScreen(viewModel, openDrawer, nav) }
                             composable("milestones") { MilestonesScreen(viewModel, back) }
-                            composable("widgets") { WidgetsScreen(back) }
+                            composable("widgets") { WidgetsScreen(viewModel, back) }
                             composable("theming") { ThemingScreen(viewModel, back) }
                             composable("club_history_edit") { ClubHistoryEditScreen(viewModel, back) }
                             composable("connection") {
