@@ -539,6 +539,20 @@ private fun ClubsEditorContent(viewModel: MainViewModel, state: AppState, onDone
                 }
             }
         }
+        val left = if (proposal != null && sameLeague) (proposal.down + proposal.upFrom).filter { !inTable(it) && !it.equals(state.clubName, true) } else emptyList()
+        if (left.isNotEmpty()) {
+            FcLabel("LEFT THE LEAGUE")
+            RowsCard {
+                left.forEachIndexed { i, name ->
+                    if (i > 0) RowDivider()
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        androidx.compose.material3.Text(name, color = c.muted, fontSize = 14.sp, textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough, maxLines = 1, modifier = Modifier.weight(1f))
+                        Tag(if (name in proposal!!.down) "Relegated" else "Promoted", if (name in proposal.down) Tone.BAD else Tone.GOOD)
+                        FcIconButton(Icons.Default.Refresh, "Put back $name", { viewModel.addTableClub(own.league, name) }, size = 36.dp, border = false)
+                    }
+                }
+            }
+        }
         Muted("Add a club from the club list or type a new name; tap a club to rename it. Removing a club keeps its results in earlier seasons.", 11.sp)
         Muted("On PC the game decides who goes up and down, and the clubs follow by themselves.", 11.sp)
     }

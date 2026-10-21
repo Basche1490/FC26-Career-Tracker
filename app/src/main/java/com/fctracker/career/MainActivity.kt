@@ -26,7 +26,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import com.fctracker.career.ui.screens.HomeScreen
 import com.fctracker.career.ui.screens.PlayerProfileScreen
 import com.fctracker.career.ui.screens.WorldScreen
-import com.fctracker.career.ui.screens.RecapScreen
+import com.fctracker.career.ui.recap.RecapScreen
 import com.fctracker.career.ui.screens.MilestonesScreen
 import com.fctracker.career.ui.screens.WidgetsScreen
 import com.fctracker.career.ui.screens.ThemingScreen
@@ -116,7 +116,7 @@ class MainActivity : ComponentActivity() {
 }
 
 /** Routes that show the floating bar at the bottom, and which of its four places each one lights up. */
-private val NO_BAR_ROUTES = setOf("setup", "recap", "club_history_edit", "widgets")
+private val NO_BAR_ROUTES = setOf("setup", "recap", "recap/{season}", "club_history_edit", "widgets", "theming")
 
 private fun barPlace(route: String?): String? = when {
     route == null -> null
@@ -209,8 +209,9 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
                             composable("matches") { MatchesScreen(viewModel, openDrawer) }
                             composable("season_summary") { SeasonSummaryScreen(viewModel, openDrawer, nav) }
                             composable("world") { WorldScreen(viewModel, openDrawer) }
-                            composable("recap") { RecapScreen(viewModel, back) }
-                            composable("career_summary") { CareerSummaryScreen(viewModel, openDrawer) { id -> goDetail("player/$id") } }
+                            composable("recap") { RecapScreen(viewModel, null, back) }
+                            composable("recap/{season}") { entry -> RecapScreen(viewModel, entry.arguments?.getString("season")?.toIntOrNull(), back) }
+                            composable("career_summary") { CareerSummaryScreen(viewModel, openDrawer, { id -> goDetail("player/$id") }, nav) }
                             composable("assistant") { AssistantScreen(viewModel, openDrawer) }
                             composable("milestones") { MilestonesScreen(viewModel, back) }
                             composable("widgets") { WidgetsScreen(back) }

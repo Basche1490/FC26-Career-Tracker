@@ -1,546 +1,368 @@
 package com.fctracker.career.ui.screens
-import com.fctracker.career.feeLabel
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 
-
-import androidx.compose.foundation.background
+import android.content.Intent
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.EmojiEvents
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.ShowChart
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.TrackChanges
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.fctracker.career.AppState
 import com.fctracker.career.MainViewModel
+import com.fctracker.career.MatchResult
 import com.fctracker.career.Player
-import com.fctracker.career.ui.theme.WinColor
+import com.fctracker.career.feeLabel
+import com.fctracker.career.isIncomingDeal
+import com.fctracker.career.logic.Milestones
+import com.fctracker.career.logic.RecapBlock
+import com.fctracker.career.logic.RecapPage
+import com.fctracker.career.logic.SeasonFacts
+import com.fctracker.career.logic.SeasonView
+import com.fctracker.career.ui.components.ButtonKind
+import com.fctracker.career.ui.components.FcButton
+import com.fctracker.career.ui.components.FcCard
+import com.fctracker.career.ui.components.FcDialog
+import com.fctracker.career.ui.components.FcLabel
+import com.fctracker.career.ui.components.FcPage
+import com.fctracker.career.ui.components.FcSelectField
+import com.fctracker.career.ui.components.FcText
+import com.fctracker.career.ui.components.FcTopBar
+import com.fctracker.career.ui.components.HRule
+import com.fctracker.career.ui.components.Headshot
+import com.fctracker.career.ui.components.KeyValue
+import com.fctracker.career.ui.components.Mono
+import com.fctracker.career.ui.components.Muted
+import com.fctracker.career.ui.components.OvrBadge
+import com.fctracker.career.ui.components.SectionHeader
+import com.fctracker.career.ui.components.StatTile
+import com.fctracker.career.ui.components.Tag
+import com.fctracker.career.ui.components.Tone
+import com.fctracker.career.ui.recap.RecapRenderer
+import com.fctracker.career.ui.recap.RecapShare
+import com.fctracker.career.ui.theme.FcTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** One player over the whole career (or one season): appearances, goals, assists and average rating. */
+data class CareerTotals(val player: Player, val apps: Int, val goals: Int, val assists: Int, val average: Double)
+
+object CareerFacts {
+    /** Every season's totals added up by player; [season] = null for all-time, else one season (current or archived). */
+    fun totals(state: AppState, season: Int? = null): List<CareerTotals> {
+        val seasons = buildList {
+            state.historicalSeasons.forEach { h -> if (season == null || season == h.year) add(Triple(h.players + h.academyPlayers, h.matches, h.squadStats)) }
+            if (season == null || season == state.startYear) add(Triple(state.players + state.academyPlayers, state.recentMatches, state.squadStats))
+        }
+        val acc = linkedMapOf<String, CareerTotals>()
+        val weighted = mutableMapOf<String, Pair<Double, Int>>()
+        for ((players, matches, stats) in seasons) {
+            for (t in SeasonFacts.allTotals(players, matches, stats)) {
+                if (t.appearances == 0 && t.goals == 0 && t.assists == 0) continue
+                val key = t.player.gamePlayerId?.let { "g$it" } ?: t.player.id
+                val prev = acc[key]
+                acc[key] = CareerTotals(t.player, (prev?.apps ?: 0) + t.appearances, (prev?.goals ?: 0) + t.goals, (prev?.assists ?: 0) + t.assists, 0.0)
+                if (t.averageRating > 0 && t.appearances > 0) {
+                    val w = weighted[key] ?: (0.0 to 0)
+                    weighted[key] = (w.first + t.averageRating * t.appearances) to (w.second + t.appearances)
+                }
+            }
+        }
+        // The latest version of each player (name, rating, status) is the one shown.
+        val latest = (state.historicalSeasons.sortedBy { it.year }.flatMap { it.players + it.academyPlayers } + state.players + state.academyPlayers)
+            .associateBy { it.gamePlayerId?.let { g -> "g$g" } ?: it.id }
+        return acc.map { (k, v) -> v.copy(player = latest[k] ?: v.player, average = weighted[k]?.let { it.first / it.second } ?: 0.0) }
+    }
+
+    fun allMatches(state: AppState): List<MatchResult> = state.historicalSeasons.flatMap { it.matches } + state.recentMatches
+
+    /** Every trophy won, once each (the trophy list plus the trophies of archived seasons). */
+    fun trophies(state: AppState): List<String> = (state.teamTrophies.map { it.name } + state.historicalSeasons.flatMap { it.trophies }).map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+
+    fun isContinental(t: String) = listOf("champions league", "europa", "conference", "uefa", "libertadores", "sudamericana", "club world").any { t.lowercase().contains(it) }
+    fun isCup(t: String) = !isContinental(t) && listOf("cup", "copa", "coppa", "pokal", "coupe", "shield", "trophy", "trophée", "supercopa", "supercoppa", "supercup").any { t.lowercase().contains(it) }
+
+    /** League titles: seasons finished first, or league trophies on the list, whichever is more. */
+    fun leagueTitles(state: AppState): Int {
+        val won = state.historicalSeasons.count { it.finalPosition == 1 }
+        val listed = trophies(state).count { !isContinental(it) && !isCup(it) }
+        return maxOf(won, listed)
+    }
+
+    /** The plain-text summary to share or keep. */
+    fun exportText(state: AppState): String {
+        val all = SeasonFacts.split(allMatches(state))
+        val sb = StringBuilder()
+        sb.appendLine("${state.managerName} · ${state.clubName}")
+        sb.appendLine("Career summary (${SeasonView.seasonLabel(state.historicalSeasons.minOfOrNull { it.year } ?: state.startYear)} to ${SeasonView.seasonLabel(state.startYear)})")
+        sb.appendLine()
+        sb.appendLine("All-time record: ${all.won} won, ${all.drawn} drawn, ${all.lost} lost (${all.goalsFor}–${all.goalsAgainst})")
+        sb.appendLine("League titles ${leagueTitles(state)} · Domestic cups ${trophies(state).count { isCup(it) }} · Continental ${trophies(state).count { isContinental(it) }}")
+        val tr = trophies(state)
+        if (tr.isNotEmpty()) sb.appendLine("Trophies: ${tr.joinToString(", ")}")
+        sb.appendLine()
+        sb.appendLine("Season by season")
+        state.historicalSeasons.sortedBy { it.year }.forEach { h ->
+            val deals = h.transfers.filter { it.feeM > 0 }.sortedByDescending { it.feeM }.take(2).joinToString("; ") { "${it.playerName} ${if (it.isIncomingDeal()) "from" else "to"} ${it.fromToClub} ${it.feeLabel(state.currencySymbol)}" }
+            sb.appendLine("${SeasonView.seasonLabel(h.year)} · ${h.leagueName}: ${Milestones.ordinal(h.finalPosition)}${if (h.trophies.isNotEmpty()) " · ${h.trophies.joinToString(", ")}" else ""}${if (deals.isNotEmpty()) " · $deals" else ""}")
+        }
+        sb.appendLine("${SeasonView.seasonLabel(state.startYear)} · ${state.leagueName}: in progress")
+        sb.appendLine()
+        sb.appendLine("Hall of fame")
+        totals(state).sortedByDescending { it.apps }.take(10).forEach { sb.appendLine("${it.player.displayName}: ${it.apps} apps, ${it.goals} goals, ${it.assists} assists") }
+        sb.appendLine()
+        sb.append("Made with FC Tracker")
+        return sb.toString()
+    }
+}
 
 @Composable
-fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
+fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, openPlayer: (String) -> Unit, nav: (String) -> Unit = {}) {
     val state by viewModel.state.collectAsState()
-    var showGraphicCard by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-
-    // Calculate aggregated all-time stats
-    var filterSeasonYearHoF by remember { mutableStateOf<Int?>(null) }
-    var filterSeasonYearMilestones by remember { mutableStateOf<Int?>(null) }
-    var filterExpandedHoF by remember { mutableStateOf(false) }
-    var filterExpandedMilestones by remember { mutableStateOf(false) }
-    
-    var sortMode by remember { mutableStateOf("Rating") } // "Name", "Apps", "Goals", "Assists", "Rating"
-
-    val displayStatsHoF = remember(state.players, state.historicalSeasons, filterSeasonYearHoF) {
-        val nonAcademyCurrent = state.players.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }
-        val rawList = if (filterSeasonYearHoF == null) {
-            val map = mutableMapOf<String, com.fctracker.career.Player>()
-            nonAcademyCurrent.forEach { map[it.id] = it.copy() }
-            state.historicalSeasons.forEach { season ->
-                season.players.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }.forEach { hp ->
-                    val current = map[hp.id]
-                    if (current != null) {
-                        map[hp.id] = current.copy(
-                            matchesPlayed = current.matchesPlayed + hp.matchesPlayed,
-                            goals = current.goals + hp.goals,
-                            assists = current.assists + hp.assists,
-                            averageRating = if (current.averageRating == 0.0) hp.averageRating else if (hp.averageRating == 0.0) current.averageRating else (current.averageRating + hp.averageRating) / 2
-                        )
-                    } else {
-                        map[hp.id] = hp.copy()
-                    }
-                }
-            }
-            map.values.toList()
-        } else if (filterSeasonYearHoF == state.startYear) {
-            nonAcademyCurrent
-        } else {
-            state.historicalSeasons.find { it.year == filterSeasonYearHoF }?.players?.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) } ?: emptyList()
-        }
-        rawList.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }
+    val context = LocalContext.current
+    val c = FcTheme.colors
+    var hofSeason by remember { mutableStateOf<Int?>(null) }
+    var recordSeason by remember { mutableStateOf<Int?>(null) }
+    var sort by remember { mutableStateOf(1) }
+    var card by remember { mutableStateOf(false) }
+    val allTime = remember(state) { CareerFacts.totals(state) }
+    val hof = remember(state, hofSeason) { if (hofSeason == null) allTime else CareerFacts.totals(state, hofSeason) }
+    val records = remember(state, recordSeason) { if (recordSeason == null) allTime else CareerFacts.totals(state, recordSeason) }
+    val seasonOptions = listOf("All-time", "${SeasonView.seasonLabel(state.startYear)} (current)") + state.historicalSeasons.sortedByDescending { it.year }.map { SeasonView.seasonLabel(it.year) }
+    fun seasonOf(label: String): Int? = when {
+        label == "All-time" -> null
+        label.endsWith("(current)") -> state.startYear
+        else -> label.take(4).toIntOrNull()
     }
-    
-    val displayStatsMilestones = remember(state.players, state.historicalSeasons, filterSeasonYearMilestones) {
-        val nonAcademyCurrent = state.players.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }
-        val rawList = if (filterSeasonYearMilestones == null) {
-            val map = mutableMapOf<String, com.fctracker.career.Player>()
-            nonAcademyCurrent.forEach { map[it.id] = it.copy() }
-            state.historicalSeasons.forEach { season ->
-                season.players.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }.forEach { hp ->
-                    val current = map[hp.id]
-                    if (current != null) {
-                        map[hp.id] = current.copy(
-                            matchesPlayed = current.matchesPlayed + hp.matchesPlayed,
-                            goals = current.goals + hp.goals,
-                            assists = current.assists + hp.assists,
-                            averageRating = if (current.averageRating == 0.0) hp.averageRating else if (hp.averageRating == 0.0) current.averageRating else (current.averageRating + hp.averageRating) / 2
-                        )
-                    } else {
-                        map[hp.id] = hp.copy()
+    fun labelOf(y: Int?): String = when (y) { null -> "All-time"; state.startYear -> "${SeasonView.seasonLabel(y)} (current)"; else -> SeasonView.seasonLabel(y) }
+    val matches = CareerFacts.allMatches(state)
+    val all = SeasonFacts.split(matches)
+    val trophies = CareerFacts.trophies(state)
+
+    FcPage(header = { FcTopBar("Career Summary", sub = "${state.clubName} · ${state.managerName}", onNav = onMenuClick) }) {
+        item { SectionHeader("Season-by-season timeline", sub = if (state.historicalSeasons.isNotEmpty()) "Tap a season to open it (read-only)" else null, icon = Icons.Default.History) }
+        if (state.historicalSeasons.isEmpty()) item { Muted("No completed seasons yet. Completed seasons and their top transfers will appear here.", 13.sp) }
+        state.historicalSeasons.sortedBy { it.year }.forEach { h ->
+            item(key = "season-${h.year}") {
+                val gold = h.finalPosition == 1 || h.trophies.isNotEmpty()
+                FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp, onClick = { viewModel.setViewingSeasonYear(h.year); nav("dashboard") }) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            FcText("${SeasonView.seasonLabel(h.year)} · ${h.leagueName}", 15.sp, FontWeight.Bold)
+                            val note = when {
+                                h.finalPosition == 1 -> " (Champions)"
+                                else -> ""
+                            }
+                            FcText("Finished ${Milestones.ordinal(h.finalPosition)}$note", 13.sp, FontWeight.SemiBold, if (gold) c.warn else c.text)
+                            if (h.trophies.isNotEmpty()) Muted(h.trophies.joinToString(" · "), 12.sp)
+                        }
+                        if (gold) Icon(Icons.Default.EmojiEvents, null, tint = c.warn, modifier = Modifier.size(24.dp))
                     }
-                }
-            }
-            map.values.toList()
-        } else if (filterSeasonYearMilestones == state.startYear) {
-            nonAcademyCurrent
-        } else {
-            state.historicalSeasons.find { it.year == filterSeasonYearMilestones }?.players?.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) } ?: emptyList()
-        }
-        rawList.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }
-    }
-    val allTimeStats = remember(state.players, state.historicalSeasons) {
-        val map = mutableMapOf<String, com.fctracker.career.Player>()
-        // Initialize with current stats (excluding academy)
-        state.players.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }.forEach { p ->
-            map[p.id] = p.copy() // Start with current baseline
-        }
-        
-        // Add historical stats (excluding academy)
-        state.historicalSeasons.forEach { season ->
-            season.players.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }.forEach { hp ->
-                val current = map[hp.id]
-                if (current != null) {
-                    map[hp.id] = current.copy(
-                        matchesPlayed = current.matchesPlayed + hp.matchesPlayed,
-                        goals = current.goals + hp.goals,
-                        assists = current.assists + hp.assists,
-                    )
-                } else {
-                    map[hp.id] = hp.copy()
-                }
-            }
-        }
-        map.values.filter { !it.isAcademy && !it.status.equals("Academy", ignoreCase = true) }
-    }
-
-
-
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            @OptIn(ExperimentalMaterial3Api::class)
-            TopAppBar(
-                title = { Text("Career Summary", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground) },
-                navigationIcon = {
-                    IconButton(onClick = onMenuClick) {
-                        Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.primary)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground
-                )
-            )
-        }
-    ) { padding ->
-        var selectedPlayer by remember { mutableStateOf<Player?>(null) }
-        selectedPlayer?.let {
-            DetailedPlayerStatsModal(state = state, player = it, showOvrGrowth = true, onDismiss = { selectedPlayer = null })
-        }
-
-        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                item {
-                    DarkCard(modifier = Modifier.fillMaxWidth()) {
-                        Text("Season-by-Season Career Timeline", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        if (state.historicalSeasons.isEmpty()) {
-                            Text("No completed seasons yet. Completed seasons and their top transfers will appear here.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        } else {
-                            state.historicalSeasons.sortedBy { it.year }.forEach { season ->
-                                DarkCard(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column {
-                                            Text(
-                                                text = "${season.year}/${season.year + 1} • ${season.leagueName}",
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 15.sp,
-                                                color = Color.White
-                                            )
-                                            val positionSuffix = when (season.finalPosition) {
-                                                1 -> "1st (Champions 🏆)"
-                                                2 -> "2nd (Promoted 🥈)"
-                                                3 -> "3rd (Promoted 🥉)"
-                                                else -> "${season.finalPosition}th"
-                                            }
-                                            Text(
-                                                text = "Finished $positionSuffix",
-                                                fontSize = 12.sp,
-                                                color = if (season.finalPosition == 1) Color(0xFFFFD700) else MaterialTheme.colorScheme.primary
-                                            )
-                                        }
-                                    }
-
-                                    // Top Transfers for this specific past season
-                                    if (season.transfers.isNotEmpty()) {
-                                        Spacer(modifier = Modifier.height(10.dp))
-                                        Text(
-                                            "Top Transfers & Key Deals",
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        Spacer(modifier = Modifier.height(6.dp))
-
-                                        season.transfers.forEach { tr ->
-                                            val isIncoming = tr.type.contains("In", ignoreCase = true) || tr.type.equals("Bought", ignoreCase = true)
-                                            Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(vertical = 3.dp),
-                                                horizontalArrangement = Arrangement.SpaceBetween,
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    Surface(
-                                                        shape = RoundedCornerShape(4.dp),
-                                                        color = if (isIncoming) Color(0xFF1E88E5).copy(alpha = 0.2f) else Color(0xFF4CAF50).copy(alpha = 0.2f)
-                                                    ) {
-                                                        Text(
-                                                            text = if (isIncoming) "SIGNING" else "SALE",
-                                                            fontSize = 9.sp,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = if (isIncoming) Color(0xFF42A5F5) else Color(0xFF81C784),
-                                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                                                        )
-                                                    }
-                                                    Spacer(modifier = Modifier.width(6.dp))
-                                                    Text(
-                                                        tr.playerName,
-                                                        fontSize = 13.sp,
-                                                        color = Color.White,
-                                                        fontWeight = FontWeight.Medium
-                                                    )
-                                                    if (tr.fromToClub.isNotBlank() && tr.fromToClub != "Transfer Market") {
-                                                        Text(
-                                                            text = " (${tr.fromToClub})",
-                                                            fontSize = 11.sp,
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                        )
-                                                    }
-                                                }
-                                                Text(
-                                                    text = tr.feeLabel(state.currencySymbol),
-                                                    fontSize = 13.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = if (!isIncoming) Color(0xFF81C784) else Color.White
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
+                    val deals = h.transfers.filter { it.type != "Retirement" }.sortedByDescending { it.feeM }.take(3)
+                    if (deals.isNotEmpty()) {
+                        FcLabel("TOP TRANSFERS & KEY DEALS")
+                        deals.forEach { t ->
+                            val inc = t.isIncomingDeal()
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Tag(if (inc) "SIGNING" else "SALE", if (inc) Tone.INFO else Tone.GOOD)
+                                FcText(t.playerName + if (t.fromToClub.isNotBlank() && t.fromToClub != "Transfer Market") " (${t.fromToClub})" else "", 12.sp, modifier = Modifier.weight(1f), maxLines = 1)
+                                FcText(t.feeLabel(state.currencySymbol), 12.sp, FontWeight.Bold)
                             }
                         }
-                    }
-                }
-                item {
-                    DarkCard(modifier = Modifier.fillMaxWidth()) {
-                        Text("Overall Manager Statistics", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        Spacer(modifier = Modifier.height(12.dp))
-                        
-
-                        val totalMatches = state.recentMatches.size
-                        val wins = state.recentMatches.count { it.resultBadge == "W" }
-                        val draws = state.recentMatches.count { it.resultBadge == "D" }
-                        val losses = state.recentMatches.count { it.resultBadge == "L" }
-                        val leagueTitles = state.teamTrophies.count { it.name.contains("League", ignoreCase = true) }
-                        val domesticCups = state.teamTrophies.count { it.name.contains("Cup", ignoreCase = true) && !it.name.contains("Champions", ignoreCase = true) }
-                        val continental = state.teamTrophies.count { it.name.contains("Champions", ignoreCase = true) || it.name.contains("Europa", ignoreCase = true) }
-                        
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(value = leagueTitles.toString(), onValueChange = {}, label = { Text("League Titles") }, modifier = Modifier.weight(1f), readOnly = true)
-                            OutlinedTextField(value = domesticCups.toString(), onValueChange = {}, label = { Text("Domestic Cups") }, modifier = Modifier.weight(1f), readOnly = true)
-                            OutlinedTextField(value = continental.toString(), onValueChange = {}, label = { Text("Continental") }, modifier = Modifier.weight(1f), readOnly = true)
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(value = wins.toString(), onValueChange = {}, label = { Text("Wins") }, modifier = Modifier.weight(1f), readOnly = true)
-                            OutlinedTextField(value = draws.toString(), onValueChange = {}, label = { Text("Draws") }, modifier = Modifier.weight(1f), readOnly = true)
-                            OutlinedTextField(value = losses.toString(), onValueChange = {}, label = { Text("Losses") }, modifier = Modifier.weight(1f), readOnly = true)
-                        }
-                    }
-                }
-                
-
-                item {
-                    val allMatches = state.historicalSeasons.flatMap { it.matches } + state.recentMatches
-                    val homeMatches = allMatches.filter { it.isHome }
-                    val awayMatches = allMatches.filter { !it.isHome }
-                    
-                    val homeWins = homeMatches.count { it.goalsFor > it.goalsAgainst }
-                    val homeDraws = homeMatches.count { it.goalsFor == it.goalsAgainst }
-                    val homeLosses = homeMatches.count { it.goalsFor < it.goalsAgainst }
-                    val awayWins = awayMatches.count { it.goalsFor > it.goalsAgainst }
-                    val awayDraws = awayMatches.count { it.goalsFor == it.goalsAgainst }
-                    val awayLosses = awayMatches.count { it.goalsFor < it.goalsAgainst }
-
-                    DarkCard(modifier = Modifier.fillMaxWidth()) {
-                        Text("All-Time Home vs Away Performance", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        Spacer(Modifier.height(8.dp))
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            DarkCard(modifier = Modifier.weight(1f)) {
-                                Text("Home", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                                Text("W: $homeWins  D: $homeDraws  L: $homeLosses", color = Color.White, fontSize = 12.sp)
-                                Text("GF: ${homeMatches.sumOf { it.goalsFor }}  GA: ${homeMatches.sumOf { it.goalsAgainst }}", color = Color.White, fontSize = 12.sp)
-                            }
-                            Spacer(Modifier.width(8.dp))
-                            DarkCard(modifier = Modifier.weight(1f)) {
-                                Text("Away", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                                Text("W: $awayWins  D: $awayDraws  L: $awayLosses", color = Color.White, fontSize = 12.sp)
-                                Text("GF: ${awayMatches.sumOf { it.goalsFor }}  GA: ${awayMatches.sumOf { it.goalsAgainst }}", color = Color.White, fontSize = 12.sp)
-                            }
-                        }
-                    }
-                }
-                item {
-                    DarkCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("Hall of Fame (Best Players)", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                            Box {
-                                androidx.compose.material3.TextButton(onClick = { filterExpandedHoF = true }) {
-                                    Text(if (filterSeasonYearHoF == null) "All-Time" else if (filterSeasonYearHoF == state.startYear) "${state.startYear}/${state.startYear+1} (Current)" else "${filterSeasonYearHoF}/${filterSeasonYearHoF!!+1}")
-                                    Text("▼", modifier = Modifier.padding(start=4.dp))
-                                }
-                                DropdownMenu(expanded = filterExpandedHoF, onDismissRequest = { filterExpandedHoF = false }) {
-                                    DropdownMenuItem(text = { Text("All-Time") }, onClick = { filterSeasonYearHoF = null; filterExpandedHoF = false })
-                                    DropdownMenuItem(text = { Text("${state.startYear}/${state.startYear+1} (Current)") }, onClick = { filterSeasonYearHoF = state.startYear; filterExpandedHoF = false })
-                                    state.historicalSeasons.forEach { s ->
-                                        DropdownMenuItem(text = { Text("${s.year}/${s.year+1}") }, onClick = { filterSeasonYearHoF = s.year; filterExpandedHoF = false })
-                                    }
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Name" + if(sortMode=="Name") "↓" else "", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, modifier = Modifier.weight(2f).clickable { sortMode = "Name" })
-                            Text("Apps" + if(sortMode=="Apps") "↓" else "", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).clickable { sortMode = "Apps" })
-                            Text("Gls" + if(sortMode=="Goals") "↓" else "", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).clickable { sortMode = "Goals" })
-                            Text("Ast" + if(sortMode=="Assists") "↓" else "", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f).clickable { sortMode = "Assists" })
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        
-                        val topPlayers = displayStatsHoF.sortedWith(compareByDescending<com.fctracker.career.Player> { when(sortMode) { "Apps" -> it.matchesPlayed.toDouble(); "Goals" -> it.goals.toDouble(); "Assists" -> it.assists.toDouble(); "Name" -> -it.displayName.hashCode().toDouble(); else -> it.averageRating } }).take(5)
-                        topPlayers.forEach { player ->
-                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(2f)) {
-                                    Box(modifier = Modifier.size(24.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                                        if (isValidPlayerHeadshot(player.headshotUrl)) {
-                                            coil.compose.SubcomposeAsyncImage(
-                                                model = player.headshotUrl,
-                                                contentDescription = player.displayName,
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                                                error = {
-                                                    Icon(Icons.Default.Person, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                                }
-                                            )
-                                        } else {
-                                            Icon(Icons.Default.Person, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("${player.displayName}", color = Color.White, fontSize = 12.sp)
-                                }
-                                Text("${player.matchesPlayed}", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-                                Text("${player.goals}", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-                                Text("${player.assists}", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-                            }
-                            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                        }
-                    }
-                }
-                item {
-                    DarkCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("Club Milestones & Record Holders", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                            Box {
-                                androidx.compose.material3.TextButton(onClick = { filterExpandedMilestones = true }) {
-                                    Text(if (filterSeasonYearMilestones == null) "All-Time" else if (filterSeasonYearMilestones == state.startYear) "${state.startYear}/${state.startYear+1} (Current)" else "${filterSeasonYearMilestones}/${filterSeasonYearMilestones!!+1}")
-                                    Text("▼", modifier = Modifier.padding(start=4.dp))
-                                }
-                                DropdownMenu(expanded = filterExpandedMilestones, onDismissRequest = { filterExpandedMilestones = false }) {
-                                    DropdownMenuItem(text = { Text("All-Time") }, onClick = { filterSeasonYearMilestones = null; filterExpandedMilestones = false })
-                                    DropdownMenuItem(text = { Text("${state.startYear}/${state.startYear+1} (Current)") }, onClick = { filterSeasonYearMilestones = state.startYear; filterExpandedMilestones = false })
-                                    state.historicalSeasons.forEach { s ->
-                                        DropdownMenuItem(text = { Text("${s.year}/${s.year+1}") }, onClick = { filterSeasonYearMilestones = s.year; filterExpandedMilestones = false })
-                                    }
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        
-                        val mostApps = displayStatsMilestones.maxByOrNull { it.matchesPlayed }
-                        val topScorer = displayStatsMilestones.maxByOrNull { it.goals }
-                        val topAssists = displayStatsMilestones.maxByOrNull { it.assists }
-                        val highestAvg = displayStatsMilestones.filter { it.matchesPlayed > 0 }.maxByOrNull { it.averageRating }
-                        
-                        val allTransfersPool = remember(state.transfers, state.historicalSeasons) {
-                            state.transfers + state.historicalSeasons.flatMap { it.transfers }
-                        }
-                        val recordSigning = allTransfersPool.filter { it.type.contains("In", ignoreCase = true) || it.type.equals("Bought", ignoreCase = true) }.maxByOrNull { it.feeM }
-                        val recordSale = allTransfersPool.filter { it.type.contains("Out", ignoreCase = true) || it.type.equals("Sold", ignoreCase = true) }.maxByOrNull { it.feeM }
-                        
-                        com.fctracker.career.ui.screens.RecordCardWithImage("Most Appearances", mostApps?.displayName ?: "-", mostApps?.matchesPlayed?.toString() ?: "0", mostApps?.headshotUrl ?: "")
-                        Spacer(Modifier.height(8.dp))
-                        com.fctracker.career.ui.screens.RecordCardWithImage("All-Time Top Scorer", topScorer?.displayName ?: "-", topScorer?.goals?.toString() ?: "0", topScorer?.headshotUrl ?: "")
-                        Spacer(Modifier.height(8.dp))
-                        com.fctracker.career.ui.screens.RecordCardWithImage("All-Time Top Assists", topAssists?.displayName ?: "-", topAssists?.assists?.toString() ?: "0", topAssists?.headshotUrl ?: "")
-                        Spacer(Modifier.height(8.dp))
-                        RecordCard("Record Signing", recordSigning?.playerName ?: "-", state.currencySymbol + (recordSigning?.feeM?.toString() ?: "0") + "M")
-                        Spacer(Modifier.height(8.dp))
-                        RecordCard("Record Sale", recordSale?.playerName ?: "-", state.currencySymbol + (recordSale?.feeM?.toString() ?: "0") + "M")
-                    }
-                }
-                item {
-                    DarkCard(modifier = Modifier.fillMaxWidth()) {
-                        Text("All-Time Squad List", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                        Spacer(modifier = Modifier.height(12.dp))
-                        allTimeStats.forEach { player ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp)
-                                    .clickable { selectedPlayer = player },
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box(
-                                        modifier = Modifier.size(32.dp).clip(CircleShape).background(if (player.status == "Sold" || player.status == "Loaned Out") MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (isValidPlayerHeadshot(player.headshotUrl)) {
-                                            coil.compose.SubcomposeAsyncImage(
-                                                model = player.headshotUrl,
-                                                contentDescription = player.displayName,
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                                                error = {
-                                                    Icon(Icons.Default.Person, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-                                                }
-                                            )
-                                        } else {
-                                            Icon(Icons.Default.Person, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Column {
-                                        val isPromotedActive = player.isPromoted && (player.promotedSeasonYear == null || (state.startYear - (player.promotedSeasonYear ?: state.startYear)) < 3)
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(player.displayName, color = Color.White, fontSize = 14.sp)
-                                            if (isPromotedActive) {
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Box(
-                                                    modifier = Modifier
-                                                        .background(Color(0xFF047857), RoundedCornerShape(4.dp))
-                                                        .border(0.5.dp, Color(0xFF6EE7B7), RoundedCornerShape(4.dp))
-                                                        .padding(horizontal = 4.dp, vertical = 1.dp)
-                                                ) {
-                                                    Text("PROMOTED", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                                }
-                                            }
-                                        }
-                                        Text(player.status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
-                                    }
-                                }
-                                Text("OVR ${player.overall}", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                            }
-                            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                        }
-                    }
-                }
-                item {
-                    Button(onClick = { /* Export */ }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Export Career Summary Text")
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Button(onClick = { showGraphicCard = true }, modifier = Modifier.fillMaxWidth()) { Text("Generate Career Graphic Card") }
-                    Spacer(Modifier.height(80.dp))
-                }
-            }
-        }
-    }
-
-    if (showGraphicCard) {
-        androidx.compose.ui.window.Dialog(onDismissRequest = { showGraphicCard = false }) {
-            androidx.compose.foundation.layout.Box(
-                modifier = androidx.compose.ui.Modifier
-                    .fillMaxWidth()
-                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
-                    .background(androidx.compose.material3.MaterialTheme.colorScheme.primary)
-                    .padding(2.dp)
-            ) {
-                androidx.compose.foundation.layout.Column(
-                    modifier = androidx.compose.ui.Modifier
-                        .fillMaxWidth()
-                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(14.dp))
-                        .background(androidx.compose.material3.MaterialTheme.colorScheme.surface)
-                        .padding(24.dp),
-                    horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
-                ) {
-                    androidx.compose.material3.Text("CAREER SUMMARY", fontSize = 12.sp, color = androidx.compose.material3.MaterialTheme.colorScheme.primary, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 2.sp)
-                    Spacer(Modifier.height(8.dp))
-                    androidx.compose.material3.Text(state.managerName.uppercase(), fontSize = 24.sp, color = Color.White, fontWeight = androidx.compose.ui.text.font.FontWeight.Black)
-                    androidx.compose.material3.Text("${state.clubName} Manager", fontSize = 16.sp, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(24.dp))
-                    Row(horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(state.seasonRecord, fontSize = 20.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                            Text("All-Time Record", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("${state.currencySymbol}${state.squadValue}M", fontSize = 20.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                            Text("Squad Value", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                    Spacer(Modifier.height(24.dp))
-                    Button(onClick = { showGraphicCard = false }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Close")
                     }
                 }
             }
         }
+        item {
+            FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 12.dp) {
+                SectionHeader("Overall manager statistics", icon = Icons.Default.ShowChart)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatTile("League titles", "${CareerFacts.leagueTitles(state)}", Modifier.weight(1f), size = 26.sp)
+                    StatTile("Domestic cups", "${trophies.count { CareerFacts.isCup(it) }}", Modifier.weight(1f), size = 26.sp)
+                    StatTile("Continental", "${trophies.count { CareerFacts.isContinental(it) }}", Modifier.weight(1f), size = 26.sp)
+                }
+                KeyValue("Matches", "${all.played}")
+                KeyValue("Wins", "${all.won}", c.good)
+                KeyValue("Draws", "${all.drawn}", c.warn)
+                KeyValue("Losses", "${all.lost}", c.bad)
+                KeyValue("Goals", "${all.goalsFor}–${all.goalsAgainst}")
+                if (all.played > 0) KeyValue("Win rate", "${(all.won * 100 / all.played)}%")
+                FcLabel("ALL-TIME HOME VS AWAY")
+                HomeAwayTable(SeasonFacts.home(matches), SeasonFacts.away(matches))
+            }
+        }
+        item {
+            FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
+                SectionHeader("Hall of fame (best players)", icon = Icons.Default.Star)
+                FcSelectField("Season", labelOf(hofSeason), seasonOptions, { hofSeason = seasonOf(it) })
+                val w = listOf(1f, 0.26f, 0.24f, 0.24f, 0.28f)
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp)) {
+                    listOf("NAME", "APPS", "GLS", "AST", "AVG").forEachIndexed { i, h ->
+                        FcLabel(h, Modifier.weight(w[i]).clickable { sort = i }, color = if (sort == i) c.accent else c.muted)
+                    }
+                }
+                HRule()
+                val rows = when (sort) {
+                    0 -> hof.sortedBy { it.player.displayName }
+                    2 -> hof.sortedByDescending { it.goals }
+                    3 -> hof.sortedByDescending { it.assists }
+                    4 -> hof.filter { it.apps >= 5 }.sortedByDescending { it.average }
+                    else -> hof.sortedByDescending { it.apps }
+                }.take(10)
+                if (rows.isEmpty()) Muted("No appearances recorded yet.", 12.sp)
+                rows.forEach { t ->
+                    Row(Modifier.fillMaxWidth().clickable { openPlayer(t.player.id) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                        FcText(t.player.displayName, 13.sp, FontWeight.SemiBold, modifier = Modifier.weight(w[0]), maxLines = 1)
+                        Mono("${t.apps}", 13.sp, modifier = Modifier.weight(w[1]), align = TextAlign.End)
+                        Mono("${t.goals}", 13.sp, modifier = Modifier.weight(w[2]), align = TextAlign.End)
+                        Mono("${t.assists}", 13.sp, modifier = Modifier.weight(w[3]), align = TextAlign.End)
+                        Mono(if (t.average > 0) String.format(java.util.Locale.US, "%.1f", t.average) else "–", 13.sp, modifier = Modifier.weight(w[4]), align = TextAlign.End)
+                    }
+                    HRule()
+                }
+                Muted("Average rating counts players with 5 or more appearances.", 11.sp)
+            }
+        }
+        item {
+            FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
+                SectionHeader("Club milestones & record holders", icon = Icons.Default.TrackChanges)
+                FcSelectField("Season", labelOf(recordSeason), seasonOptions, { recordSeason = seasonOf(it) })
+                val pool = if (recordSeason == null) state.transfers + state.historicalSeasons.flatMap { it.transfers }
+                    else if (recordSeason == state.startYear) state.transfers else state.historicalSeasons.firstOrNull { it.year == recordSeason }?.transfers.orEmpty()
+                records.maxByOrNull { it.apps }?.takeIf { it.apps > 0 }?.let { KeyValue("Most appearances", "${it.player.displayName} · ${it.apps}", mono = false) }
+                records.maxByOrNull { it.goals }?.takeIf { it.goals > 0 }?.let { KeyValue(if (recordSeason == null) "All-time top scorer" else "Top scorer", "${it.player.displayName} · ${it.goals}", mono = false) }
+                records.maxByOrNull { it.assists }?.takeIf { it.assists > 0 }?.let { KeyValue(if (recordSeason == null) "All-time top assists" else "Top assists", "${it.player.displayName} · ${it.assists}", mono = false) }
+                records.filter { it.apps >= 5 }.maxByOrNull { it.average }?.takeIf { it.average > 0 }?.let { KeyValue("Best average rating", "${it.player.displayName} · ${String.format(java.util.Locale.US, "%.1f", it.average)}", mono = false) }
+                pool.filter { it.isIncomingDeal() && it.feeM > 0 }.maxByOrNull { it.feeM }?.let { KeyValue("Record signing", "${it.playerName} · ${it.feeLabel(state.currencySymbol)}", mono = false) }
+                pool.filter { !it.isIncomingDeal() && it.type != "Retirement" && it.feeM > 0 }.maxByOrNull { it.feeM }?.let { KeyValue("Record sale", "${it.playerName} · ${it.feeLabel(state.currencySymbol)}", mono = false) }
+                SeasonFacts.bestWin(if (recordSeason == null) matches else if (recordSeason == state.startYear) state.recentMatches else state.historicalSeasons.firstOrNull { it.year == recordSeason }?.matches.orEmpty())?.let {
+                    KeyValue("Biggest win", "${it.goalsFor}–${it.goalsAgainst} ${if (it.isHome) "vs" else "at"} ${it.opponentName}", mono = false)
+                }
+                val ms = (state.historicalSeasons.filter { recordSeason == null || it.year == recordSeason }.flatMap { it.milestones } + if (recordSeason == null || recordSeason == state.startYear) state.milestones else emptyList()).takeLast(5)
+                if (ms.isNotEmpty()) {
+                    HRule()
+                    ms.reversed().forEach { m -> KeyValue(m.playerName.ifBlank { state.clubName }, m.title.substringAfter(": "), mono = false) }
+                }
+            }
+        }
+        item { SectionHeader("All-time squad list", sub = "Tap a player to open his profile", icon = Icons.Default.Groups) }
+        item {
+            RowsCard {
+                val list = allTime.sortedByDescending { it.apps }
+                if (list.isEmpty()) Muted("Nobody has played yet.", 12.sp, Modifier.padding(14.dp))
+                list.forEachIndexed { i, t ->
+                    if (i > 0) RowDivider()
+                    val p = t.player
+                    val away = p.status == "Sold" || p.status == "Loaned Out" || p.status == "Retired" || p.status == "Released"
+                    Row(Modifier.fillMaxWidth().clickable { openPlayer(p.id) }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Headshot(p.headshotUrl, p.displayName, 42.dp, youth = p.isPromoted)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                FcText(p.displayName, 14.sp, FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                                if (p.isPromoted) Tag("Academy", Tone.GOOD)
+                                if (away) Tag(p.status, if (p.status == "Sold") Tone.BAD else Tone.INFO)
+                            }
+                            Muted("${t.apps} apps · ${t.goals} goals · ${t.assists} assists", 12.sp)
+                        }
+                        OvrBadge(p.overall, 36.dp)
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = c.muted, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                FcButton("Export career summary text", {
+                    val text = CareerFacts.exportText(state)
+                    val send = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_SUBJECT, "${state.clubName} career summary"); putExtra(Intent.EXTRA_TEXT, text) }
+                    context.startActivity(Intent.createChooser(send, "Career summary"))
+                }, kind = ButtonKind.SECONDARY, icon = Icons.Default.Download, full = true)
+                FcButton("Generate career graphic card", { card = true }, icon = Icons.Default.Share, full = true)
+            }
+        }
     }
 
+    if (card) CareerCardDialog(state, all, onDismiss = { card = false })
 }
 
+/** The career card: an image in the club's colours with the record and the trophies, to share. */
 @Composable
-fun RecordCard(title: String, holder: String, value: String) {
-    Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp)) {
-        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column {
-                Text(title, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(holder, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+private fun CareerCardDialog(state: AppState, all: com.fctracker.career.logic.Split, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val c = FcTheme.colors
+    val trophies = CareerFacts.trophies(state)
+    val page = remember(state) {
+        RecapPage(1, "Career", state.managerName, listOfNotNull(
+            RecapBlock.Label("Career summary"),
+            RecapBlock.Big("${all.won}W ${all.drawn}D ${all.lost}L", "${state.clubName} manager · ${state.historicalSeasons.size + 1} seasons"),
+            RecapBlock.Figures(listOf("League titles" to "${CareerFacts.leagueTitles(state)}", "Cups" to "${trophies.count { CareerFacts.isCup(it) }}", "Europe" to "${trophies.count { CareerFacts.isContinental(it) }}")),
+            RecapBlock.Rule,
+            RecapBlock.Line("Squad value", "${state.currencySymbol}${String.format(java.util.Locale.US, "%.1f", state.squadValue)}M"),
+            RecapBlock.Line("Goals", "${all.goalsFor}–${all.goalsAgainst}"),
+            state.historicalSeasons.maxByOrNull { it.year }?.let { RecapBlock.Line("Last season", "${Milestones.ordinal(it.finalPosition)} in the ${it.leagueName}") },
+            trophies.takeIf { it.isNotEmpty() }?.let { RecapBlock.Line("Trophies", it.take(4).joinToString(", ")) },
+            CareerFacts.totals(state).maxByOrNull { it.goals }?.takeIf { it.goals > 0 }?.let { RecapBlock.Person(it.player.displayName, "Top scorer of the career", "${it.goals}", headshotUrl = it.player.headshotUrl) }
+        ))
+    }
+    var image by remember { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(page) {
+        val style = RecapRenderer.style(context, state.primaryColorHex, state.secondaryColorHex)
+        val assets = withContext(Dispatchers.IO) { RecapRenderer.loadAssets(context, state, listOf(page)) }
+        image = withContext(Dispatchers.Default) { RecapRenderer.render(page, 1, "${state.clubName} · ${SeasonView.seasonLabel(state.startYear)}", state.clubName, style, assets) }
+    }
+    FcDialog("Career card", onDismiss, actions = {
+        FcButton("Close", onDismiss, kind = ButtonKind.SECONDARY, small = true)
+        FcButton("Share", {
+            val bmp = image ?: return@FcButton
+            scope.launch {
+                val uri = withContext(Dispatchers.IO) { RecapShare.clear(context); RecapShare.savePng(context, bmp, "career-card.png") }
+                RecapShare.shareImages(context, listOf(uri), "${state.clubName} career card")
             }
-            Text(value, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+        }, icon = Icons.Default.Share, small = true, enabled = image != null)
+    }) {
+        val bmp = image
+        if (bmp == null) {
+            Row(Modifier.fillMaxWidth().aspectRatio(0.8f), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(color = c.accent, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
+            }
+        } else {
+            Image(bmp.asImageBitmap(), contentDescription = "Career card: ${state.managerName}, ${all.won} wins, ${all.drawn} draws, ${all.lost} losses", modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)))
         }
     }
 }
-
-
