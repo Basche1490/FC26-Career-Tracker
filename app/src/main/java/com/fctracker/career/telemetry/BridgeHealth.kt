@@ -34,6 +34,8 @@ class ScriptState(
     val careerDate: String = "",
     val exporter: Boolean = false,
     val ageSeconds: Long = 0,
+    /** Alive, but the game has not run the script for a while (in a match or a menu): the bridge sees it holds its file. */
+    val quiet: Boolean = false,
     val undelivered: Int = 0,
     val resend: ResendResult? = null
 )
@@ -79,6 +81,7 @@ class BridgeStatus(
                     careerDate = s.optString("careerDate"),
                     exporter = s.optBoolean("exporter", false),
                     ageSeconds = s.optLong("ageSeconds", 0),
+                    quiet = s.optBoolean("quiet", false),
                     undelivered = s.optInt("undelivered", 0),
                     resend = if (r == null) null else ResendResult(r.optString("id"), r.optString("result"), r.optString("detail"))
                 )
@@ -278,7 +281,9 @@ object HealthModel {
             )
             else -> HealthStep(
                 "script", "Capture script", StepState.OK,
-                "Running" + (if (script.club.isNotBlank()) " for ${script.club}" else "") + ", version ${script.version}"
+                "Running" + (if (script.club.isNotBlank()) " for ${script.club}" else "") + ", version ${script.version}" +
+                    // the game runs the script on career events only: in a match or a menu it waits
+                    if (script.quiet) ". Waiting for the game: it carries on with your next career action." else ""
             )
         }
         steps.add(scriptStep)

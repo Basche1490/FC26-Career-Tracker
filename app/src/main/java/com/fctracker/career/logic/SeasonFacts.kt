@@ -53,6 +53,10 @@ object SeasonFacts {
         .sortedWith(compareBy<IndexedValue<MatchResult>> { it.value.matchDate }.thenByDescending { it.index })
         .map { it.value }
 
+    /** More than any player plays or scores in one season (a card above it holds career totals). */
+    const val MAX_SEASON_APPS = 75
+    const val MAX_SEASON_GOALS = 100
+
     fun bestWin(matches: List<MatchResult>): MatchResult? = matches.filter { it.goalsFor > it.goalsAgainst }
         .maxWithOrNull(compareBy<MatchResult> { it.goalsFor - it.goalsAgainst }.thenBy { it.goalsFor })
 
@@ -95,7 +99,8 @@ object SeasonFacts {
     // -- players --------------------------------------------------------------------------------------------------
 
     private fun matchesPlayer(perfId: String, perfName: String?, p: Player): Boolean =
-        perfId == p.id || (!perfName.isNullOrBlank() && (perfName.equals(p.name, true) || perfName.equals(p.displayName, true)))
+        perfId == p.id || (p.gamePlayerId != null && perfId == p.gamePlayerId.toString()) ||
+            (!perfName.isNullOrBlank() && (perfName.equals(p.name, true) || perfName.equals(p.displayName, true)))
 
     /**
      * A player's totals. Three sources can know about the same match: the match logs (lineups), the counters on the
@@ -132,13 +137,25 @@ object SeasonFacts {
             p.averageRating > 0 -> p.averageRating
             else -> gAvg
         }
+        // The counters on a card can hold more than one season (a career imported with career totals). A counter that no
+        // single season could hold, or far beyond what the club played and scored in the matches known for it, is not
+        // believed; a little more than the logged matches is (a match that was not logged still counts).
+        val clubGoals = matches.sumOf { it.goalsFor }
+        fun believable(card: Int, known: Int, absolute: Int, slack: Int): Int = when {
+            card > absolute -> 0
+            matches.isNotEmpty() && card > known * 3 / 2 + slack -> 0
+            else -> card
+        }
+        val cardApps = believable(p.matchesPlayed, maxOf(matches.size, gApps), MAX_SEASON_APPS, 10)
+        val cardGoals = believable(p.goals, maxOf(clubGoals, gGoals), MAX_SEASON_GOALS, 5)
+        val cardAssists = believable(p.assists, maxOf(clubGoals, gAssists), MAX_SEASON_GOALS, 5)
         return PlayerTotals(
             player = p,
-            appearances = maxOf(apps, p.matchesPlayed, gApps),
+            appearances = maxOf(apps, cardApps, gApps),
             starts = starts,
             subApps = subs,
-            goals = maxOf(goals, p.goals, gGoals),
-            assists = maxOf(assists, p.assists, gAssists),
+            goals = maxOf(goals, cardGoals, gGoals),
+            assists = maxOf(assists, cardAssists, gAssists),
             motm = maxOf(motm, gMotm),
             cleanSheets = maxOf(cs, gCs),
             yellowCards = maxOf(yc, gYc),
@@ -148,8 +165,9 @@ object SeasonFacts {
         )
     }
 
+    /** Every player's totals; a player listed twice (in the squad and the academy) is counted once. */
     fun allTotals(players: List<Player>, matches: List<MatchResult>, gameStats: List<PlayerSeasonStat> = emptyList()): List<PlayerTotals> =
-        players.map { totals(it, matches, gameStats) }
+        players.distinctBy { it.gamePlayerId?.let { g -> "g$g" } ?: it.id }.map { totals(it, matches, gameStats) }
 
     /** The best average rating among players with at least a third of the matches (and at least 3). */
     fun playerOfSeason(totals: List<PlayerTotals>, matchesPlayed: Int): PlayerTotals? {

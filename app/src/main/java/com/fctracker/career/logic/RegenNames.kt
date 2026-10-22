@@ -1,6 +1,7 @@
 package com.fctracker.career.logic
 
 import com.fctracker.career.AppState
+import com.fctracker.career.MatchResult
 import com.fctracker.career.Player
 import com.fctracker.career.TransferLog
 
@@ -57,11 +58,45 @@ object PlayerRepair {
         return out
     }
 
+    /**
+     * Line-up rows, scorers and substitutes that a match stored under the game's id (the squad card did not know that id
+     * yet, or the game gave no name) are linked to the squad card with that id. Shown as "Unknown player" before.
+     */
+    fun linkMatches(matches: List<MatchResult>, players: List<Player>): List<MatchResult> {
+        val byGame = players.mapNotNull { p -> p.gamePlayerId?.let { it.toString() to p.id } }.toMap()
+        if (byGame.isEmpty() || matches.isEmpty()) return matches
+        val ids = players.map { it.id }.toSet()
+        fun link(id: String?): String? = if (id == null || id in ids) id else byGame[id] ?: id
+        var changed = false
+        val out = matches.map { m ->
+            val perfs = m.playerPerformances.map { pp ->
+                val pid = link(pp.playerId) ?: pp.playerId
+                val assisters = pp.goalAssisters.map { link(it) }
+                if (pid != pp.playerId || assisters != pp.goalAssisters) pp.copy(playerId = pid, goalAssisters = assisters) else pp
+            }.distinctBy { it.playerId }
+            val goals = m.goalDetails.map { g ->
+                val s = link(g.scorerId); val a = link(g.assisterId)
+                if (s != g.scorerId || a != g.assisterId) g.copy(scorerId = s, assisterId = a) else g
+            }
+            val subs = m.substitutions.map { sb ->
+                val o = link(sb.playerOutId) ?: sb.playerOutId; val i = link(sb.playerInId) ?: sb.playerInId
+                if (o != sb.playerOutId || i != sb.playerInId) sb.copy(playerOutId = o, playerInId = i) else sb
+            }
+            if (perfs != m.playerPerformances || goals != m.goalDetails || subs != m.substitutions) {
+                changed = true
+                m.copy(playerPerformances = perfs, goalDetails = goals, substitutions = subs)
+            } else m
+        }
+        return if (changed) out else matches
+    }
+
     fun repair(state: AppState, lookup: PlayerLookup): AppState {
         val year = state.startYear
+        val players = state.players.map { card(it, lookup, year, fix = true) }
         val next = state.copy(
-            players = state.players.map { card(it, lookup, year, fix = true) },
+            players = players,
             academyPlayers = state.academyPlayers.map { card(it, lookup, year, fix = true) },
+            recentMatches = linkMatches(state.recentMatches, players + state.academyPlayers),
             historicalSeasons = state.historicalSeasons.map { h ->
                 h.copy(players = h.players.map { card(it, lookup, h.year, fix = false) }, academyPlayers = h.academyPlayers.map { card(it, lookup, h.year, fix = false) })
             }

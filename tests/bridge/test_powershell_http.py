@@ -112,7 +112,7 @@ class PowerShellHttpTest(unittest.TestCase):
         code, body = self.request("GET", "/")
         text = body.decode("utf-8")
         self.assertEqual(200, code)
-        for needle in ("Self check", "Re-send last match", "refreshStatus", "v3.1.0", "Pairing code", "New pairing code"):
+        for needle in ("Self check", "Re-send last match", "refreshStatus", "v3.2.0", "Pairing code", "New pairing code"):
             self.assertIn(needle, text)
         self.assertNotIn("$BridgeVersion", text)
 

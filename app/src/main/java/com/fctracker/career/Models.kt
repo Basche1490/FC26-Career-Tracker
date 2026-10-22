@@ -400,7 +400,9 @@ data class TransferLog(
  */
 fun TransferLog.isIncomingDeal(): Boolean {
     val t = type.trim().lowercase()
-    return t.startsWith("in") || t == "bought" || t == "free agent sign" || t.startsWith("promoted") || t == "loaned in"
+    return t.startsWith("in") || t == "bought" || t == "free agent sign" || t.startsWith("promoted") || t == "loaned in" ||
+        // other ways an imported career names a signing
+        t == "signed" || t == "signing" || t == "purchase" || t == "purchased" || t == "transfer in" || t == "loan in" || t == "free agent"
 }
 
 /**

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.TrackChanges
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -48,6 +49,7 @@ import com.fctracker.career.MatchResult
 import com.fctracker.career.Player
 import com.fctracker.career.feeLabel
 import com.fctracker.career.isIncomingDeal
+import com.fctracker.career.logic.Dates
 import com.fctracker.career.logic.Milestones
 import com.fctracker.career.logic.RecapBlock
 import com.fctracker.career.logic.RecapPage
@@ -62,6 +64,7 @@ import com.fctracker.career.ui.components.FcPage
 import com.fctracker.career.ui.components.FcSelectField
 import com.fctracker.career.ui.components.FcText
 import com.fctracker.career.ui.components.FcTopBar
+import com.fctracker.career.ui.components.Figure
 import com.fctracker.career.ui.components.HRule
 import com.fctracker.career.ui.components.Headshot
 import com.fctracker.career.ui.components.KeyValue
@@ -110,6 +113,10 @@ object CareerFacts {
     }
 
     fun allMatches(state: AppState): List<MatchResult> = state.historicalSeasons.flatMap { it.matches } + state.recentMatches
+
+    /** The season label of a match ("2028/29"): the archived season that holds it, else the current one. */
+    fun seasonOf(state: AppState, m: MatchResult): String =
+        SeasonView.seasonLabel(state.historicalSeasons.firstOrNull { h -> h.matches.any { it.id == m.id } }?.year ?: state.startYear)
 
     /** Every trophy won, once each (the trophy list plus the trophies of archived seasons). */
     fun trophies(state: AppState): List<String> = (state.teamTrophies.map { it.name } + state.historicalSeasons.flatMap { it.trophies }).map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
@@ -193,14 +200,18 @@ fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, openP
                         }
                         if (gold) Icon(Icons.Default.EmojiEvents, null, tint = c.warn, modifier = Modifier.size(24.dp))
                     }
-                    val deals = h.transfers.filter { it.type != "Retirement" }.sortedByDescending { it.feeM }.take(3)
+                    // one line per player and direction: a deal the game and the person both recorded is shown once
+                    val deals = h.transfers.filter { it.type != "Retirement" }
+                        .groupBy { com.fctracker.career.logic.PlayerCards.normalize(com.fctracker.career.logic.PlayerNames.shown(it.playerName)) + "|" + it.isIncomingDeal() }
+                        .map { (_, same) -> same.maxByOrNull { it.feeM }!! }
+                        .sortedByDescending { it.feeM }.take(3)
                     if (deals.isNotEmpty()) {
                         FcLabel("TOP TRANSFERS & KEY DEALS")
                         deals.forEach { t ->
                             val inc = t.isIncomingDeal()
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Tag(if (inc) "SIGNING" else "SALE", if (inc) Tone.INFO else Tone.GOOD)
-                                FcText(t.playerName + if (t.fromToClub.isNotBlank() && t.fromToClub != "Transfer Market") " (${t.fromToClub})" else "", 12.sp, modifier = Modifier.weight(1f), maxLines = 1)
+                                FcText(com.fctracker.career.logic.PlayerNames.shown(t.playerName) + if (t.fromToClub.isNotBlank() && t.fromToClub != "Transfer Market") " (${t.fromToClub})" else "", 12.sp, modifier = Modifier.weight(1f), maxLines = 1)
                                 FcText(t.feeLabel(state.currencySymbol), 12.sp, FontWeight.Bold)
                             }
                         }
@@ -222,6 +233,8 @@ fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, openP
                 KeyValue("Losses", "${all.lost}", c.bad)
                 KeyValue("Goals", "${all.goalsFor}–${all.goalsAgainst}")
                 if (all.played > 0) KeyValue("Win rate", "${(all.won * 100 / all.played)}%")
+                SeasonFacts.bestWin(matches)?.let { BiggestResult("Biggest win", it, state, c.good) }
+                SeasonFacts.heaviestDefeat(matches)?.let { BiggestResult("Biggest loss", it, state, c.bad) }
                 FcLabel("ALL-TIME HOME VS AWAY")
                 HomeAwayTable(SeasonFacts.home(matches), SeasonFacts.away(matches))
             }
@@ -233,7 +246,10 @@ fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, openP
                 val w = listOf(1f, 0.26f, 0.24f, 0.24f, 0.28f)
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp)) {
                     listOf("NAME", "APPS", "GLS", "AST", "AVG").forEachIndexed { i, h ->
-                        FcLabel(h, Modifier.weight(w[i]).clickable { sort = i }, color = if (sort == i) c.accent else c.muted)
+                        // the number columns are right-aligned, as their figures are
+                        Text(h, Modifier.weight(w[i]).clickable { sort = i }, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.9.sp,
+                            color = if (sort == i) c.accent else c.muted, fontFamily = com.fctracker.career.ui.theme.PlexMono, maxLines = 1,
+                            textAlign = if (i == 0) TextAlign.Start else TextAlign.End)
                     }
                 }
                 HRule()
@@ -283,21 +299,32 @@ fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, openP
         item { SectionHeader("All-time squad list", sub = "Tap a player to open his profile", icon = Icons.Default.Groups) }
         item {
             RowsCard {
-                val list = allTime.sortedByDescending { it.apps }
+                // strikers first, goalkeepers last; within a position the most appearances first
+                val list = allTime.sortedWith(compareBy<CareerTotals>({ LineupOrder.rank(it.player.primaryPosition) }, { LineupOrder.side(it.player.primaryPosition) })
+                    .thenByDescending { it.apps })
+                val here = (state.players + state.academyPlayers).flatMap { listOfNotNull(it.id, it.gamePlayerId?.let { g -> "g$g" }) }.toSet()
                 if (list.isEmpty()) Muted("Nobody has played yet.", 12.sp, Modifier.padding(14.dp))
                 list.forEachIndexed { i, t ->
                     if (i > 0) RowDivider()
                     val p = t.player
-                    val away = p.status == "Sold" || p.status == "Loaned Out" || p.status == "Retired" || p.status == "Released"
+                    val gone = p.id !in here && (p.gamePlayerId == null || "g${p.gamePlayerId}" !in here)
+                    val leftTag = when {
+                        p.status.equals("Sold", true) -> "Sold"
+                        p.status.equals("Retired", true) -> "Retired"
+                        p.status.equals("Released", true) -> "Released"
+                        p.status.equals("Loaned Out", true) || p.isLoanedOut || p.loanDirection == "out" -> "On loan"
+                        gone -> "Left the club"
+                        else -> null
+                    }
                     Row(Modifier.fillMaxWidth().clickable { openPlayer(p.id) }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Headshot(p.headshotUrl, p.displayName, 42.dp, youth = p.isPromoted)
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                                 FcText(p.displayName, 14.sp, FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
                                 if (p.isPromoted) Tag("Academy", Tone.GOOD)
-                                if (away) Tag(p.status, if (p.status == "Sold") Tone.BAD else Tone.INFO)
+                                if (leftTag != null) Tag(leftTag, if (leftTag == "On loan") Tone.INFO else Tone.MUTED)
                             }
-                            Muted("${t.apps} apps · ${t.goals} goals · ${t.assists} assists", 12.sp)
+                            Muted("${p.primaryPosition} · ${t.apps} apps · ${t.goals} goals · ${t.assists} assists", 12.sp)
                         }
                         OvrBadge(p.overall, 36.dp)
                         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = c.muted, modifier = Modifier.size(18.dp))
@@ -318,6 +345,22 @@ fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, openP
     }
 
     if (card) CareerCardDialog(state, all, onDismiss = { card = false })
+}
+
+/** "Biggest win: 5–0 vs Leeds United (home) · 12 Oct 2028 · 2028/29 · EFL Championship". */
+@Composable
+private fun BiggestResult(label: String, m: MatchResult, state: AppState, tint: androidx.compose.ui.graphics.Color) {
+    val c = FcTheme.colors
+    val season = CareerFacts.seasonOf(state, m)
+    val league = com.fctracker.career.logic.Competitions.isLeagueFn(state.leagueName)(m.competition)
+    Column(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            FcText(label, 13.sp, color = c.muted, modifier = Modifier.weight(1f))
+            Figure("${m.goalsFor}–${m.goalsAgainst}", 18.sp, tint, FontWeight.SemiBold)
+        }
+        FcText("${if (m.isHome) "vs" else "at"} ${m.opponentName} (${if (m.isHome) "home" else "away"})", 14.sp, FontWeight.SemiBold, maxLines = 1)
+        Muted(listOf(Dates.full(m.matchDate), season, m.competition + (if (league) " (league)" else if (m.stage.isNotBlank()) " · ${m.stage}" else "")).filter { it.isNotBlank() }.joinToString(" · "), 12.sp)
+    }
 }
 
 /** The career card: an image in the club's colours with the record and the trophies, to share. */

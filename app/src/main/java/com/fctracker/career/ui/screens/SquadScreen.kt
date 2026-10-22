@@ -275,15 +275,6 @@ private fun FormationHeader(viewModel: MainViewModel, state: AppState, console: 
             }, kind = ButtonKind.SECONDARY, icon = Icons.Default.Sync, full = true)
             Muted(message ?: "Copies the starting XI, the bench and the shirt numbers you picked in FC 26 (PC only).", 11.sp)
         }
-        FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 8.dp) {
-            SectionHeader("Moving players", icon = Icons.Default.Groups)
-            listOf(
-                "Drag a player anywhere on the pitch. He stays exactly where you drop him.",
-                "Drop a bench player on a pitch player and they swap: the pitch player goes to the bench.",
-                "Drag a pitch player off the pitch to put him on the bench.",
-                "A new formation template keeps everyone as close to his own position as it can: the keeper stays in goal, defenders at the back, forwards up front."
-            ).forEach { com.fctracker.career.ui.components.Bullet(it) }
-        }
     }
 }
 
@@ -357,13 +348,6 @@ private fun WagesList(viewModel: MainViewModel, state: AppState, view: SeasonVie
             }
         }
         item { Muted("A loan player shows the share of his wage you pay.", 11.sp) }
-        item {
-            FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
-                SectionHeader("Squad roles", icon = Icons.Default.Groups)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { ROLE_TONE.forEach { (k, v) -> Tag(k, v) } }
-                Muted("The role you promised each player in the game. A player who plays much less than promised may ask to leave.", 11.sp)
-            }
-        }
     }
     if (editBudget) {
         var text by remember { mutableStateOf(if (budget > 0) budget.toInt().toString() else "") }
@@ -408,6 +392,7 @@ private fun InjuriesList(viewModel: MainViewModel, state: AppState, view: Season
                 injured.forEachIndexed { i, p ->
                     if (i > 0) RowDivider()
                     val missed = CareerOps.matchesMissed(p, view.matches, today)
+                    val toMiss = if (view.isArchived) 0 else CareerOps.matchesToMiss(p, CareerOps.upcoming(state), today)
                     Row(Modifier.fillMaxWidth().clickable { editing = p }.padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         NumberedHeadshot(p.headshotUrl, p.displayName, p.number, 42.dp)
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -421,13 +406,14 @@ private fun InjuriesList(viewModel: MainViewModel, state: AppState, view: Season
                         }
                         Column(horizontalAlignment = Alignment.End) {
                             Figure("$missed", 20.sp, c.bad, FontWeight.SemiBold)
-                            Muted("missed", 11.sp)
+                            Muted(if (missed == 1) "match missed" else "matches missed", 11.sp)
+                            if (toMiss > 0) Muted("$toMiss more to miss", 11.sp)
                         }
                     }
                 }
             }
         }
-        item { Muted("Tap an injury to change it, for example when he needs longer than the game says. Matches missed counts the league and cup matches played while he was out.", 11.sp) }
+        item { Muted("Tap an injury to change it, for example when he needs longer than the game says. Matches missed counts the league and cup matches played while he was out; \"more to miss\" counts the fixtures before he is back.", 11.sp) }
         if (!console) item { Muted("The game keeps every player's latest injury, the day it happened and how many days it lasts; a player stays on this list until those days have run out.", 11.sp) }
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {

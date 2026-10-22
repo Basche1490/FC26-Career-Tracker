@@ -1,4 +1,4 @@
--- FC26 AutoCapture v2.11.0 (Precision Live Telemetry & Atlas Tracker)
+-- FC26 AutoCapture v2.12.0 (Precision Live Telemetry & Atlas Tracker)
 -- Complete support for EFL Championship, Premier League, FA Cup, Carabao Cup, Play-offs.
 -- Gathers REAL in-game data: Real League Position, Real Lineups, Real Goal Scorers, Real MOTM.
 -- Strict League Rules: League matches NEVER have extra time or penalty shootouts.
@@ -26,7 +26,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "2.11.0"
+local VERSION = "2.12.0"
 local SCRIPT_INSTANCE = "FC26_AUTOCAP_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
 _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] = SCRIPT_INSTANCE
 
@@ -1518,6 +1518,10 @@ local function pointer_export_folder()
 end
 
 local SCRIPT_START_STAMP = os.date("%Y%m%d_%H%M%S")
+-- The export last_export.txt names when this script starts belongs to a match that was handled before. Any other name
+-- in it later is a new export, even when the exporter was armed (and named it) before this script started: running the
+-- script again while Live Editor stays open keeps the exporter that is already running.
+_G["FC26_ATLAS_POINTER_AT_START"] = (pointer_export_folder())
 local ATLAS_LISTING_AFTER_SECONDS = 12   -- only look at the folder itself when the exporter has not reported one by then
 local ATLAS_LISTING_EVERY_SECONDS = 8
 local last_atlas_listing = 0
@@ -1536,7 +1540,8 @@ local function find_atlas_folder(include_used, waited)
     if pname and (include_used or not used[pname]) then
         -- an export made before this script started belongs to an earlier match
         local stamp = pname:match("(%d%d%d%d%d%d%d%d_%d%d%d%d%d%d)")
-        if (include_used or stamp == nil or stamp >= SCRIPT_START_STAMP) and atlas_folder_is_ready(ppath) then
+        local fresh = pname ~= rawget(_G, "FC26_ATLAS_POINTER_AT_START") or stamp == nil or stamp >= SCRIPT_START_STAMP
+        if (include_used or fresh) and atlas_folder_is_ready(ppath) then
             return pname, ppath, { pname }
         end
     end
@@ -3974,6 +3979,22 @@ local function service_pending_matches()
     local waited = now - item.detected_at
     local atlas_name, atlas_path, atlas_names = nil, nil, nil
 
+    -- The exporter said it published this match's statistics (or that it could not): nothing else is coming, so the
+    -- match goes now. Waiting for the next career event could take minutes (the game runs scripts only on those).
+    local pub = rawget(_G, "FC26_ATLAS_PUBLISHED")
+    if type(pub) == "table" and not pub.used and (pub.at or 0) >= item.detected_at - 300 then
+        pub.used = true
+        item.atlas_final = true
+        local r = pub.result
+        if type(r) == "table" and r.success == true and type(r.ready_dir) == "string" and r.ready_dir ~= "" then
+            local path = (r.ready_dir:gsub("\\", "/")):gsub("/+$", "")
+            local name = path:match("([^/]+)$")
+            if name and not _G["FC26_ATLAS_USED"][name] and atlas_folder_is_ready(path) then
+                item.atlas_found = { name, path, { name } }
+            end
+        end
+    end
+
     if now - item.last_atlas_check >= ATLAS_POLL_SECONDS then
         item.last_atlas_check = now
         atlas_name, atlas_path, atlas_names = find_atlas_folder(false, waited)
@@ -3991,6 +4012,7 @@ local function service_pending_matches()
     elseif state.atlas_seen then
         limit = ATLAS_WAIT_SECONDS
     end
+    if item.atlas_final then limit = 0 end
     if not atlas_path and waited < limit then return end
 
     -- The league position is worked out from the results, so the other matches of the day must be in first.
@@ -3999,7 +4021,8 @@ local function service_pending_matches()
         local ok_l, info = pcall(live_league_position, state.managed_team_id, item.fixture, state.league_comp_id)
         if ok_l and info and not info.ready then
             item.league_waiting_since = item.league_waiting_since or now
-            if now - item.league_waiting_since < LEAGUE_WAIT_SECONDS then
+            -- once the statistics are in, the match is not held back for the table (the career report updates it)
+            if now - item.league_waiting_since < LEAGUE_WAIT_SECONDS and not item.atlas_final then
                 item.league_pending = true
                 return
             end
@@ -4011,6 +4034,8 @@ local function service_pending_matches()
     end
 
     table.remove(state.pending_matches, 1)
+    local stale = rawget(_G, "FC26_ATLAS_PUBLISHED")
+    if type(stale) == "table" then stale.used = true end
     if atlas_name then
         -- this export is now spoken for; anything older is stale
         for _, n in ipairs(atlas_names) do _G["FC26_ATLAS_USED"][n] = true end
@@ -4640,8 +4665,12 @@ do
     -- Rows of a table with the wanted fields; a field the table does not have is simply missing (nil). Returns rows and
     -- whether the table could be opened at all.
     -- only = { field = "playerid", ids = { [id] = true } } keeps just those rows (a big table is not copied whole).
+    -- fields a table does not have: Live Editor answers nil and logs an error each time, so they are asked for once
+    local career_missing = {}
     local function career_rows(name, fields, only)
         if CAREER_NEVER[tostring(name):lower()] then return {}, false end
+        local missing = career_missing[name] or {}
+        career_missing[name] = missing
         local rows, opened, seen = {}, false, 0
         local function wanted(get)
             if not only then return true end
@@ -4679,8 +4708,10 @@ do
                     while r and r > 0 do
                         local rec = r
                         local function get(f)
+                            if missing[f] then return nil end
                             local ok, v = pcall(function() return t:GetRecordFieldValue(rec, f) end)
-                            if ok then return v end
+                            if ok and v ~= nil then return v end
+                            missing[f] = true
                             return nil
                         end
                         if wanted(get) then
@@ -5170,6 +5201,20 @@ local function tick()
     guarded("status report", write_script_status)
 end
 
+-- The Atlas exporter (1.1.3 and newer) calls this the moment it has published a match's statistics, also when they
+-- came out incomplete. The match waiting for them is sent right away.
+_G["FC26_MATCH_STATS_PUBLISHED"] = function(result)
+    if _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] ~= SCRIPT_INSTANCE then return end
+    _G["FC26_ATLAS_PUBLISHED"] = { at = os.time(), result = result }
+    local ok = type(result) == "table" and result.success == true
+    log_monitor("Atlas exporter published the match statistics" .. (ok and "" or " (incomplete: the game's own numbers are used)"))
+    state.last_check_time = 0                 -- the fixture may only now be marked completed: look again at once
+    guarded("match detection", check_for_new_completed_match)
+    guarded("pending matches", service_pending_matches)
+    guarded("outbox", service_outbox)
+    guarded("status report", function() write_script_status(true) end)
+end
+
 -- Background Polling Timer (every 2 seconds, independent of the event listener)
 if type(createTimer) == "function" then
     if _G["FC26_AUTOCAPTURE_TIMER"] then
@@ -5203,6 +5248,21 @@ pcall(function()
 end)
 
 pcall(write_script_status, true)
+-- script_alive.lock stays open while the game runs this script. The game runs scripts only on career events, so in a
+-- match or a menu the heartbeat above pauses; the open file tells the bridge the script is still there (Windows does
+-- not let another program rename an open file). Closing the game closes the file.
+pcall(function()
+    local h = rawget(_G, "FC26_ALIVE_LOCK")
+    if h == nil or io.type(h) ~= "file" then
+        h = io.open(COMMUNITY_ROOT .. "/script_alive.lock", "wb")
+        rawset(_G, "FC26_ALIVE_LOCK", h)
+    end
+    if h then
+        h:seek("set", 0)
+        h:write(SCRIPT_INSTANCE .. " " .. tostring(os.time()) .. "\r\n")
+        h:flush()
+    end
+end)
 log_monitor(string.format("Monitoring armed for %s (ID: %d). Completed matches baseline: %d. Instance: %s",
     state.managed_team_name, state.managed_team_id, state.last_count, SCRIPT_INSTANCE))
 

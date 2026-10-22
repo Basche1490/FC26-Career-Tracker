@@ -98,7 +98,8 @@ In the app, menu → **PC Connection** shows the whole path, from phone to bridg
 ## 3. The capture script
 
 Open FC Live Editor, load your Career Mode save, and run `FC26_Auto_Capture.lua` (the launcher put it in `lua\scripts`).
-It watches your club every 2 seconds and sends:
+The game runs it on every career event (nearly every step you take in Career Mode, but not during a match or while
+you sit in a menu) and it sends:
 
 - every finished match, with real line-ups, ratings, scorers, man of the match and league position
 - every transfer (permanent and loan, in and out) as it happens, as far as the game stores it (see
@@ -140,9 +141,15 @@ With the exporter running you get, under `Documents\FC26 Export`:
   If the Atlas desktop app is installed it may move finished snapshots to `imported` or `failed`.
 - `MatchStats\ready\<folder>` - the detailed player statistics of each match.
 
-When a match ends, `FC26_Auto_Capture.lua` waits up to 45 seconds for the Atlas files so the detailed numbers
-are included. If none arrive, the match is sent from the game database and the app marks its player stats as
-*estimated*.
+When a match ends, `FC26_Auto_Capture.lua` waits for the Atlas files so the detailed numbers are included. The
+exporter (1.1.3 and newer) tells it the moment they are written, usually as you reach the Career Hub, and the match
+goes to your phone straight away. If the exporter could not finish them, the match is sent at once from the game
+database and the app marks its player stats as *estimated*.
+
+Because the game only runs scripts on career events, the script's heartbeat pauses during a match or while you stay in
+a menu. The script keeps a file open (`script_alive.lock`) for as long as the game runs it, so PC Connection shows
+*Running · waiting for the game* then, not *stopped*. It only says the script stopped when the game or Live Editor
+closed.
 
 Older scripts are kept in `live-editor-scripts/legacy/` and are not needed any more:
 

@@ -15,10 +15,10 @@ import secrets
 from urllib.parse import urlsplit
 
 LOCAL_PORT = 5050
-BRIDGE_VERSION = "3.1.0"
+BRIDGE_VERSION = "3.2.0"
 BRIDGE_PROTOCOL = 3            # 3 = the phone must prove it knows the pairing code (docs/SECURITY.md)
 MIN_SCRIPT_VERSION = "2.8.0"   # older capture scripts do not report their health or answer a re-send request
-SCRIPT_ALIVE_SECONDS = 20      # the script writes its heartbeat every 5 seconds
+SCRIPT_ALIVE_SECONDS = 20      # the heartbeat is written on career events (often, but not in matches or menus)
 PHONE_ALIVE_SECONDS = 30       # the app asks the bridge for news every 10 seconds
 RESEND_MIN_SECONDS = 10        # at most one "re-send the last match" request per this many seconds
 EVENTS_FILE = os.path.join(os.path.dirname(__file__), "telemetry_events.json")
@@ -489,8 +489,32 @@ def note_phone(client_ip, now=None):
     phone_seen["ip"] = _strip_mapped(client_ip)
 
 
-def read_script_status(roots=None, now=None):
+def script_lock_held(path):
+    """True while the capture script keeps script_alive.lock open (script 2.12 and newer). The game runs the script only on
+    career events, so its heartbeat pauses in matches and menus; the open file shows it is still there. Windows does not
+    let another program rename an open file, so a rename that fails means the script holds it. Elsewhere: False."""
+    if os.name != "nt" or not os.path.exists(path):
+        return False
+    probe = path + ".probe"
+    try:
+        os.rename(path, probe)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    try:
+        os.rename(probe, path)
+    except OSError:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+    return False
+
+
+def read_script_status(roots=None, now=None, lock_held=None):
     """The freshest script_status.json found in the export folders, described for the status page."""
+    lock_held = script_lock_held if lock_held is None else lock_held
     now = time.time() if now is None else now
     best = None
     for root in (atlas_roots() if roots is None else roots):
@@ -510,6 +534,9 @@ def read_script_status(roots=None, now=None):
         return {"found": False}
     stamp, data, root = best
     age = max(0, int(now - stamp))
+    fresh = age <= SCRIPT_ALIVE_SECONDS
+    # an old heartbeat with the file still held open: the script runs, the game just has not called it for a while
+    held = (not fresh) and bool(lock_held(os.path.join(root, "script_alive.lock")))
     version = str(data.get("version") or "")
     resend = data.get("resend") if isinstance(data.get("resend"), dict) else None
     return {
@@ -519,7 +546,8 @@ def read_script_status(roots=None, now=None):
         "protocol": _i(data.get("protocol")),
         "time": stamp,
         "ageSeconds": age,
-        "alive": age <= SCRIPT_ALIVE_SECONDS,
+        "alive": fresh or held,
+        "quiet": held,
         "versionOk": version_at_least(version, MIN_SCRIPT_VERSION),
         "club": str(data.get("club") or ""),
         "careerDate": str(data.get("careerDate") or ""),
@@ -647,7 +675,9 @@ def selfcheck(script, outbox, ev, roots, local_ip, now):
                              "Live Editor was closed or the script stopped. Execute FC26_Auto_Capture.lua again."))
     else:
         club = f" for {script['club']}" if script["club"] else ""
-        checks.append(_check("script", "Capture script", "ok", f"Running{club}, version {script['version'] or '?'}."))
+        quiet = (" Waiting for the game: it runs the script on your next career action (heartbeat "
+                 f"{_ago(script['ageSeconds'])}).") if script.get("quiet") else ""
+        checks.append(_check("script", "Capture script", "ok", f"Running{club}, version {script['version'] or '?'}.{quiet}"))
 
     if script["found"]:
         if not script["versionOk"]:
@@ -1370,6 +1400,20 @@ def snapshot_lineup(snapshot_dir, team_id):
                      "sub": (_i(r.get("player_fact_raw")) // 8) % 2 == 1})
     return rows
 
+def snapshot_player_names(snapshot_dir, ids):
+    """Names of the wanted players from the snapshot's players.csv (every player in the game). The match export leaves
+    the name out for some players (often regens and academy graduates); without it the app showed "Unknown player"."""
+    names = {}
+    if not ids:
+        return names
+    for r in _read_csv_rows(os.path.join(snapshot_dir, "players.csv")):
+        pid = _i(r.get("player_id"))
+        if pid in ids:
+            name = (r.get("display_name") or "").strip()
+            if name:
+                names[pid] = name
+    return names
+
 def snapshot_league_position(snapshot_dir, team_id, comp_obj_id, date_raw):
     """Position in the league on the day of the match, from the snapshot's season fixtures; None when unknown."""
     if not comp_obj_id:
@@ -1547,6 +1591,11 @@ def import_atlas_folder(folder, folder_id, snapshots_ready):
 
     history = snapshot_lineup(latest_snap, managed_team_id) if latest_snap else []
     history_names = {h["id"]: h["name"] for h in history if h.get("name")}
+    nameless = {_i(p.get("player_id")) for p in participants if not str(p.get("player_name") or "").strip()}
+    nameless -= set(history_names)
+    nameless.discard(0)
+    if nameless and latest_snap:
+        history_names.update(snapshot_player_names(latest_snap, nameless))
     managed_squad_player_ids.update(h["id"] for h in history if h["minutes"] > 0)   # a loaned-in player counts too
 
     count0 = 0

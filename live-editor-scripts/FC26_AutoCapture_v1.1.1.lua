@@ -1,4 +1,7 @@
--- FC26 AutoCapture v1.1.2 (file name kept as FC26_AutoCapture_v1.1.1.lua so FC26 Auto Capture finds it)
+-- FC26 AutoCapture v1.1.3 (file name kept as FC26_AutoCapture_v1.1.1.lua so FC26 Auto Capture finds it)
+-- v1.1.3: tells FC26 Auto Capture the moment a match's statistics are published (the match is sent at once, not on the
+--         next career event); event handlers are really removed (RemoveEventHandler takes the event name and the id);
+--         a field the game does not have is read once, not once per row (the Live Editor log stayed full of errors).
 -- v1.1.2: no command window for folders that already exist; MatchStats\last_export.txt names the newest export.
 -- Single-file post-match monitor with full snapshot + detailed MatchStats exporters embedded.
 -- Run once after loading a career. It creates a startup snapshot, arms detailed
@@ -13,9 +16,9 @@ require 'imports/career_mode/helpers'
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "1.1.2"
+local VERSION = "1.1.3"
 local EMBEDDED_EXPORTER_VERSION = "1.1.0"
-local EMBEDDED_MATCH_STATS_VERSION = "1.1.0"
+local EMBEDDED_MATCH_STATS_VERSION = "1.1.1"
 local STATE_KEY = "FC26_EXPORT_AUTO_CAPTURE_STATE"
 local CHECK_INTERVAL_SECONDS = 2
 local STABILITY_SECONDS = 4
@@ -49,6 +52,7 @@ local UNAVAILABLE_FIELDS = {}
 -- probing this field per player would flood the console. Skip it explicitly.
 local KNOWN_UNAVAILABLE_FIELDS = {
     ["players.joindate"] = true,
+    ["leagueteamlinks.Teamlongform"] = true,   -- FC 26 has no such field (each read put an error in the log)
 }
 local MANIFEST_ROWS = {}
 local SNAPSHOT_CONTEXT = {}
@@ -299,6 +303,12 @@ local function get_field(table_name, db_table, record, field_name, default_value
     end
 
     if value == nil then
+        -- Live Editor answers nil (and logs an error) for a field the table does not have: stop asking for it
+        UNAVAILABLE_FIELDS[key] = true
+        if not MISSING_FIELD_LOGGED[key] then
+            MISSING_FIELD_LOGGED[key] = true
+            log("Field unavailable: " .. key .. " (disabled for this export run)")
+        end
         return default_value
     end
     return value
@@ -2135,7 +2145,7 @@ assert(type(AddEventHandler) == 'function',
     'Live Editor CareerModeEvent API is unavailable.')
 assert(type(GetPlugin) == 'function', 'GetPlugin is unavailable.')
 
-local VERSION = '1.1.0'
+local VERSION = '1.1.1'
 local CSV_BOM = '\239\187\191'
 local EXPORT_DIAGNOSTICS = false
 local STATE_KEY = 'FC26_EXPORT_MATCH_STATS_AUTOMATIC_PLAYER_EXPORTER_STATE'
@@ -5869,10 +5879,10 @@ local function stop_probe(reason)
     state.active = false
     log_progress('stopping', reason or '')
     if state.pre_handler and type(RemoveEventHandler) == 'function' then
-        pcall(RemoveEventHandler, state.pre_handler)
+        pcall(RemoveEventHandler, 'pre__CareerModeEvent', state.pre_handler)
     end
     if state.post_handler and type(RemoveEventHandler) == 'function' then
-        pcall(RemoveEventHandler, state.post_handler)
+        pcall(RemoveEventHandler, 'post__CareerModeEvent', state.post_handler)
     end
     local latest_tracker = state.latest_tracker_capture_id and
         state.tracker_snapshot_data[state.latest_tracker_capture_id] or nil
@@ -5958,6 +5968,12 @@ local function stop_probe(reason)
                 if not os.rename(tmp, pointer) then pcall(os.remove, tmp) end
             end
         end)
+    end
+    -- FC26 Auto Capture waits for these statistics: tell it now (the next career event can be minutes away). It is
+    -- told about an incomplete export too, so it sends the match with the game's own numbers instead of waiting.
+    local published_hook = rawget(_G, 'FC26_MATCH_STATS_PUBLISHED')
+    if type(published_hook) == 'function' then
+        pcall(published_hook, rawget(_G, 'FC26_EXPORT_MATCH_STATS_LAST_EXPORT_RESULT'))
     end
 end
 
@@ -6056,10 +6072,10 @@ state._register_ok = nil
 state._register_result = nil
 if not state.pre_handler or not state.post_handler then
     if state.pre_handler and type(RemoveEventHandler) == 'function' then
-        pcall(RemoveEventHandler, state.pre_handler)
+        pcall(RemoveEventHandler, 'pre__CareerModeEvent', state.pre_handler)
     end
     if state.post_handler and type(RemoveEventHandler) == 'function' then
-        pcall(RemoveEventHandler, state.post_handler)
+        pcall(RemoveEventHandler, 'post__CareerModeEvent', state.post_handler)
     end
     state.active = false
     close_files()
@@ -6326,7 +6342,7 @@ if existing and existing.active then
         return
     end
     if existing.handler_id and type(RemoveEventHandler) == 'function' then
-        pcall(RemoveEventHandler, existing.handler_id)
+        pcall(RemoveEventHandler, 'post__CareerModeEvent', existing.handler_id)
     end
     existing.active = false
     append_log({os.date("%Y-%m-%d %H:%M:%S"), "monitor_version_replaced",
@@ -6373,8 +6389,8 @@ local function match_stats_active()
         return true, ms_state
     end
     if type(RemoveEventHandler) == 'function' then
-        if ms_state.pre_handler then pcall(RemoveEventHandler, ms_state.pre_handler) end
-        if ms_state.post_handler then pcall(RemoveEventHandler, ms_state.post_handler) end
+        if ms_state.pre_handler then pcall(RemoveEventHandler, 'pre__CareerModeEvent', ms_state.pre_handler) end
+        if ms_state.post_handler then pcall(RemoveEventHandler, 'post__CareerModeEvent', ms_state.post_handler) end
     end
     ms_state.active = false
     append_log({os.date("%Y-%m-%d %H:%M:%S"), "matchstats_version_replaced",

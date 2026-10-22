@@ -238,6 +238,30 @@ class ImporterTest(unittest.TestCase):
         self.assertEqual([], m["substitutions"])
         self.assertEqual(12, len(m["playerPerformances"]))
 
+    def test_a_player_the_export_gives_no_name_is_named_from_the_snapshot(self):
+        # regens and academy graduates often come without a name in the match export; the app then showed "Unknown player"
+        export, snaps = self.build()
+        path = os.path.join(export, "16_match_participants_wide.csv")
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+            cols = list(rows[0].keys())
+        for r in rows:
+            if r["player_name"] == "Kento Takeuchi":
+                r["player_name"] = ""
+        write_csv(path, rows, cols)
+        snap = os.path.join(snaps, "snapshot_20281012_120000")
+        rec_path = os.path.join(snap, "last_match_players.csv")
+        with open(rec_path, encoding="utf-8-sig", newline="") as f:
+            rec = list(csv.DictReader(f))
+            rec_cols = list(rec[0].keys())
+        write_csv(rec_path, [r for r in rec if r["player_id"] != "460055"], rec_cols)
+        write_csv(os.path.join(snap, "players.csv"), [{"player_id": 460055, "display_name": "Kento Takeuchi"},
+                                                     {"player_id": 1, "display_name": "Somebody"}])
+        self.import_folder(export, snaps)
+        names = [p["playerName"] for p in self.sent[0]["playerPerformances"]]
+        self.assertIn("Kento Takeuchi", names)
+        self.assertNotIn("Player", names)
+
     def test_own_man_of_the_match_is_not_an_opponent(self):
         export, snaps = self.build()
         path = os.path.join(export, "16_match_participants_wide.csv")

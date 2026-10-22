@@ -144,6 +144,54 @@ class PlayerDetailsTest {
         assertTrue(PlayerRepair.repair(s, index) === s)
     }
 
+    @Test fun aLineupRowWithoutANameIsFoundByTheGamesId() {
+        // the game left the regen's name out: only his id says who he is (the app showed "Unknown player")
+        val state = AppState(clubName = "Torquay AFC", leagueName = "EFL Championship", startYear = 2028,
+            players = listOf(Player(id = "a", name = "Txus Mendia", gamePlayerId = 460123, primaryPosition = "CDM"),
+                Player(id = "b", name = "Kenji Yamada", gamePlayerId = 460040)))
+        val r = run(state, event("""{"dataType":"match","detailSource":"atlas","opponentName":"Leeds","isHome":true,"goalsFor":1,"goalsAgainst":0,
+            "date":"2028-08-12","competition":"EFL Championship","stage":"Matchday 2",
+            "playerPerformances":[{"playerId":"460123","playerName":"Player","rating":7.1,"goals":1},{"playerId":"460040","playerName":"Kenji Yamada","rating":6.8}],
+            "goalDetails":[{"playerName":"Player","playerId":"460123","minute":30,"isOpponent":false}],
+            "substitutions":[{"minute":70,"playerOutName":"","playerInName":"","playerOutId":"460123","playerInId":"460040"}]}"""))
+        val m = r.state.recentMatches.single()
+        assertEquals(listOf("a", "b"), m.playerPerformances.map { it.playerId })
+        assertEquals("a", m.goalDetails.single().scorerId)
+        assertEquals("a", m.substitutions.single().playerOutId)
+    }
+
+    @Test fun matchesStoredUnderTheGamesIdAreLinkedOnceTheCardKnowsIt() {
+        val match = com.fctracker.career.MatchResult(opponentName = "Leeds", isHome = true, goalsFor = 1, goalsAgainst = 0, matchDate = "2028-08-12",
+            competition = "EFL Championship", playerPerformances = listOf(com.fctracker.career.PlayerPerformance(playerId = "460123", goals = 1, goalAssisters = listOf("460040"))),
+            goalDetails = listOf(com.fctracker.career.GoalDetail(scorerId = "460123", assisterId = "460040")))
+        val players = listOf(Player(id = "a", name = "Txus Mendia", gamePlayerId = 460123), Player(id = "b", name = "Kenji Yamada", gamePlayerId = 460040))
+        val linked = PlayerRepair.linkMatches(listOf(match), players).single()
+        assertEquals("a", linked.playerPerformances.single().playerId)
+        assertEquals(listOf<String?>("b"), linked.playerPerformances.single().goalAssisters)
+        assertEquals("a", linked.goalDetails.single().scorerId); assertEquals("b", linked.goalDetails.single().assisterId)
+        val again = listOf(linked)
+        assertTrue(PlayerRepair.linkMatches(again, players) === again)
+    }
+
+    @Test fun seasonTotalsNeverBelieveACardBeyondWhatTheClubScored() {
+        // a career imported with career totals on the cards: 150 goals in a season the club scored 40
+        val matches = (1..10).map { i -> com.fctracker.career.MatchResult(opponentName = "Club $i", isHome = true, goalsFor = 4, goalsAgainst = 1,
+            matchDate = "2027-09-%02d".format(i), competition = "EFL Championship",
+            playerPerformances = listOf(com.fctracker.career.PlayerPerformance(playerId = "460123", goals = 1))) }
+        val veteran = Player(id = "v", name = "Old Striker", gamePlayerId = 460123, goals = 150, matchesPlayed = 400)
+        val t = SeasonFacts.totals(veteran, matches)
+        assertEquals(10, t.appearances)            // found by the game's id in the line-ups; the card's 400 is not believed
+        assertEquals(10, t.goals)                  // 150 in a season the club scored 40 is not believed either
+        // a player listed in the squad and the academy is counted once
+        val twice = SeasonFacts.allTotals(listOf(veteran, veteran.copy(isAcademy = true)), matches)
+        assertEquals(1, twice.size)
+        // with no matches logged for the season, the card is all there is, as long as one season could hold it
+        assertEquals(25, SeasonFacts.totals(veteran.copy(goals = 25), emptyList()).goals)
+        assertEquals(0, SeasonFacts.totals(veteran, emptyList()).goals)
+        // a few more than the logged matches show is believed (a match that was not logged)
+        assertEquals(45, SeasonFacts.totals(veteran.copy(goals = 45), matches).goals)
+    }
+
     @Test fun profilesLeaveOutWhatIsImpossible() {
         val g = GameProfile.parse(JSONObject("""{"positions":["st","XX","ST"],"birthDate":"soon","height":300,"foot":"Both","weakFoot":4}"""))!!
         assertEquals(listOf("ST"), g.positions); assertNull(g.birthDate); assertNull(g.height); assertNull(g.foot); assertEquals(4, g.weakFoot)

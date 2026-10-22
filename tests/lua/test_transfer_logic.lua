@@ -372,8 +372,8 @@ do
     end)
 
     -- Atlas lookup: the exporter reports the folder it just published
-    local function atlas_env(files, listing, start_stamp)
-        local calls = { listing = 0 }
+    local function atlas_env(files, listing, start_stamp, pointer_at_start)
+        local calls = { listing = 0, pointer = pointer_at_start }
         local env = assert(load([[
             local MATCH_STATS_ROOT, FILES, LISTING, STAMP, CALLS, WIN = ...
             local QUIET = { list_dirs = function() CALLS.listing = CALLS.listing + 1 return LISTING end }
@@ -441,10 +441,17 @@ do
         "the export named in last_export.txt is used straight away, with no folder listing", tostring(pn))
     env.used[pn] = true
     check(env.find(false, 0) == nil, "and not a second time")
-    env, calls = atlas_env(ready_files(R .. "/FC26_MatchStats_pmc_20261019_090000_q"), {}, "20261019_150000")
+    env, calls = atlas_env(ready_files(R .. "/FC26_MatchStats_pmc_20261019_090000_q"), {}, "20261019_150000",
+        "C:\\FC26 Export\\MatchStats\\ready\\FC26_MatchStats_pmc_20261019_090000_q")
     _G["FC26_ATLAS_USED"] = env.used
-    calls.pointer = "C:\\FC26 Export\\MatchStats\\ready\\FC26_MatchStats_pmc_20261019_090000_q"
-    check(env.find(false, 0) == nil, "an export named there from before this script started belongs to an earlier match")
+    check(env.find(false, 0) == nil, "an export named there when this script started belongs to an earlier match")
+    -- the exporter kept running from an earlier start of the script (Live Editor stayed open): it named its capture
+    -- before this script started, but published it afterwards, so it is this match's
+    env, calls = atlas_env(ready_files(R .. "/FC26_MatchStats_pmc_20261019_100000_r"), {}, "20261019_150000",
+        "C:\\FC26 Export\\MatchStats\\ready\\FC26_MatchStats_pmc_20261019_090000_q")
+    _G["FC26_ATLAS_USED"] = env.used
+    calls.pointer = "C:\\FC26 Export\\MatchStats\\ready\\FC26_MatchStats_pmc_20261019_100000_r"
+    check(env.find(false, 0) == "FC26_MatchStats_pmc_20261019_100000_r", "an export published after this script started is used, whatever its capture name says")
     check(exporter:find("last_export.txt", 1, true) ~= nil and exporter:find("FC26_QUIET", 1, true) ~= nil,
         "the exporter writes last_export.txt and makes its folders through this script's quiet folder code")
 
@@ -2270,6 +2277,34 @@ do
         return game
     end
 
+    -- A0. the exporter tells the script it has published (exporter 1.1.3): the match goes at once, without waiting
+    --     for another career event (the game runs scripts only on those, and the next one can be minutes away)
+    do
+        local g = play({ exporter = true })
+        check(g.ok, "script starts (published statistics)", g.err)
+        write_export(g.vfs)
+        g.tick(3)
+        g.finish_match()
+        g.tick(3)
+        check(#match_payloads(g.vfs) == 0, "a finished match first waits for its statistics")
+        check(type(_G.FC26_MATCH_STATS_PUBLISHED) == "function", "the script offers the exporter a way to say it has published")
+        _G.FC26_MATCH_STATS_PUBLISHED({ success = true, ready_dir = EXPORT_DIR })
+        local list = match_payloads(g.vfs)
+        check(#list == 1 and list[1].detailSource == "atlas", "published statistics send the match at once, with the exported data",
+            list[1] and list[1].detailSource)
+        check(g.log():find("Atlas exporter published", 1, true) ~= nil, "the log says so")
+        g.close()
+
+        local h = play({ exporter = true })
+        h.tick(3)
+        h.finish_match()
+        h.tick(3)
+        _G.FC26_MATCH_STATS_PUBLISHED({ success = false, ready_dir = "x", status = "incomplete" })
+        local list2 = match_payloads(h.vfs)
+        check(#list2 == 1 and list2[1].detailSource ~= "atlas", "an incomplete export sends the match at once with the game's own numbers")
+        h.close()
+    end
+
     -- A. the Atlas exporter produced the match files
     do
         local g = play({ exporter = true })
@@ -2409,7 +2444,7 @@ do
         local status_text = g.vfs[ROOT .. "/script_status.json"]
         check(status_text ~= nil, "script_status.json is written as soon as the script runs")
         local st = status_text and json_decode(status_text) or {}
-        check(st.version == "2.11.0" and st.protocol == 2 and st.app == "fc26-capture", "it names the script, its version and protocol",
+        check(st.version == "2.12.0" and st.protocol == 2 and st.app == "fc26-capture", "it names the script, its version and protocol",
             tostring(st.version))
         check(st.exporter == true, "it says the detailed-stats exporter is running")
         check(st.club == "Torquay AFC", "it names the club", tostring(st.club))

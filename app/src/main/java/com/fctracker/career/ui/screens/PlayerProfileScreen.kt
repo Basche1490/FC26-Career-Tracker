@@ -126,8 +126,11 @@ fun PlayerProfileScreen(viewModel: MainViewModel, playerId: String, onBack: () -
         // Rating by season
         item {
             val history = p.ratingHistory.filter { it.season < view.season }.sortedBy { it.season }
-            val labels = history.map { SeasonView.seasonLabel(it.season).let { l -> l.substring(2) } } + SeasonView.seasonLabel(view.season).substring(2)
-            val values = history.map { it.overall } + p.overall
+            // a first season starts the line at the rating he began it with
+            val start = p.startingOverall.takeIf { history.isEmpty() && it in 1..99 && it != p.overall }
+            val labels = history.map { SeasonView.seasonLabel(it.season).let { l -> l.substring(2) } } + listOfNotNull(start?.let { "Start" }) +
+                SeasonView.seasonLabel(view.season).substring(2)
+            val values = history.map { it.overall } + listOfNotNull(start) + p.overall
             FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SectionHeader("Overall rating by season", Modifier.weight(1f), icon = Icons.Default.ShowChart)
@@ -136,8 +139,7 @@ fun PlayerProfileScreen(viewModel: MainViewModel, playerId: String, onBack: () -
                         Pill("${if (d >= 0) "+" else ""}$d since ${labels.first()}", if (d > 0) Tone.GOOD else if (d < 0) Tone.BAD else Tone.MUTED)
                     }
                 }
-                if (values.size >= 2) OvrChart(labels, values)
-                else Mono("${p.overall} in ${view.label}", 14.sp)
+                OvrChart(labels, values)
                 Muted(if (view.isArchived) "Up to the season you are viewing." else "Each season's rating is saved when the season ends; the current season shows today's rating.", 11.sp)
             }
         }
@@ -222,9 +224,10 @@ fun PlayerProfileScreen(viewModel: MainViewModel, playerId: String, onBack: () -
         item {
             FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 8.dp) {
                 SectionHeader("OVR vs potential", icon = Icons.Default.Star)
+                // the labels and the numbers sit on one line (aligned by their baselines)
                 Row(Modifier.fillMaxWidth()) {
-                    Muted("OVR", 12.sp); FcText(" ${p.overall}", 13.sp, FontWeight.Bold, modifier = Modifier.weight(1f))
-                    Muted("POT", 12.sp); FcText(" ${p.potential}", 13.sp, FontWeight.Bold)
+                    Muted("OVR", 12.sp, Modifier.alignByBaseline()); FcText(" ${p.overall}", 13.sp, FontWeight.Bold, modifier = Modifier.weight(1f).alignByBaseline())
+                    Muted("POT", 12.sp, Modifier.alignByBaseline()); FcText(" ${p.potential}", 13.sp, FontWeight.Bold, modifier = Modifier.alignByBaseline())
                 }
                 ProgressBar(p.overall.toFloat(), 99f, c.good, height = 10.dp)
                 Muted(if (p.overall >= p.potential) "Reached potential" else "${p.potential - p.overall} to reach his potential${p.potentialRange?.let { " ($it)" } ?: ""}", 12.sp)

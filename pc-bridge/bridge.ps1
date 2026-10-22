@@ -5,10 +5,11 @@ param(
 
 $ErrorActionPreference = "Continue"
 $EventsFile = Join-Path $PSScriptRoot "telemetry_events.json"
-$BridgeVersion = "3.1.0"
+$BridgeVersion = "3.2.0"
 $BridgeProtocol = 3             # 3 = the phone must prove it knows the pairing code (docs/SECURITY.md)
 $MinScriptVersion = "2.8.0"     # older capture scripts do not report their health or answer a re-send request
-$ScriptAliveSeconds = 20        # the script writes its heartbeat every 5 seconds
+$IsWindowsHost = ($env:OS -eq 'Windows_NT')   # Windows PowerShell 5.1 has no $IsWindows
+$ScriptAliveSeconds = 20        # the heartbeat is written on career events (often, but not in matches or menus)
 $PhoneAliveSeconds = 30         # the app asks the bridge for news every 10 seconds
 $ResendMinSeconds = 10          # at most one "re-send the last match" request per this many seconds
 $StartedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
@@ -1059,6 +1060,22 @@ function Get-SnapshotLineup {
     return $rows
 }
 
+# Names of the wanted players from the snapshot's players.csv (every player in the game). The match export leaves the
+# name out for some players (often regens and academy graduates); without it the app showed "Unknown player".
+function Get-SnapshotPlayerNames {
+    param([string]$SnapshotDir, $Ids)
+    $names = @{}
+    if ($null -eq $Ids -or $Ids.Count -eq 0) { return $names }
+    foreach ($r in (Read-CsvRows (Join-Path $SnapshotDir "players.csv"))) {
+        $key = [string](ConvertTo-Int $r.player_id)
+        if ($Ids.Contains($key)) {
+            $n = ([string]$r.display_name).Trim()
+            if ($n) { $names[$key] = $n }
+        }
+    }
+    return $names
+}
+
 # Position in the league on the day of the match, from the snapshot's season fixtures; $null when unknown.
 function Get-SnapshotLeaguePosition {
     param([string]$SnapshotDir, [int]$TeamId, [int]$CompId, [int]$DateRaw)
@@ -1262,6 +1279,16 @@ function Import-AtlasFolder {
         foreach ($h in $history) {
             if ($h.Name) { $historyNames[[string]$h.Id] = $h.Name }
             if ($h.Minutes -gt 0) { [void]$managedSquadPlayerIds.Add($h.Id) }      # a loaned-in player counts too
+        }
+        # players the export gives no name for: from the snapshot's list of every player
+        $nameless = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($p in $participants) {
+            $key = [string](ConvertTo-Int $p.player_id)
+            if ($key -ne "0" -and -not ([string]$p.player_name).Trim() -and -not $historyNames.ContainsKey($key)) { [void]$nameless.Add($key) }
+        }
+        if ($nameless.Count -gt 0) {
+            $found = Get-SnapshotPlayerNames -SnapshotDir $latestSnap -Ids $nameless
+            foreach ($k in $found.Keys) { $historyNames[$k] = $found[$k] }
         }
     }
     $count0 = 0
@@ -1737,6 +1764,23 @@ function Set-PhoneSeen {
     $global:PhoneSeen.Ip = $Ip
 }
 
+# True while the capture script keeps script_alive.lock open (script 2.12 and newer). The game runs the script only on
+# career events, so its heartbeat pauses in matches and menus; the open file shows it is still there. Windows does not
+# let another program rename an open file, so a rename that fails means the script holds it.
+function Test-ScriptLockHeld {
+    param([string]$Path)
+    if (-not $IsWindowsHost) { return $false }
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $probe = $Path + ".probe"
+    try { [System.IO.File]::Move($Path, $probe) }
+    catch [System.IO.IOException] { return $true }
+    catch { return $false }
+    try { [System.IO.File]::Move($probe, $Path) } catch { try { [System.IO.File]::Delete($probe) } catch { } }
+    return $false
+}
+# (the tests replace this to pretend the file is held)
+$global:ScriptLockTest = ${function:Test-ScriptLockHeld}
+
 # The freshest script_status.json found in the export folders, described for the status page.
 function Read-ScriptStatus {
     param($Roots, [long]$Now)
@@ -1757,6 +1801,14 @@ function Read-ScriptStatus {
     if ($null -eq $best) { return [ordered]@{ found = $false } }
     $data = $best.Data
     $age = [long][Math]::Max(0, $Now - $best.Stamp)
+    $fresh = ($age -le $ScriptAliveSeconds)
+    # an old heartbeat with the file still held open: the script runs, the game just has not called it for a while
+    $held = $false
+    if (-not $fresh) {
+        $lockPath = Join-Path ([string]$best.Root) "script_alive.lock"
+        if ($global:ScriptLockTest) { $held = [bool](& $global:ScriptLockTest $lockPath) }
+        elseif (Get-Command Test-ScriptLockHeld -ErrorAction SilentlyContinue) { $held = [bool](Test-ScriptLockHeld $lockPath) }
+    }
     $version = [string]$data.version
     $resend = $null
     if ($data.resend -is [System.Management.Automation.PSCustomObject]) {
@@ -1774,7 +1826,8 @@ function Read-ScriptStatus {
         protocol = (ConvertTo-Int $data.protocol)
         time = $best.Stamp
         ageSeconds = $age
-        alive = ($age -le $ScriptAliveSeconds)
+        alive = ($fresh -or $held)
+        quiet = $held
         versionOk = (Test-VersionAtLeast $version $MinScriptVersion)
         club = [string]$data.club
         careerDate = [string]$data.careerDate
@@ -1878,7 +1931,8 @@ function Get-SelfCheck {
     } else {
         $clubText = if ($ScriptInfo.club) { " for $($ScriptInfo.club)" } else { "" }
         $verText = if ($ScriptInfo.version) { $ScriptInfo.version } else { "?" }
-        $checks += New-Check "script" "Capture script" "ok" "Running$clubText, version $verText."
+        $quietText = if ($ScriptInfo.quiet) { " Waiting for the game: it runs the script on your next career action (heartbeat $(Format-Ago $ScriptInfo.ageSeconds))." } else { "" }
+        $checks += New-Check "script" "Capture script" "ok" "Running$clubText, version $verText.$quietText"
     }
 
     if ($ScriptInfo.found) {

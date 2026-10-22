@@ -35,6 +35,9 @@ $global:EventList = [System.Collections.Generic.List[string]]::new()
 foreach ($e in @($sc.events)) { $global:EventList.Add(($e | ConvertTo-Json -Compress)) }
 $roots = @()
 foreach ($r in @($sc.roots)) { if ($r) { $roots += [string]$r } }
+# pretend the capture script holds script_alive.lock open (or not)
+$lockHeld = [bool]$sc.lockHeld
+$global:ScriptLockTest = { param($p) $lockHeld }.GetNewClosure()
 
 if ($sc.action -eq "resend") {
     $out = @()

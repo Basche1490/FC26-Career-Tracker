@@ -106,6 +106,20 @@ class StatusTest(unittest.TestCase):
         self.assertEqual("fail", c["state"])
         self.assertIn("min ago", c["detail"])
 
+    def test_a_quiet_script_that_keeps_its_file_open_is_running(self):
+        # the game runs the script only on career events: in a match or a menu the heartbeat pauses
+        self.heartbeat(age=600)
+        self.bridge.script_lock_held = lambda path: path.endswith("script_alive.lock")
+        st = self.status()
+        self.assertTrue(st["script"]["alive"])
+        self.assertTrue(st["script"]["quiet"])
+        c = self.check(st, "script")
+        self.assertEqual("ok", c["state"])
+        self.assertIn("Waiting for the game", c["detail"])
+
+    def test_the_lock_test_never_holds_on_other_systems_or_without_the_file(self):
+        self.assertFalse(self.bridge.script_lock_held(os.path.join(self.tmp.name, "nothing.lock")))
+
     def test_old_script_version_is_flagged_with_the_launcher_as_the_fix(self):
         self.heartbeat(version="2.7.0")
         st = self.status()

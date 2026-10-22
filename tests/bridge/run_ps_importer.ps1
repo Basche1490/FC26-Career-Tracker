@@ -8,7 +8,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($Bridge, [ref]$
 $names = @(
     "ConvertTo-Dbl", "ConvertTo-Int", "ConvertTo-Pct", "Get-FirstValue", "Test-ContainsAny", "Read-CsvRows",
     "Test-LeagueName", "New-HistoryRow", "Search-SubstitutionPairs", "Get-SubstitutionPairs", "Test-LineupMatchesExport",
-    "Add-LineupToPerformances", "Get-PositionLabel", "Set-KeeperSaves", "Get-SnapshotLineup", "Get-SnapshotLeaguePosition", "Get-TeamRow",
+    "Add-LineupToPerformances", "Get-PositionLabel", "Set-KeeperSaves", "Get-SnapshotLineup", "Get-SnapshotPlayerNames", "Get-SnapshotLeaguePosition", "Get-TeamRow",
     "Import-AtlasFolder"
 )
 $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $names -contains $n.Name }, $true)

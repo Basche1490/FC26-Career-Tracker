@@ -10,6 +10,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import com.fctracker.career.AppState
 import com.fctracker.career.FcApplication
 import com.fctracker.career.GoalDetail
@@ -22,6 +24,7 @@ import com.fctracker.career.TransferLog
 import com.fctracker.career.ui.components.FcOverlayHost
 import com.fctracker.career.ui.components.FcOverlays
 import com.fctracker.career.ui.components.LocalFcOverlays
+import com.fctracker.career.ui.screens.CareerSummaryScreen
 import com.fctracker.career.ui.screens.EditPlayerDialog
 import com.fctracker.career.ui.screens.HeadToHeadPage
 import com.fctracker.career.ui.screens.MatchFormModal
@@ -67,7 +70,9 @@ class ScreenshotTest {
         Player(id = "cm1", name = "Pedro González López", nickname = "Pedri", primaryPosition = "CM", overall = 86, number = 8, birthDate = "2002-11-25", nationality = "Spain", isLoanedIn = true, loanDirection = "in", loanClub = "FC Barcelona"),
         Player(id = "cm2", name = "Marco Varela", primaryPosition = "CDM", overall = 76, number = 4, birthDate = "1998-03-03", nationality = "Spain"),
         Player(id = "cm3", name = "Kai Moreno", primaryPosition = "CAM", overall = 72, number = 10, birthDate = "2004-09-09", nationality = "Spain"),
-        Player(id = "lw", name = "Ryo Sato", primaryPosition = "LW", overall = 73, number = 11, birthDate = "2003-05-05", nationality = "Japan"),
+        Player(id = "lw", name = "Ryo Sato", primaryPosition = "LW", overall = 73, number = 11, birthDate = "2003-05-05", nationality = "Japan",
+            isInjured = true, injuryName = "Hamstring strain", injuryStartDate = "2028-10-01", injuryReturnDate = "2028-11-05", injurySource = "game",
+            wageK = 22, squadRole = "Important", contractEnd = "2030-06-30"),
         Player(id = "st", name = "Leo Guerra", primaryPosition = "ST", overall = 77, number = 9, birthDate = "2004-03-03", nationality = "Argentina"),
         Player(id = "rw", name = "Diego Ruiz", primaryPosition = "RW", overall = 72, number = 7, birthDate = "2002-12-12", nationality = "Mexico")
     )
@@ -126,7 +131,12 @@ class ScreenshotTest {
                 competition = "EFL Championship", stage = "Matchday 2")
         ),
         historicalSeasons = listOf(
-            HistoricalSeason(year = 2027, matches = listOf(
+            HistoricalSeason(year = 2027, leagueName = "EFL League One", finalPosition = 2,
+                players = listOf(Player(id = "old9", name = "Gone Striker", primaryPosition = "ST", goals = 160, matchesPlayed = 300, status = "Sold"),
+                    Player(id = "st", name = "Leo Guerra", primaryPosition = "ST", goals = 3, matchesPlayed = 2)),
+                transfers = listOf(TransferLog(playerName = "Leo Guerra", type = "In (Permanent)", feeM = 2.0, fromToClub = "Boca", date = "2027-07-10"),
+                    TransferLog(playerName = "Leo Guerra (Leonardo Guerra Diaz)", type = "In (Permanent)", feeM = 2.5, fromToClub = "Boca", date = "2027-07-10")),
+                matches = listOf(
                 MatchResult(id = "h1", opponentName = "Leicester City", isHome = true, goalsFor = 1, goalsAgainst = 1, matchDate = "2028-02-10", competition = "EFL Championship", stage = "Matchday 30"),
                 MatchResult(id = "h2", opponentName = "Leicester City", isHome = false, goalsFor = 2, goalsAgainst = 1, matchDate = "2027-09-01", competition = "EFL Championship", stage = "Matchday 5")
             ))
@@ -229,6 +239,34 @@ class ScreenshotTest {
         val vm = viewModel()
         show { TransfersScreen(vm, {}) }
         shoot("11_transfers")
+    }
+
+    @Test fun wagesAfterSorting() {
+        val vm = viewModel()
+        show { SquadScreen(vm, {}, {}) }
+        compose.onNodeWithText("Wages").performClick()
+        shoot("12_wages")
+        compose.onNodeWithText("Squad role").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("Contract end").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("Highest wage").performClick()
+        shoot("13_wages_after_sorting")
+    }
+
+    @Test fun formationAndInjuries() {
+        val vm = viewModel()
+        show { SquadScreen(vm, {}, {}) }
+        compose.onNodeWithText("Formation").performClick()
+        shoot("14_formation")
+        compose.onNodeWithText("Injuries").performClick()
+        shoot("15_injuries")
+    }
+
+    @Test fun careerSummary() {
+        val vm = viewModel()
+        show { CareerSummaryScreen(vm, {}, {}) }
+        shoot("16_career_summary")
     }
 
     @Test fun profileOfALoanPlayer() {

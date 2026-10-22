@@ -249,12 +249,15 @@ object TelemetryProcessor {
 
         if (!hasNew) return TelemetryResult(state, notices)
 
+        // a card that has just learned its game id (squad or career report) takes over the line-up rows stored under it
+        val linkedMatches = com.fctracker.career.logic.PlayerRepair.linkMatches(matches, squad + academy)
+
         return TelemetryResult(
             com.fctracker.career.logic.Academy.firstTeamOnly(
                 base.copy(
                     liveEvents = events.sortedByDescending { it.timestamp }.take(MAX_LIVE_EVENTS),
                     transfers = transfers,
-                    recentMatches = matches,
+                    recentMatches = linkedMatches,
                     activeInjuries = injuries,
                     players = squad,
                     academyPlayers = academy,
@@ -689,11 +692,7 @@ object TelemetryProcessor {
             val p = array.optJSONObject(i) ?: continue
             val name = p.optString("playerName")
             val pid = p.optString("playerId")
-            val matched = players.find {
-                (pid.isNotBlank() && it.id == pid) ||
-                    it.displayName.equals(name, ignoreCase = true) ||
-                    it.name.equals(name, ignoreCase = true)
-            }
+            val matched = findSquadPlayer(players, pid, name)
             val mappedId = matched?.id ?: pid.ifBlank { name }
             val pos = matched?.primaryPosition?.uppercase() ?: "CM"
             val isGk = pos == "GK"
@@ -773,13 +772,9 @@ object TelemetryProcessor {
             val p = array.optJSONObject(i) ?: continue
             val name = p.optString("playerName")
             val assister = p.optString("assisterName")
-            val scorerId = players.find {
-                it.displayName.equals(name, ignoreCase = true) || it.name.equals(name, ignoreCase = true)
-            }?.id ?: name
+            val scorerId = findSquadPlayer(players, p.optString("playerId"), name)?.id ?: name
             val assisterId = if (assister.isNotBlank()) {
-                players.find {
-                    it.displayName.equals(assister, ignoreCase = true) || it.name.equals(assister, ignoreCase = true)
-                }?.id ?: assister
+                findSquadPlayer(players, p.optString("assisterId"), assister)?.id ?: assister
             } else null
             val isOpponent = p.optBoolean("isOpponent")
             // The scripts write "<club> Goal" when they do not know who scored for the other side: that is no name.
@@ -806,12 +801,8 @@ object TelemetryProcessor {
             val s = array.optJSONObject(i) ?: continue
             val outName = s.optString("playerOutName")
             val inName = s.optString("playerInName")
-            val outId = players.find {
-                it.displayName.equals(outName, ignoreCase = true) || it.name.equals(outName, ignoreCase = true)
-            }?.id ?: s.optString("playerOutId", outName)
-            val inId = players.find {
-                it.displayName.equals(inName, ignoreCase = true) || it.name.equals(inName, ignoreCase = true)
-            }?.id ?: s.optString("playerInId", inName)
+            val outId = findSquadPlayer(players, s.optString("playerOutId"), outName)?.id ?: s.optString("playerOutId", outName)
+            val inId = findSquadPlayer(players, s.optString("playerInId"), inName)?.id ?: s.optString("playerInId", inName)
             list.add(
                 Substitution(
                     minute = s.optInt("minute", 65),
@@ -823,6 +814,22 @@ object TelemetryProcessor {
             )
         }
         return list
+    }
+
+    /**
+     * The squad player a payload row is about: by the app's id, then by the game's id (the game can leave a regen's or an
+     * academy graduate's name out, and then only the id says who he is), then by any of his names, accents and case
+     * ignored.
+     */
+    fun findSquadPlayer(players: List<Player>, id: String?, name: String?): Player? {
+        val raw = id?.trim().orEmpty()
+        if (raw.isNotEmpty()) players.firstOrNull { it.id == raw }?.let { return it }
+        val gameId = raw.toIntOrNull()
+        if (gameId != null && gameId > 0) players.firstOrNull { it.gamePlayerId == gameId }?.let { return it }
+        if (name.isNullOrBlank()) return null
+        val n = SquadReport.normalise(name)
+        if (n.isEmpty()) return null
+        return players.firstOrNull { SquadReport.normalise(it.displayName) == n || SquadReport.normalise(it.name) == n }
     }
 
     // ---------------------------------------------------------------------------------------------

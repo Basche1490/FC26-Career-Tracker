@@ -223,7 +223,8 @@ fun OvrChart(labels: List<String>, values: List<Int>, modifier: Modifier = Modif
             val h = size.height - top - bottom
             fun y(v: Int) = top + h * (hi - v) / (hi - lo).toFloat()
             val step = if (values.size > 1) w / (values.size - 1) else 0f
-            val pts = values.mapIndexed { i, v -> Offset(left + step * i, y(v)) }
+            // one season so far: its point stands in the middle
+            val pts = values.mapIndexed { i, v -> Offset(if (values.size > 1) left + step * i else left + w / 2, y(v)) }
             val area = Path().apply {
                 moveTo(pts.first().x, top + h)
                 pts.forEach { lineTo(it.x, it.y) }

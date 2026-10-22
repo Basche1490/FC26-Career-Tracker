@@ -80,11 +80,12 @@ class PowerShellStatusTest(unittest.TestCase):
     def roots_arg(self, roots):
         return [self.root] if roots is None else roots
 
-    def assert_same(self, roots=None, phone=None, events=None):
-        scenario = {"phone": phone or {"time": 0, "ip": ""}, "events": events or []}
+    def assert_same(self, roots=None, phone=None, events=None, lock_held=False):
+        scenario = {"phone": phone or {"time": 0, "ip": ""}, "events": events or [], "lockHeld": lock_held}
         if roots is not None:
             scenario["roots"] = roots
         ps = self.run_ps(**scenario)
+        self.bridge.script_lock_held = lambda path: lock_held
         py = self.python_status(roots, phone, events)
         for key in ("app", "now", "script", "outbox", "events", "phone", "checks", "summary"):
             self.assertEqual(py[key], ps[key], key)
@@ -112,6 +113,12 @@ class PowerShellStatusTest(unittest.TestCase):
         self.heartbeat(age=95)
         ps = self.assert_same()
         self.assertFalse(ps["script"]["alive"])
+
+    def test_quiet_script_that_keeps_its_file_open(self):
+        self.heartbeat(age=600)
+        ps = self.assert_same(lock_held=True)
+        self.assertTrue(ps["script"]["alive"])
+        self.assertTrue(ps["script"]["quiet"])
 
     def test_old_script_and_missing_exporter(self):
         self.heartbeat(version="2.7.0", exporter=False, undelivered=2)

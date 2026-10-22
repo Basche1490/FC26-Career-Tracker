@@ -178,7 +178,17 @@ object CareerOps {
     fun matchesMissed(p: Player, matches: List<MatchResult>, today: String?): Int {
         val start = p.injuryStartDate ?: return 0
         val end = listOfNotNull(p.injuryReturnDate, today).minOrNull() ?: today ?: return 0
-        return matches.count { m -> m.matchDate >= start && m.matchDate <= end && m.playerPerformances.none { it.playerId == p.id || it.playerName.equals(p.name, true) } }
+        return matches.count { m ->
+            m.matchDate >= start && m.matchDate <= end && m.playerPerformances.none {
+                it.playerId == p.id || (p.gamePlayerId != null && it.playerId == p.gamePlayerId.toString()) || it.playerName.equals(p.name, true)
+            }
+        }
+    }
+
+    /** Fixtures still to come before the player is back (after [today], before his return day). */
+    fun matchesToMiss(p: Player, fixtures: List<Fixture>, today: String?): Int {
+        val back = p.injuryReturnDate ?: return 0
+        return fixtures.count { f -> (today == null || f.date > today) && f.date < back }
     }
 
     // -- notes, awards, winners, coefficients --------------------------------------------------------------------------
