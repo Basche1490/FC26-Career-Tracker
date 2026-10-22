@@ -29,6 +29,7 @@ import com.fctracker.career.ui.screens.MatchesScreen
 import com.fctracker.career.ui.screens.PlayerProfileScreen
 import com.fctracker.career.ui.screens.SquadScreen
 import com.fctracker.career.ui.screens.TransferFormModal
+import com.fctracker.career.ui.screens.TransfersScreen
 import com.fctracker.career.ui.screens.formationsMap
 import com.fctracker.career.ui.theme.FCTheme
 import org.junit.Rule
@@ -131,7 +132,7 @@ class ScreenshotTest {
             ))
         ),
         transfers = listOf(
-            TransferLog(playerName = "Pedri", type = "In (Loan)", fromToClub = "FC Barcelona", date = "2028-08-02"),
+            TransferLog(playerName = "Pedri (Pedro González López)", type = "In (Loan)", fromToClub = "FC Barcelona", date = "2028-08-02"),
             TransferLog(playerName = "Nico Striker", type = "In (Permanent)", feeM = 3.5, fromToClub = "Leeds United", date = "2028-08-01"),
             TransferLog(playerName = "Elivélton Jesus", type = "Out (Loan)", fromToClub = "FC Porto", date = "2028-08-20")
         )
@@ -222,6 +223,12 @@ class ScreenshotTest {
         val vm = viewModel()
         show { PlayerProfileScreen(vm, "promo", {}) }
         shoot("09_profile_promoted")
+    }
+
+    @Test fun transfers() {
+        val vm = viewModel()
+        show { TransfersScreen(vm, {}) }
+        shoot("11_transfers")
     }
 
     @Test fun profileOfALoanPlayer() {

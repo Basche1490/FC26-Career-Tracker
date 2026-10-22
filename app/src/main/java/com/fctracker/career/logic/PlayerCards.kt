@@ -198,6 +198,9 @@ class PlayerIndex(private val all: List<EafcPlayer>) : PlayerLookup {
 object PlayerNames {
     private val WITH_FULL = Regex("^(.+?)\\s*\\((.+)\\)$")
 
+    /** A name as it is shown: "Sergio Busquets" for "Sergio Busquets (Sergio Busquets Burgos)" (no database needed). */
+    fun shown(name: String?): String = short(name) { null }.orEmpty()
+
     private fun words(s: String) = PlayerCards.normalize(s).split(Regex("[^\\p{L}\\p{N}]+")).filter { it.isNotEmpty() }
 
     /**

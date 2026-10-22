@@ -100,8 +100,9 @@ fun HeadToHeadPage(state: AppState, opponent: String, onClose: () -> Unit, onOpe
                     SectionHeader("Goals", icon = Icons.Default.SportsSoccer)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         val gd = r.goalsFor - r.goalsAgainst
-                        StatTile("Goals for", "${r.goalsFor}", Modifier.weight(1f))
-                        StatTile("Goals against", "${r.goalsAgainst}", Modifier.weight(1f))
+                        // short labels: "Goals against" does not fit a third of the card
+                        StatTile("For", "${r.goalsFor}", Modifier.weight(1f))
+                        StatTile("Against", "${r.goalsAgainst}", Modifier.weight(1f))
                         StatTile("Difference", "${if (gd > 0) "+" else ""}$gd", Modifier.weight(1f), tone = if (gd > 0) Tone.GOOD else if (gd < 0) Tone.BAD else null)
                     }
                     if (r.played > 0) Muted("Average ${String.format(java.util.Locale.US, "%.1f", r.goalsFor.toDouble() / r.played)}–${String.format(java.util.Locale.US, "%.1f", r.goalsAgainst.toDouble() / r.played)} a match", 12.sp)

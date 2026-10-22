@@ -183,7 +183,7 @@ fun PlayerListRow(p: Player, today: String?, onClick: () -> Unit, showPills: Boo
                 if (p.suspendedGames > 0) Tag("Suspended", Tone.WARN)
             }
             val pos = listOfNotNull(p.primaryPosition, p.secondaryPosition?.takeIf { it.isNotBlank() }).joinToString("/")
-            Muted("$pos · Age ${p.age}${if (p.isRegen && !p.regenOriginalName.isNullOrBlank()) " · Regen of ${p.regenOriginalName}" else ""}${if (youth) p.potentialRange?.let { " · Potential $it" } ?: " · Potential ${p.potential}" else ""}", 12.sp)
+            Muted("$pos · Age ${p.age}${if (p.isRegen && !p.regenOriginalName.isNullOrBlank()) " · Regen of ${com.fctracker.career.logic.PlayerNames.shown(p.regenOriginalName)}" else ""}${if (youth) p.potentialRange?.let { " · Potential $it" } ?: " · Potential ${p.potential}" else ""}", 12.sp)
             if (!youth) Mono("$currency${p.valueM}M · ${if (p.wageK > 0) "$currency${p.wageK}K/wk" else "on loan"}", 11.sp, FcTheme.colors.muted, FontWeight.Normal)
             if (showPills) {
                 val cc = ContractTime.contractChip(p, today)

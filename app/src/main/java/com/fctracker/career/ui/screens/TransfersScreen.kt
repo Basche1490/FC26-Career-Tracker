@@ -303,7 +303,7 @@ private fun TransferLogRow(
         val isRetirement = log.type.equals("Retirement", ignoreCase = true) || log.type.equals("Retired", ignoreCase = true)
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(log.playerName + if (log.isRegen) " (Regen)" else "", fontWeight = FontWeight.Bold, color = Color.White)
+                Text(com.fctracker.career.logic.PlayerNames.shown(log.playerName) + if (log.isRegen) " (Regen)" else "", fontWeight = FontWeight.Bold, color = Color.White)
                 if (isRetirement) {
                     Spacer(Modifier.width(6.dp))
                     Surface(
@@ -660,7 +660,7 @@ fun RecordDealCard(title: String, log: com.fctracker.career.TransferLog, state: 
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Column {
-                    Text(log.playerName, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Text(com.fctracker.career.logic.PlayerNames.shown(log.playerName), fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1)
                     Text(if (isIncoming) "From: ${log.fromToClub}" else "To: ${log.fromToClub}", fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                 }
             }

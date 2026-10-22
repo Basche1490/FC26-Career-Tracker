@@ -110,7 +110,7 @@ fun PlayerProfileScreen(viewModel: MainViewModel, playerId: String, onBack: () -
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     ContractTime.contractChip(p, today)?.let { Pill("Contract ${it.text} · ${ContractTime.monthYear(p.contractEnd)}", contractPillTone(it.urgency), warn = it.urgency != Urgency.OK) }
                     if (p.loanDirection != null) Pill("Loan ${if (p.loanDirection == "in") "from" else "to"} ${p.loanClub.orEmpty().ifBlank { "another club" }}${p.loanEnd?.let { " · until ${Dates.shortMonthYear(it)}" } ?: ""}", Tone.INFO)
-                    if (p.isRegen && !p.regenOriginalName.isNullOrBlank()) Pill("Regen of ${p.regenOriginalName}", Tone.ACCENT)
+                    if (p.isRegen && !p.regenOriginalName.isNullOrBlank()) Pill("Regen of ${com.fctracker.career.logic.PlayerNames.shown(p.regenOriginalName)}", Tone.ACCENT)
                     if (p.isInjured) Pill("Injured${p.injuryReturnDate?.let { " · back ${Dates.dayMonth(it)}" } ?: ""}", Tone.BAD)
                 }
             }

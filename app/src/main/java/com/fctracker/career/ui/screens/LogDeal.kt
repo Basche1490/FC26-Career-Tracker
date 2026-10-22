@@ -63,7 +63,7 @@ private val DEAL_TYPES = listOf(
 
 /**
  * The first-team players a deal out (or a retirement) can be about: not sold, retired or in the academy, and not away
- * on loan or here on loan from another club. Strikers first, the goalkeeper last.
+ * on loan or here on loan from another club. Strikers first, the goalkeeper last (the squad list's order).
  */
 internal fun dealCandidates(state: AppState): List<Player> {
     val academyIds = state.academyPlayers.map { it.id }.toSet()
@@ -72,7 +72,7 @@ internal fun dealCandidates(state: AppState): List<Player> {
         !p.isAcademy && p.id !in academyIds && p.displayName.lowercase().trim() !in academyNames &&
             listOf("Academy", "Youth", "Sold", "Retired", "Loaned Out", "Loaned").none { p.status.equals(it, true) } &&
             !p.isLoanedOut && !p.isLoanedIn && p.loanDirection == null
-    }.sortedWith(compareBy({ LineupOrder.rank(it.primaryPosition) }, { LineupOrder.side(it.primaryPosition) }, { it.displayName.lowercase() }))
+    }.sortedWith(compareBy<Player>({ LineupOrder.rank(it.primaryPosition) }, { LineupOrder.side(it.primaryPosition) }).thenByDescending { it.overall }.thenBy { it.displayName.lowercase() })
 }
 
 private fun shortName(p: EafcPlayer) = p.commonName.ifBlank { p.name }

@@ -120,7 +120,7 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
     var headshotUrl by remember { mutableStateOf(player?.headshotUrl ?: "") }
     var status by remember { mutableStateOf(player?.status ?: "Active") }
     // The original player a regen is based on, saved with the player by his short name; never the regen's own name.
-    var regenSearchText by remember { mutableStateOf(player?.regenOriginalName.orEmpty()) }
+    var regenSearchText by remember { mutableStateOf(com.fctracker.career.logic.PlayerNames.shown(player?.regenOriginalName)) }
     var pickedTemplate by remember { mutableStateOf<com.fctracker.career.EafcPlayer?>(null) }
     var regenListOpen by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -159,7 +159,12 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
         val keptOverall = if (player == null || startingEdited) startingOverall.toIntOrNull() ?: 60 else player.overall
         val keptPotential = if (player == null) overall.toIntOrNull() ?: 60 else maxOf(player.potential, keptOverall)
         val savedNickname = nicknameToKeep(isRegen, name, nickname, player, pickedTemplate, allEafcPlayers)
-        val savedOriginal = if (isRegen) regenSearchText.trim().takeIf { it.isNotEmpty() } else null
+        // the real player by his short name: a full name typed by hand is shortened from the database
+        val savedOriginal = if (isRegen) regenSearchText.trim().takeIf { it.isNotEmpty() }?.let { typed ->
+            val key = com.fctracker.career.logic.PlayerCards.normalize(typed)
+            allEafcPlayers.firstOrNull { com.fctracker.career.logic.PlayerCards.normalize(it.name) == key && it.commonName.isNotBlank() }?.commonName?.trim()
+                ?: com.fctracker.career.logic.PlayerNames.shown(typed)
+        } else null
         val newPlayer = player?.copy(
             name = name.trim(), nickname = savedNickname,
             // a display name carried over from an old backup beats both name fields; once either was edited here it
