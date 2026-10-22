@@ -312,7 +312,7 @@ fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, openP
                     val send = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_SUBJECT, "${state.clubName} career summary"); putExtra(Intent.EXTRA_TEXT, text) }
                     context.startActivity(Intent.createChooser(send, "Career summary"))
                 }, kind = ButtonKind.SECONDARY, icon = Icons.Default.Download, full = true)
-                FcButton("Generate career graphic card", { card = true }, icon = Icons.Default.Share, full = true)
+                FcButton("Career recap pages", { nav("career_recap") }, icon = Icons.Default.Share, full = true)
             }
         }
     }

@@ -4,7 +4,11 @@ import androidx.compose.runtime.setValue
 
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -82,9 +86,9 @@ internal fun nicknameToKeep(
     return typedNickname.takeIf { it.isNotBlank() }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: List<com.fctracker.career.EafcPlayer> = emptyList(), onDismiss: () -> Unit, onUpdate: (Player) -> Unit, onDelete: (() -> Unit)? = null, referenceDate: String? = null, console: Boolean = false) {
+    val c = com.fctracker.career.ui.theme.FcTheme.colors
     var shirtNumber by remember { mutableStateOf(player?.number?.takeIf { it > 0 }?.toString() ?: "") }
     var squadRole by remember { mutableStateOf(player?.squadRole ?: "") }
     var contractEnd by remember { mutableStateOf(player?.contractEnd ?: "") }
@@ -93,6 +97,7 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
     var loanEnd by remember { mutableStateOf(player?.loanEnd ?: "") }
     var loanOption by remember { mutableStateOf(player?.loanOptionToBuy ?: false) }
     var name by remember { mutableStateOf(player?.name ?: "") }
+    var namePicked by remember { mutableStateOf(player != null) }
     var nickname by remember { mutableStateOf(player?.nickname ?: "") }
     var primaryPosition by remember { mutableStateOf(player?.primaryPosition ?: "CM") }
     var secondaryPosition by remember { mutableStateOf(player?.secondaryPosition ?: "") }
@@ -104,18 +109,9 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
     var wageK by remember { mutableStateOf(player?.wageK?.toString() ?: "5") }
     var nationality by remember { mutableStateOf(player?.nationality ?: "") }
     var birthDate by remember { mutableStateOf(player?.birthDate ?: "2000-01-01") }
-
-    // Compute age dynamically
     LaunchedEffect(birthDate, startYear) {
-        try {
-            val parts = birthDate.split("-")
-            if (parts.size >= 1) {
-                val birthYear = parts[0].toInt()
-                age = (startYear - birthYear).toString()
-            }
-        } catch(e: Exception) {}
+        birthDate.take(4).toIntOrNull()?.let { age = (startYear - it).toString() }
     }
-
     var height by remember { mutableStateOf(player?.height?.toString() ?: "180") }
     var weight by remember { mutableStateOf(player?.weight?.toString() ?: "75") }
     var preferredFoot by remember { mutableStateOf(player?.preferredFoot ?: "Right") }
@@ -123,484 +119,235 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
     var isRegen by remember { mutableStateOf(player?.isRegen ?: false) }
     var headshotUrl by remember { mutableStateOf(player?.headshotUrl ?: "") }
     var status by remember { mutableStateOf(player?.status ?: "Active") }
+    // The original player a regen is based on, saved with the player by his short name; never the regen's own name.
+    var regenSearchText by remember { mutableStateOf(player?.regenOriginalName.orEmpty()) }
+    var pickedTemplate by remember { mutableStateOf<com.fctracker.career.EafcPlayer?>(null) }
+    var regenListOpen by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
 
-    val positions = listOf("GK", "CB", "LB", "RB", "LWB", "RWB", "CDM", "CM", "CAM", "LM", "RM", "LW", "RW", "CF", "ST", "")
-    val forms = listOf("Excellent", "Good", "Okay", "Poor")
-    val morales = listOf("Happy", "Content", "Unhappy")
-    val feet = listOf("Right", "Left", "Both")
-    val weakFootOptions = listOf("1", "2", "3", "4", "5")
+    val positions = listOf("GK", "CB", "LB", "RB", "LWB", "RWB", "CDM", "CM", "CAM", "LM", "RM", "LW", "RW", "CF", "ST")
+    fun fillFrom(p: com.fctracker.career.EafcPlayer, wholeCard: Boolean) {
+        if (wholeCard) {
+            nickname = p.commonName
+            nationality = p.nationality
+            primaryPosition = p.position
+            val alt = p.alternatePositions.split(",")
+            secondaryPosition = alt.getOrNull(0)?.trim() ?: ""
+            tertiaryPosition = alt.getOrNull(1)?.trim() ?: ""
+            val iso = com.fctracker.career.data.PlayerDatabase.isoBirthDate(p.birthdate)
+            if (com.fctracker.career.logic.Dates.isDate(iso)) birthDate = iso
+            preferredFoot = p.preferredFoot
+            weakFoot = p.weakFoot.toString()
+            height = p.height.toString()
+            weight = p.weight.toString()
+            overall = p.rating.toString()
+            startingOverall = p.rating.toString()
+            if (p.value > 0) valueM = p.value.toString()
+            if (p.wage > 0) wageK = p.wage.toString()
+        }
+        headshotUrl = com.fctracker.career.data.PlayerDatabase.headshotUrl(p.id)
+    }
 
-    Dialog(onDismissRequest = onDismiss) {
-        Box(modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surface).padding(16.dp).heightIn(max = 600.dp)) {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (player == null) "Add Player" else "Edit Player", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                    Box(modifier = Modifier.size(64.dp).clip(androidx.compose.foundation.shape.CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                        if (isValidPlayerHeadshot(headshotUrl)) {
-                            coil.compose.AsyncImage(
-                                model = headshotUrl,
-                                contentDescription = "Player Face",
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                            )
-                        } else {
-                            Icon(Icons.Default.Person, contentDescription = "Face Placeholder", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(34.dp))
-                        }
+    fun save() {
+        val isAcademyPlayer = if (player != null) {
+            status.equals("Academy", ignoreCase = true) || (player.isAcademy && !status.equals("Active", ignoreCase = true) && !status.equals("Sold", ignoreCase = true) && !status.equals("Retired", ignoreCase = true))
+        } else status.equals("Academy", ignoreCase = true)
+        val isRetired = status.equals("Retired", ignoreCase = true)
+        // An existing player keeps his current rating and potential unless "Starting OVR" was edited (the only way to
+        // correct the rating here). Saving must not reset them.
+        val startingEdited = player != null && startingOverall != player.startingOverall.toString()
+        val keptOverall = if (player == null || startingEdited) startingOverall.toIntOrNull() ?: 60 else player.overall
+        val keptPotential = if (player == null) overall.toIntOrNull() ?: 60 else maxOf(player.potential, keptOverall)
+        val savedNickname = nicknameToKeep(isRegen, name, nickname, player, pickedTemplate, allEafcPlayers)
+        val savedOriginal = if (isRegen) regenSearchText.trim().takeIf { it.isNotEmpty() } else null
+        val newPlayer = player?.copy(
+            name = name.trim(), nickname = savedNickname,
+            // a display name carried over from an old backup beats both name fields; once either was edited here it
+            // must not keep hiding the edit
+            customDisplayName = if (name.trim() != player.name.trim() || savedNickname != player.nickname) null else player.customDisplayName,
+            primaryPosition = primaryPosition, secondaryPosition = secondaryPosition.takeIf { it.isNotBlank() }, tertiaryPosition = tertiaryPosition.takeIf { it.isNotBlank() },
+            age = age.toIntOrNull() ?: 21, startingOverall = startingOverall.toIntOrNull() ?: 60, overall = keptOverall, potential = keptPotential,
+            valueM = valueM.toDoubleOrNull() ?: 1.0, wageK = wageK.toIntOrNull() ?: 5, nationality = nationality, birthDate = birthDate,
+            height = height.toIntOrNull() ?: 180, weight = weight.toIntOrNull() ?: 75, preferredFoot = preferredFoot, weakFoot = weakFoot.toIntOrNull() ?: 3,
+            headshotUrl = headshotUrl, isRegen = isRegen, regenOriginalName = savedOriginal,
+            isAcademy = if (isRetired) false else isAcademyPlayer, isStartingXI = if (isRetired) false else player.isStartingXI, status = status,
+            number = shirtNumber.toIntOrNull() ?: 0, squadRole = squadRole.ifBlank { null },
+            contractEnd = if (console) contractEnd.ifBlank { null } else player.contractEnd,
+            loanDirection = if (console) loanDirection.ifBlank { null } else player.loanDirection,
+            loanClub = if (console) loanClub.ifBlank { null } else player.loanClub,
+            loanEnd = if (console) loanEnd.ifBlank { null } else player.loanEnd,
+            loanOptionToBuy = if (console) loanOption else player.loanOptionToBuy
+        ) ?: Player(
+            name = name.trim(), nickname = savedNickname,
+            primaryPosition = primaryPosition, secondaryPosition = secondaryPosition.takeIf { it.isNotBlank() }, tertiaryPosition = tertiaryPosition.takeIf { it.isNotBlank() },
+            age = age.toIntOrNull() ?: 21, startingOverall = startingOverall.toIntOrNull() ?: 60, overall = startingOverall.toIntOrNull() ?: 60, potential = overall.toIntOrNull() ?: 60,
+            valueM = valueM.toDoubleOrNull() ?: 1.0, wageK = wageK.toIntOrNull() ?: 5, nationality = nationality, birthDate = birthDate,
+            height = height.toIntOrNull() ?: 180, weight = weight.toIntOrNull() ?: 75, preferredFoot = preferredFoot, weakFoot = weakFoot.toIntOrNull() ?: 3,
+            headshotUrl = headshotUrl, isRegen = isRegen, regenOriginalName = savedOriginal, isAcademy = isAcademyPlayer, status = status,
+            number = shirtNumber.toIntOrNull() ?: 0, squadRole = squadRole.ifBlank { null }, contractEnd = contractEnd.ifBlank { null },
+            loanDirection = loanDirection.ifBlank { null }, loanClub = loanClub.ifBlank { null }, loanEnd = loanEnd.ifBlank { null }, loanOptionToBuy = loanOption
+        )
+        onUpdate(newPlayer)
+        onDismiss()
+    }
+
+    com.fctracker.career.ui.components.FcFullScreen(onDismiss = onDismiss) {
+        com.fctracker.career.ui.components.FcPage(header = {
+            com.fctracker.career.ui.components.FcTopBar(if (player == null) "Add player" else "Edit player", nav = com.fctracker.career.ui.components.NavIcon.CLOSE, onNav = onDismiss)
+        }) {
+            // -- who he is -------------------------------------------------------------------------------------------
+            item {
+                com.fctracker.career.ui.components.FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 12.dp) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        com.fctracker.career.ui.components.Headshot(headshotUrl.takeIf { isValidPlayerHeadshot(it) }, name.ifBlank { "?" }, 64.dp)
+                        Spacer(Modifier.weight(1f))
+                        com.fctracker.career.ui.components.OvrBadge((if (player == null) startingOverall else overall).toIntOrNull() ?: 0, 52.dp)
                     }
-                    Spacer(modifier = Modifier.width(16.dp))
-
-                    Column {
-                        Text(overall, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                        Text("Overall", fontSize = 12.sp, color = Color.LightGray)
+                    com.fctracker.career.ui.components.FcField("Full name (required)", name, { name = it; namePicked = false },
+                        hint = if (isRegen) "A regen’s name is his own, so it is not looked up in the player database." else "Type to search the player database.")
+                    if (!isRegen && !namePicked && name.trim().length >= 2) {
+                        val found = searchEafcPlayers(name, allEafcPlayers).take(5)
+                        if (found.isNotEmpty()) EafcPickList(found) { p -> name = p.name; namePicked = true; fillFrom(p, wholeCard = true) }
                     }
-                }
-                
-                var nameExpanded by remember { mutableStateOf(false) }
-                ExposedDropdownMenuBox(expanded = nameExpanded, onExpandedChange = { nameExpanded = !nameExpanded }) {
-                    OutlinedTextField(
-                        value = name,
-                        onValueChange = { 
-                            name = it
-                            // A regen has a name of his own that is not in the player database; the regen search
-                            // below lends the picture, so this field must not offer to overwrite the card.
-                            nameExpanded = !isRegen
-                        },
-                        label = { Text("Full Name (Required)") },
-                        modifier = Modifier.menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryEditable, true).fillMaxWidth(),
-                        singleLine = true
-                    )
-                    if (!isRegen && name.isNotEmpty() && name.length >= 1) {
-                        val filtered = searchEafcPlayers(name, allEafcPlayers)
-                        if (filtered.isNotEmpty()) {
-                            ExposedDropdownMenu(expanded = nameExpanded, onDismissRequest = { nameExpanded = false }) {
-                                filtered.forEach { p ->
-                                    val displayName = if (p.commonName.isNotBlank()) "${p.commonName} (${p.name})" else p.name
-                                    val thumbUrl = "https://cdn.futbin.com/content/fifa25/img/players/${p.id}.png"
-                                    DropdownMenuItem(
-                                        text = {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(36.dp)
-                                                        .clip(androidx.compose.foundation.shape.CircleShape)
-                                                        .background(MaterialTheme.colorScheme.surfaceVariant),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    coil.compose.AsyncImage(
-                                                        model = thumbUrl,
-                                                        contentDescription = null,
-                                                        modifier = Modifier.fillMaxSize(),
-                                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                                                    )
-                                                }
-                                                Spacer(Modifier.width(10.dp))
-                                                Column {
-                                                    Text(
-                                                        text = displayName,
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        fontWeight = FontWeight.Bold,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                    Text(
-                                                        text = "${p.position} • OVR ${p.rating} • ${p.team}",
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                    )
-                                                }
-                                            }
-                                        },
-                                        onClick = {
-                                            name = p.name
-                                            nickname = p.commonName
-                                            primaryPosition = p.position
-                                            val alt = p.alternatePositions.split(",")
-                                            secondaryPosition = alt.getOrNull(0)?.trim() ?: ""
-                                            tertiaryPosition = alt.getOrNull(1)?.trim() ?: ""
-                                            val birthYear = try { p.birthdate.split("/")[2].split(" ")[0].toInt() } catch(e:Exception) { 2000 }
-                                            age = (startYear - birthYear).toString()
-                                            overall = p.rating.toString()
-                                            startingOverall = p.rating.toString()
-                                            valueM = p.value.toString()
-                                            wageK = p.wage.toString()
-                                            nationality = p.nationality
-                                            try {
-                                                val parts = p.birthdate.split(" ")[0].split("/")
-                                                birthDate = "${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}"
-                                            } catch(e: Exception) {}
-                                            height = p.height.toString()
-                                            weight = p.weight.toString()
-                                            preferredFoot = p.preferredFoot
-                                            weakFoot = p.weakFoot.toString()
-                                            headshotUrl = "https://cdn.futbin.com/content/fifa25/img/players/${p.id}.png"
-                                            nameExpanded = false
-                                        }
-                                    )
-                                }
+                    com.fctracker.career.ui.components.FcField("Nickname (optional)", nickname, { nickname = it }, hint = "The app shows the nickname instead of the full name. Clear it to show the full name.")
+                    com.fctracker.career.ui.components.FcSwitchRow("Regen", isRegen, { isRegen = it }, sub = "A player the game generated")
+                    if (isRegen) {
+                        com.fctracker.career.ui.components.FcField("Original player name", regenSearchText, { regenSearchText = it; regenListOpen = true; pickedTemplate = null },
+                            hint = "The real player this regen is based on. Pick him from the list: he lends the headshot, and the full name above stays the regen’s own.",
+                            trailing = { Icon(androidx.compose.material.icons.Icons.Default.Search, contentDescription = null, tint = c.muted, modifier = Modifier.size(18.dp)) })
+                        if (regenListOpen && regenSearchText.trim().length >= 2) {
+                            val found = searchEafcPlayers(regenSearchText, allEafcPlayers).take(4)
+                            if (found.isNotEmpty()) EafcPickList(found) { p ->
+                                // saved by his short name: "Sergio Busquets", not "Sergio Busquets Burgos"
+                                regenSearchText = p.commonName.ifBlank { p.name }
+                                regenListOpen = false
+                                pickedTemplate = p
+                                // a new player takes the whole card from the template; an existing one only the picture
+                                fillFrom(p, wholeCard = player == null)
+                                if (player == null && name.isBlank()) name = p.name
                             }
                         }
                     }
-                }
-                OutlinedTextField(value = nickname, onValueChange = { nickname = it }, label = { Text("Nickname (Optional)") }, modifier = Modifier.fillMaxWidth())
-                if (nickname.isNotBlank()) {
-                    Text(
-                        "The app shows the nickname instead of the Full Name. Clear it to show the Full Name.",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                
-                DropdownField("Position (Required)", primaryPosition, positions.filter { it.isNotEmpty() }) { primaryPosition = it }
-                DropdownField("Secondary Position", secondaryPosition, positions) { secondaryPosition = it }
-                DropdownField("Tertiary Position", tertiaryPosition, positions) { tertiaryPosition = it }
-                if (player != null) { DropdownField("Status", status, listOf("Active", "Sold", "Loaned Out", "Loaned In", "Injured", "Academy", "Retired")) { status = it } }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = valueM, onValueChange = { valueM = it }, label = { Text("Market Value (€M)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-                    OutlinedTextField(value = wageK, onValueChange = { wageK = it }, label = { Text("Weekly Wage (€K)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = shirtNumber, onValueChange = { v -> shirtNumber = v.filter { it.isDigit() }.take(2) }, label = { Text("Shirt number") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-                    Box(Modifier.weight(1f)) { DropdownField("Squad role", squadRole.ifBlank { "Not set" }, listOf("Not set", "Crucial", "Important", "Rotation", "Sporadic", "Prospect")) { squadRole = if (it == "Not set") "" else it } }
-                }
-                Text(
-                    "On PC the shirt number, squad role and wage follow the game; you can still change them here.",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                // What the game says about the contract and any loan: read from the career on PC, typed in on console.
-                if (console) {
-                    Text("Contract & loan", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    com.fctracker.career.ui.components.FcDateField("Contract ends", contractEnd.ifBlank { null }, { contractEnd = it })
-                    DropdownField("On loan", when (loanDirection) { "in" -> "Loaned in (to us)"; "out" -> "Loaned out (from us)"; else -> "Not on loan" }, listOf("Not on loan", "Loaned in (to us)", "Loaned out (from us)")) {
-                        loanDirection = when (it) { "Loaned in (to us)" -> "in"; "Loaned out (from us)" -> "out"; else -> "" }
-                    }
-                    if (loanDirection.isNotBlank()) {
-                        OutlinedTextField(value = loanClub, onValueChange = { loanClub = it }, label = { Text(if (loanDirection == "in") "On loan from" else "On loan to") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                        com.fctracker.career.ui.components.FcDateField("Loan ends", loanEnd.ifBlank { null }, { loanEnd = it })
-                        com.fctracker.career.ui.components.FcCheckRow("Option to buy", loanOption, { loanOption = it })
-                    }
-                    Text("On console these fields are open for you to fill in. On PC the capture script reads them from your career.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else if (player != null) FromTheGameSection(player, referenceDate)
-
-                // The original player a regen is based on. It is saved with the player: it starts from what was saved
-                // (blank when nothing was), never from the regen's own name.
-                var regenSearchText by remember { mutableStateOf(player?.regenOriginalName.orEmpty()) }
-                // The template picked in this dialog, so the card's name is not overridden by the template's common name
-                var pickedTemplate by remember { mutableStateOf<com.fctracker.career.EafcPlayer?>(null) }
-                // The suggestions only open while typing, not when the dialog opens with the saved original player
-                var regenListOpen by remember { mutableStateOf(false) }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = isRegen,
-                        onCheckedChange = { isRegen = it }
-                    )
-                    Text("Is Regen", color = Color.White)
-                }
-
-                if (isRegen) {
-                    val filteredRegens = remember(regenSearchText, allEafcPlayers, regenListOpen) {
-                        if (regenListOpen && regenSearchText.trim().isNotEmpty()) {
-                            searchEafcPlayers(regenSearchText, allEafcPlayers)
-                        } else emptyList()
-                    }
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        OutlinedTextField(
-                            value = regenSearchText,
-                            onValueChange = {
-                                regenSearchText = it
-                                regenListOpen = true
-                            },
-                            label = { Text("Search Original Player / Regen Template") },
-                            placeholder = { Text("Type player name (e.g. Messi, Haaland, Modric)") },
-                            supportingText = { Text("The real player this regen is based on. It is saved with the player; the Full Name above stays the regen's own name.") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            trailingIcon = {
-                                if (regenSearchText.isNotEmpty()) {
-                                    IconButton(onClick = { regenSearchText = ""; pickedTemplate = null; regenListOpen = false }) {
-                                        Icon(Icons.Default.Close, contentDescription = "Clear")
-                                    }
-                                }
-                            }
-                        )
-                        if (filteredRegens.isNotEmpty()) {
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 4.dp),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Column(modifier = Modifier.padding(4.dp)) {
-                                    filteredRegens.forEach { p ->
-                                        val displayName = if (p.commonName.isNotBlank()) "${p.commonName} (${p.name})" else p.name
-                                        val thumbUrl = "https://cdn.futbin.com/content/fifa25/img/players/${p.id}.png"
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable {
-                                                    regenSearchText = displayName
-                                                    regenListOpen = false
-                                                    pickedTemplate = p
-                                                    // Editing an existing player: the regen template only lends its picture.
-                                                    // Adding a new player: it fills in the whole card.
-                                                    if (player == null) {
-                                                        if (name.isBlank() || name == player?.name) {
-                                                            name = p.name
-                                                        }
-                                                        nickname = p.commonName
-                                                        nationality = p.nationality
-                                                        primaryPosition = p.position
-                                                        val alt = p.alternatePositions.split(",")
-                                                        secondaryPosition = alt.getOrNull(0)?.trim() ?: ""
-                                                        tertiaryPosition = alt.getOrNull(1)?.trim() ?: ""
-                                                        val birthYear = try { p.birthdate.split("/")[2].split(" ")[0].toInt() } catch(e:Exception) { 2000 }
-                                                        age = (startYear - birthYear).toString()
-                                                        try {
-                                                            val parts = p.birthdate.split(" ")[0].split("/")
-                                                            birthDate = "${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}"
-                                                        } catch(e: Exception) {}
-                                                        preferredFoot = p.preferredFoot
-                                                        weakFoot = p.weakFoot.toString()
-                                                        height = p.height.toString()
-                                                        weight = p.weight.toString()
-                                                        overall = p.rating.toString()
-                                                        startingOverall = p.rating.toString()
-                                                    }
-                                                    headshotUrl = "https://cdn.futbin.com/content/fifa25/img/players/${p.id}.png"
-                                                }
-                                                .padding(horizontal = 8.dp, vertical = 6.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(36.dp)
-                                                    .clip(androidx.compose.foundation.shape.CircleShape)
-                                                    .background(MaterialTheme.colorScheme.background),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                coil.compose.AsyncImage(
-                                                    model = thumbUrl,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.fillMaxSize(),
-                                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                                                )
-                                            }
-                                            Spacer(Modifier.width(10.dp))
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    text = displayName,
-                                                    style = MaterialTheme.typography.bodyMedium,
-                                                    fontWeight = FontWeight.Bold,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                Text(
-                                                    text = "${p.position} • OVR ${p.rating} • ${p.team}",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            }
-                                        }
-                                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                OutlinedTextField(value = nationality, onValueChange = { nationality = it }, label = { Text("Nationality") }, modifier = Modifier.fillMaxWidth())
-                var showDatePicker by remember { mutableStateOf(false) }
-                if (showDatePicker) {
-                    val datePickerState = rememberDatePickerState()
-                    DatePickerDialog(
-                        onDismissRequest = { showDatePicker = false },
-                        confirmButton = {
-                            TextButton(onClick = {
-                                datePickerState.selectedDateMillis?.let { millis ->
-                                    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
-                                    birthDate = sdf.format(java.util.Date(millis))
-                                }
-                                showDatePicker = false
-                            }) { Text("OK") }
-                        },
-                        dismissButton = {
-                            TextButton(onClick = { showDatePicker = false }) { Text("Cancel") }
-                        }
-                    ) {
-                        DatePicker(state = datePickerState)
-                    }
-                }
-                OutlinedTextField(
-                    value = birthDate,
-                    onValueChange = {},
-                    label = { Text("Birth Date") },
-                    modifier = Modifier.fillMaxWidth().clickable { showDatePicker = true },
-                    enabled = false,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        disabledTextColor = MaterialTheme.colorScheme.onSurface,
-                        disabledBorderColor = MaterialTheme.colorScheme.outline,
-                        disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = age, onValueChange = { age = it }, label = { Text("Age (Auto)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f), readOnly = true)
-                    OutlinedTextField(value = startingOverall, onValueChange = { startingOverall = it }, label = { Text("Starting OVR") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = height, onValueChange = { height = it }, label = { Text("Height (cm)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-                    OutlinedTextField(value = weight, onValueChange = { weight = it }, label = { Text("Weight (kg)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Box(modifier = Modifier.weight(1f)) { DropdownField("Preferred Foot", preferredFoot, feet) { preferredFoot = it } }
-                    Box(modifier = Modifier.weight(1f)) { DropdownField("Weak Foot", weakFoot, weakFootOptions) { weakFoot = it } }
-                }
-
-                OutlinedTextField(value = headshotUrl, onValueChange = { headshotUrl = it }, label = { Text("Headshot URL") }, modifier = Modifier.fillMaxWidth())
-
-                Spacer(Modifier.height(16.dp))
-
-                if (player != null && (player.isPromoted || !player.isAcademy)) {
-                    OutlinedButton(
-                        onClick = {
-                            onUpdate(player.copy(isAcademy = true, isPromoted = false, status = "Academy", isStartingXI = false))
-                            onDismiss()
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF00E676)),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF00E676).copy(alpha = 0.6f))
-                    ) {
-                        Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Move Back to Youth Academy", fontWeight = FontWeight.Bold)
-                    }
-                    Spacer(Modifier.height(8.dp))
-                }
-
-                Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                    if (onDelete != null) {
-                        Button(onClick = onDelete, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) { Text("Delete") }
-                    } else {
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
-                    Button(onClick = {
-                        val isAcademyPlayer = if (player != null) {
-                            status.equals("Academy", ignoreCase = true) || (player.isAcademy && !status.equals("Active", ignoreCase = true) && !status.equals("Sold", ignoreCase = true) && !status.equals("Retired", ignoreCase = true))
-                        } else {
-                            status.equals("Academy", ignoreCase = true)
-                        }
-
-                        val isRetired = status.equals("Retired", ignoreCase = true)
-                        // An existing player keeps his current rating and potential unless "Starting OVR" was edited
-                        // (that field is the only way to correct the rating here). Saving must not reset them.
-                        val startingEdited = player != null && startingOverall != player.startingOverall.toString()
-                        val keptOverall = if (player == null || startingEdited) startingOverall.toIntOrNull() ?: 60 else player.overall
-                        val keptPotential = if (player == null) overall.toIntOrNull() ?: 60 else maxOf(player.potential, keptOverall)
-                        val savedNickname = nicknameToKeep(isRegen, name, nickname, player, pickedTemplate, allEafcPlayers)
-                        val savedOriginal = if (isRegen) regenSearchText.trim().takeIf { it.isNotEmpty() } else null
-                        val newPlayer = player?.copy(
-                            name = name.trim(),
-                            nickname = savedNickname,
-                            // A display name carried over from an old backup beats both name fields; once either was
-                            // edited here it must not keep hiding the edit.
-                            customDisplayName = if (name.trim() != player.name.trim() || savedNickname != player.nickname) null
-                            else player.customDisplayName,
-                            primaryPosition = primaryPosition,
-                            secondaryPosition = secondaryPosition.takeIf { it.isNotBlank() },
-                            tertiaryPosition = tertiaryPosition.takeIf { it.isNotBlank() },
-                            age = age.toIntOrNull() ?: 21,
-                            startingOverall = startingOverall.toIntOrNull() ?: 60,
-                            overall = keptOverall,
-                            potential = keptPotential,
-                            valueM = valueM.toDoubleOrNull() ?: 1.0,
-                            wageK = wageK.toIntOrNull() ?: 5,
-                            nationality = nationality,
-                            birthDate = birthDate,
-                            height = height.toIntOrNull() ?: 180,
-                            weight = weight.toIntOrNull() ?: 75,
-                            preferredFoot = preferredFoot,
-                            weakFoot = weakFoot.toIntOrNull() ?: 3,
-                            headshotUrl = headshotUrl,
-                            isRegen = isRegen,
-                            regenOriginalName = savedOriginal,
-                            isAcademy = if (isRetired) false else isAcademyPlayer,
-                            isStartingXI = if (isRetired) false else player.isStartingXI,
-                            status = status,
-                            number = shirtNumber.toIntOrNull() ?: 0,
-                            squadRole = squadRole.ifBlank { null },
-                            contractEnd = if (console) contractEnd.ifBlank { null } else player.contractEnd,
-                            loanDirection = if (console) loanDirection.ifBlank { null } else player.loanDirection,
-                            loanClub = if (console) loanClub.ifBlank { null } else player.loanClub,
-                            loanEnd = if (console) loanEnd.ifBlank { null } else player.loanEnd,
-                            loanOptionToBuy = if (console) loanOption else player.loanOptionToBuy
-                        ) ?: Player(
-                            name = name.trim(),
-                            nickname = savedNickname,
-                            primaryPosition = primaryPosition,
-                            secondaryPosition = secondaryPosition.takeIf { it.isNotBlank() },
-                            tertiaryPosition = tertiaryPosition.takeIf { it.isNotBlank() },
-                            age = age.toIntOrNull() ?: 21,
-                            startingOverall = startingOverall.toIntOrNull() ?: 60,
-                            overall = startingOverall.toIntOrNull() ?: 60,
-                            potential = overall.toIntOrNull() ?: 60,
-                            valueM = valueM.toDoubleOrNull() ?: 1.0,
-                            wageK = wageK.toIntOrNull() ?: 5,
-                            nationality = nationality,
-                            birthDate = birthDate,
-                            height = height.toIntOrNull() ?: 180,
-                            weight = weight.toIntOrNull() ?: 75,
-                            preferredFoot = preferredFoot,
-                            weakFoot = weakFoot.toIntOrNull() ?: 3,
-                            headshotUrl = headshotUrl,
-                            isRegen = isRegen,
-                            regenOriginalName = savedOriginal,
-                            isAcademy = isAcademyPlayer,
-                            status = status,
-                            number = shirtNumber.toIntOrNull() ?: 0,
-                            squadRole = squadRole.ifBlank { null },
-                            contractEnd = contractEnd.ifBlank { null },
-                            loanDirection = loanDirection.ifBlank { null },
-                            loanClub = loanClub.ifBlank { null },
-                            loanEnd = loanEnd.ifBlank { null },
-                            loanOptionToBuy = loanOption
-                        )
-                        onUpdate(newPlayer)
-                        onDismiss()
-                    }) { Text("Save") }
                 }
             }
+            // -- positions and status --------------------------------------------------------------------------------
+            item {
+                com.fctracker.career.ui.components.FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 12.dp) {
+                    com.fctracker.career.ui.components.SectionHeader("Positions & status", icon = androidx.compose.material.icons.Icons.Default.Person)
+                    com.fctracker.career.ui.components.FieldPair(
+                        { m -> com.fctracker.career.ui.components.FcSelectField("Position (required)", primaryPosition, positions, { primaryPosition = it }, m) },
+                        { m -> com.fctracker.career.ui.components.FcSelectField("Secondary", secondaryPosition.ifBlank { "None" }, listOf("None") + positions, { secondaryPosition = if (it == "None") "" else it }, m) }
+                    )
+                    com.fctracker.career.ui.components.FieldPair(
+                        { m -> com.fctracker.career.ui.components.FcSelectField("Tertiary", tertiaryPosition.ifBlank { "None" }, listOf("None") + positions, { tertiaryPosition = if (it == "None") "" else it }, m) },
+                        { m ->
+                            if (player != null) com.fctracker.career.ui.components.FcSelectField("Status", status, listOf("Active", "Sold", "Loaned Out", "Loaned In", "Injured", "Academy", "Retired"), { status = it }, m)
+                            else com.fctracker.career.ui.components.FcNumberField("Shirt number", shirtNumber, { shirtNumber = it.take(2) }, m)
+                        }
+                    )
+                    com.fctracker.career.ui.components.FieldPair(
+                        { m -> com.fctracker.career.ui.components.FcNumberField("Market value (€M)", valueM, { valueM = it }, m, decimal = true) },
+                        { m -> com.fctracker.career.ui.components.FcNumberField("Weekly wage (€K)", wageK, { wageK = it }, m) }
+                    )
+                    com.fctracker.career.ui.components.FieldPair(
+                        { m ->
+                            if (player != null) com.fctracker.career.ui.components.FcNumberField("Shirt number", shirtNumber, { shirtNumber = it.take(2) }, m)
+                            else Spacer(m)
+                        },
+                        { m -> com.fctracker.career.ui.components.FcSelectField("Squad role", squadRole.ifBlank { "Not set" }, listOf("Not set", "Crucial", "Important", "Rotation", "Sporadic", "Prospect"), { squadRole = if (it == "Not set") "" else it }, m) }
+                    )
+                    com.fctracker.career.ui.components.Muted("On PC the shirt number, squad role and wage follow the game; you can still change them here.", 11.sp)
+                }
+            }
+            // -- contract and loan -----------------------------------------------------------------------------------
+            item {
+                com.fctracker.career.ui.components.FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 12.dp) {
+                    com.fctracker.career.ui.components.FcLabel("FROM THE GAME")
+                    if (console) {
+                        com.fctracker.career.ui.components.FcDateField("Contract ends", contractEnd.ifBlank { null }, { contractEnd = it })
+                        com.fctracker.career.ui.components.FcSelectField("On loan", when (loanDirection) { "in" -> "Loaned in (to us)"; "out" -> "Loaned out (from us)"; else -> "Not on loan" },
+                            listOf("Not on loan", "Loaned in (to us)", "Loaned out (from us)"), { loanDirection = when (it) { "Loaned in (to us)" -> "in"; "Loaned out (from us)" -> "out"; else -> "" } })
+                        if (loanDirection.isNotBlank()) {
+                            com.fctracker.career.ui.components.FcField(if (loanDirection == "in") "On loan from" else "On loan to", loanClub, { loanClub = it })
+                            com.fctracker.career.ui.components.FcDateField("Loan ends", loanEnd.ifBlank { null }, { loanEnd = it })
+                            com.fctracker.career.ui.components.FcCheckRow("Option to buy", loanOption, { loanOption = it })
+                        }
+                        com.fctracker.career.ui.components.Muted("On console these fields are open for you to fill in. On PC the capture script reads them from your career.", 11.sp)
+                    } else {
+                        val lock = androidx.compose.material.icons.Icons.Default.Lock
+                        val chip = player?.let { com.fctracker.career.telemetry.ContractTime.contractChip(it, referenceDate) }
+                        val contractText = player?.contractEnd?.let { com.fctracker.career.telemetry.ContractTime.monthYear(it) + (chip?.let { ch -> " · ${leftText(ch)}" } ?: "") } ?: "–"
+                        com.fctracker.career.ui.components.FcPickerBox("Contract ends", contractText, lock, {}, muted = true)
+                        val loanText = when (player?.loanDirection) {
+                            "in" -> "From ${player.loanClub.orEmpty().ifBlank { "another club" }}"
+                            "out" -> "To ${player.loanClub.orEmpty().ifBlank { "another club" }}"
+                            else -> "Not on loan"
+                        }
+                        com.fctracker.career.ui.components.FcPickerBox("On loan to / from", loanText, lock, {}, muted = true)
+                        com.fctracker.career.ui.components.FieldPair(
+                            { m -> com.fctracker.career.ui.components.FcPickerBox("Loan ends", player?.loanEnd?.let { com.fctracker.career.logic.Dates.full(it) } ?: "–", lock, {}, m, muted = true) },
+                            { m -> com.fctracker.career.ui.components.FcPickerBox("Option to buy", if (player?.loanDirection == null) "–" else if (player.loanOptionToBuy) "Yes" else "No", lock, {}, m, muted = true) }
+                        )
+                        com.fctracker.career.ui.components.Muted("On PC this is read from your career by the capture script and kept up to date by it. On console these fields are open for you to fill in.", 11.sp)
+                    }
+                }
+            }
+            // -- details -----------------------------------------------------------------------------------------------
+            item {
+                com.fctracker.career.ui.components.FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 12.dp) {
+                    com.fctracker.career.ui.components.SectionHeader("Details", icon = androidx.compose.material.icons.Icons.Default.Person)
+                    com.fctracker.career.ui.components.FcField("Nationality", nationality, { nationality = it })
+                    com.fctracker.career.ui.components.FieldPair(
+                        { m -> com.fctracker.career.ui.components.FcDateField("Birth date", birthDate, { birthDate = it }, m) },
+                        { m -> com.fctracker.career.ui.components.FcPickerBox("Age (auto)", age, androidx.compose.material.icons.Icons.Default.Lock, {}, m, muted = true) }
+                    )
+                    com.fctracker.career.ui.components.FieldPair(
+                        { m -> com.fctracker.career.ui.components.FcNumberField("Starting OVR", startingOverall, { startingOverall = it.take(2) }, m) },
+                        { m -> com.fctracker.career.ui.components.FcNumberField("Height (cm)", height, { height = it.take(3) }, m) }
+                    )
+                    com.fctracker.career.ui.components.FieldPair(
+                        { m -> com.fctracker.career.ui.components.FcNumberField("Weight (kg)", weight, { weight = it.take(3) }, m) },
+                        { m -> com.fctracker.career.ui.components.FcSelectField("Preferred foot", preferredFoot, listOf("Right", "Left", "Both"), { preferredFoot = it }, m) }
+                    )
+                    com.fctracker.career.ui.components.FcSelectField("Weak foot (1–5)", weakFoot, listOf("1", "2", "3", "4", "5"), { weakFoot = it })
+                    com.fctracker.career.ui.components.FcField("Headshot link", headshotUrl, { headshotUrl = it }, placeholder = "https://…", hint = "Filled in from the player database (or the regen’s original player); paste another picture link to change it.")
+                }
+            }
+            item { com.fctracker.career.ui.components.FcButton("Save", { save() }, icon = androidx.compose.material.icons.Icons.Default.Save, full = true, enabled = name.isNotBlank()) }
+            item {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (player != null && (player.isPromoted || !player.isAcademy)) {
+                        com.fctracker.career.ui.components.FcButton("Move to academy", {
+                            onUpdate(player.copy(isAcademy = true, isPromoted = false, status = "Academy", isStartingXI = false)); onDismiss()
+                        }, Modifier.weight(1f), kind = com.fctracker.career.ui.components.ButtonKind.SECONDARY)
+                    }
+                    if (onDelete != null) com.fctracker.career.ui.components.FcButton("Delete", { confirmDelete = true }, Modifier.weight(1f), kind = com.fctracker.career.ui.components.ButtonKind.DANGER)
+                    if ((player == null || !(player.isPromoted || !player.isAcademy)) && onDelete == null) com.fctracker.career.ui.components.FcButton("Cancel", onDismiss, Modifier.weight(1f), kind = com.fctracker.career.ui.components.ButtonKind.SECONDARY)
+                }
+            }
+        }
+        if (confirmDelete && onDelete != null) {
+            com.fctracker.career.ui.components.ConfirmDialog("Delete ${name.ifBlank { "this player" }}?", "He is removed from the squad. This cannot be undone.", "Delete", { onDelete() }, { confirmDelete = false })
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** Database players to pick from, with headshot, position, rating and club. */
 @Composable
-private fun DropdownField(label: String, selected: String, options: List<String>, onSelect: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
-        OutlinedTextField(
-            value = selected,
-            onValueChange = {},
-            readOnly = true,
-            label = { Text(label) },
-            modifier = Modifier.menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
-        )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            options.forEach { option ->
-                DropdownMenuItem(
-                    text = { Text(if(option.isEmpty()) "None" else option) },
-                    onClick = {
-                        onSelect(option)
-                        expanded = false
-                    }
-                )
+private fun EafcPickList(players: List<com.fctracker.career.EafcPlayer>, onPick: (com.fctracker.career.EafcPlayer) -> Unit) {
+    val c = com.fctracker.career.ui.theme.FcTheme.colors
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).border(1.dp, c.border, RoundedCornerShape(18.dp))) {
+        players.forEachIndexed { i, p ->
+            if (i > 0) com.fctracker.career.ui.components.HRule()
+            Row(
+                Modifier.fillMaxWidth().clickable { onPick(p) }.padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                com.fctracker.career.ui.components.Headshot(com.fctracker.career.data.PlayerDatabase.headshotUrl(p.id), p.commonName.ifBlank { p.name }, 36.dp)
+                Column(Modifier.weight(1f)) {
+                    com.fctracker.career.ui.components.FcText(p.commonName.ifBlank { p.name }, 15.sp, FontWeight.SemiBold, maxLines = 1)
+                    com.fctracker.career.ui.components.Muted("${p.position} · OVR ${p.rating}${if (p.team.isNotBlank()) " · ${p.team}" else ""}", 12.sp, maxLines = 1)
+                }
             }
         }
     }

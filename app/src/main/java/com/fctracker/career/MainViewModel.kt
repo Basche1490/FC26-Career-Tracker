@@ -1251,8 +1251,30 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         }
     }
 
+    /** The short (common) name of a real player from the database ("Sergio Busquets" for "Sergio Busquets Burgos"). */
+    fun shortPlayerName(fullName: String): String {
+        val key = com.fctracker.career.data.PlayerDatabase.normalize(fullName)
+        return shortNames[key] ?: fullName
+    }
+
+    private val shortNames: Map<String, String> by lazy {
+        loadAllEafcPlayers()
+        allEafcPlayers.filter { it.commonName.isNotBlank() }.associate { com.fctracker.career.data.PlayerDatabase.normalize(it.name) to it.commonName.trim() }
+    }
+
+    /** Regens saved before the short names were used are named the short way too. */
+    private fun shortenRegenNames() {
+        val lookup: (String) -> String? = { n -> shortNames[com.fctracker.career.data.PlayerDatabase.normalize(n)] }
+        // and a prospect who is already in the first team leaves the academy list
+        _state.update { com.fctracker.career.logic.Academy.firstTeamOnly(com.fctracker.career.logic.RegenNames.shorten(it, lookup)) }
+    }
+
+    // after shortNames above: properties and init blocks run in the order they are written
     init {
-        viewModelScope.launch(Dispatchers.IO) { loadAllEafcPlayers() }
+        viewModelScope.launch(Dispatchers.IO) {
+            loadAllEafcPlayers()
+            shortenRegenNames()
+        }
     }
 
     /** Writes the current career to disk right away (it is also saved by itself shortly after every change). */

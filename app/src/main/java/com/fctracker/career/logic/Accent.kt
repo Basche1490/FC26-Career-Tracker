@@ -84,22 +84,103 @@ object Accent {
         return Triple(v(h + 1.0 / 3.0), v(h), v(h - 1.0 / 3.0))
     }
 
-    fun choose(primary: String?, secondary: String?, background: String = BACKGROUND): AccentChoice {
-        for (c in listOf(primary, secondary)) {
-            val rgb = parse(c) ?: continue
-            val (h, l0, s) = rgbToHls(rgb.first, rgb.second, rgb.third)
-            if (s < 0.25 || l0 < 0.06 || l0 > 0.94) continue
-            var l = l0
-            var cur = hex(rgb.first, rgb.second, rgb.third)
-            while (contrast(cur, background) < 4.5 && l < 0.95) {
-                l += 0.02
-                val (r, g, b) = hlsToRgb(h, l, s)
-                cur = hex(r, g, b)
-            }
-            val original = hex(rgb.first, rgb.second, rgb.third)
-            return AccentChoice(cur, if (cur.equals(original, ignoreCase = true)) "kept as it is" else "lightened to stay readable", original)
+    /**
+     * The colours that carry a meaning: win (and money coming in), draw, loss (and money going out). An accent never
+     * sits within [CLASH_DEGREES] of their hues, so a highlight is never mistaken for a result or a fee.
+     */
+    val RESERVED = listOf("win" to "#7EE0A4", "draw" to "#FFC857", "loss" to "#FF8F86")
+    const val CLASH_DEGREES = 28.0
+
+    fun hueDegrees(colour: String): Double? {
+        val (r, g, b) = parse(colour) ?: return null
+        val (h, _, s) = rgbToHls(r, g, b)
+        return if (s < 0.2) null else h * 360.0
+    }
+
+    private fun gap(a: Double, b: Double): Double { val d = Math.abs(a - b) % 360.0; return if (d > 180.0) 360.0 - d else d }
+    private fun reservedHues() = RESERVED.mapNotNull { (name, hex) -> hueDegrees(hex)?.let { name to it } }
+
+    /** The reserved colour this one could be mistaken for, or null. */
+    fun clashesWith(colour: String): String? {
+        val h = hueDegrees(colour) ?: return null
+        return reservedHues().filter { gap(h, it.second) < CLASH_DEGREES }.minByOrNull { gap(h, it.second) }?.first
+    }
+
+    /** The colour turned just far enough round the colour wheel to keep clear of every reserved hue. */
+    fun awayFromReserved(colour: String, background: String = BACKGROUND): String {
+        val (r0, g0, b0) = parse(colour) ?: return colour
+        val (h0, l0, s) = rgbToHls(r0, g0, b0)
+        if (s < 0.2) return colour
+        val hue = h0 * 360.0
+        val reserved = reservedHues().map { it.second }
+        if (reserved.all { gap(hue, it) >= CLASH_DEGREES }) return colour
+        val candidates = reserved.flatMap { listOf(it - CLASH_DEGREES - 1, it + CLASH_DEGREES + 1) }.map { ((it % 360.0) + 360.0) % 360.0 }
+        val best = candidates.filter { c -> reserved.all { gap(c, it) >= CLASH_DEGREES } }.minByOrNull { gap(it, hue) } ?: return colour
+        var l = l0
+        var (r, g, b) = hlsToRgb(best / 360.0, l, s)
+        var cur = hex(r, g, b)
+        while (contrast(cur, background) < 4.5 && l < 0.95) {
+            l += 0.02
+            val t = hlsToRgb(best / 360.0, l, s); r = t.first; g = t.second; b = t.third
+            cur = hex(r, g, b)
         }
-        return AccentChoice(DEFAULT, "both colours are black, white or grey: the default mint is used", null)
+        return cur
+    }
+
+    /** A club colour made readable on the dark background (same hue, lighter), or null for black, white and grey. */
+    private fun readable(colour: String?, background: String): String? {
+        val rgb = parse(colour) ?: return null
+        val (h, l0, s) = rgbToHls(rgb.first, rgb.second, rgb.third)
+        if (s < 0.25 || l0 < 0.06 || l0 > 0.94) return null
+        var l = l0
+        var cur = hex(rgb.first, rgb.second, rgb.third)
+        while (contrast(cur, background) < 4.5 && l < 0.95) {
+            l += 0.02
+            val (r, g, b) = hlsToRgb(h, l, s)
+            cur = hex(r, g, b)
+        }
+        return cur
+    }
+
+    /**
+     * The accent: the first club colour that is not black, white or grey, made readable. A colour that would look like
+     * a result colour gives way to the other club colour when that one is clear of them; when neither is, it is turned
+     * just far enough round the colour wheel.
+     */
+    fun choose(primary: String?, secondary: String?, background: String = BACKGROUND): AccentChoice {
+        val options = listOf(primary, secondary).mapNotNull { c -> readable(c, background)?.let { c to it } }
+        if (options.isEmpty()) return AccentChoice(DEFAULT, "both colours are black, white or grey: the default mint is used", null)
+        val clear = options.firstOrNull { clashesWith(it.second) == null }
+        val (from, made) = clear ?: options.first()
+        val original = parse(from)!!.let { (r, g, b) -> hex(r, g, b) }
+        val clash = if (clear == null) clashesWith(made) else null
+        val chosen = if (clash != null) awayFromReserved(made, background) else made
+        val why = when {
+            clash != null -> "turned a little so it does not look like the $clash colour"
+            from != options.first().first -> "the other club colour, so it does not look like a result colour"
+            chosen.equals(original, ignoreCase = true) -> "kept as it is"
+            else -> "lightened to stay readable"
+        }
+        return AccentChoice(chosen, why, original)
+    }
+
+    /**
+     * The second accent (section icons, charts, the menu): the club colour the main accent did not use, readable and
+     * clear of the result colours; for a club whose other colour is black, white or grey, a lighter shade of the
+     * main accent.
+     */
+    fun chooseSecondary(primary: String?, secondary: String?, accentHex: String, background: String = BACKGROUND): String {
+        val main = choose(primary, secondary, background)
+        val other = listOf(primary, secondary).filter { it != null && !(parse(it)?.let { (r, g, b) -> hex(r, g, b) }).equals(main.fromHex, ignoreCase = true) }
+        for (c in other) {
+            val made = readable(c, background) ?: continue
+            val clear = if (clashesWith(made) != null) awayFromReserved(made, background) else made
+            if (gap(hueDegrees(clear) ?: 0.0, hueDegrees(accentHex) ?: 180.0) >= 20.0) return clear
+        }
+        val (r, g, b) = parse(accentHex) ?: return accentHex
+        val (h, l, s) = rgbToHls(r, g, b)
+        val (r2, g2, b2) = hlsToRgb(h, (l + 0.16).coerceAtMost(0.88), (s * 0.8).coerceAtLeast(0.3))
+        return hex(r2, g2, b2)
     }
 
     /** Dark or white text on top of [hex], whichever reads better. */

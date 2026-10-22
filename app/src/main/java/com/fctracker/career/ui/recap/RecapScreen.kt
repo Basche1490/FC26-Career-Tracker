@@ -69,18 +69,78 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** The season recap: ten pages (fewer when a page has nothing to show), swiped through and shared as images or a PDF. */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun RecapScreen(viewModel: MainViewModel, season: Int?, onBack: () -> Unit) {
+    val state by viewModel.state.collectAsState()
+    val view = remember(state, season) { if (season != null) SeasonView.of(state.copy(viewingSeasonYear = season)) else SeasonView.of(state) }
+    val built = remember(state, view) { Recap.build(state, view) }
+    RecapViewer(
+        viewModel = viewModel, title = "Season recap", label = view.label, built = built, pageNames = Recap.PAGE_NAMES,
+        excluded = state.recapExcludedPages, onExcluded = { viewModel.setRecapExcluded(it) },
+        clubLine = "${state.clubName} · ${view.label}", fileBase = "recap-${view.season}", shareTitle = "Season recap ${view.label}",
+        pdfName = "Season recap ${view.label.replace("/", "-")}.pdf", emptyReason = "Nothing to show this season",
+        about = listOf(
+            "Ten pages, made by itself when a season ends and any time from Season Summary. Swipe between them.",
+            "Each page is an image of its own, so they can be shared together (most apps show them as a swipeable set) or as one PDF.",
+            "Uses your crest and club colours; the figures come from your matches and the game."
+        ),
+        aboutTitle = "About the season recap",
+        archivedLabel = if (view.isArchived) "${view.label} · ${view.leagueName}" else null,
+        onBack = onBack
+    )
+}
+
+/** The career recap: the season recap's pages for the whole career, shared the same way. */
+@Composable
+fun CareerRecapScreen(viewModel: MainViewModel, onBack: () -> Unit) {
+    val state by viewModel.state.collectAsState()
+    val built = remember(state) { com.fctracker.career.logic.CareerRecap.build(state) }
+    var excluded by remember { mutableStateOf<List<Int>>(emptyList()) }
+    val first = (state.historicalSeasons.map { it.year } + state.startYear).minOrNull() ?: state.startYear
+    val label = if (first == state.startYear) SeasonView.seasonLabel(first) else "${SeasonView.seasonLabel(first)}–${SeasonView.seasonLabel(state.startYear)}"
+    RecapViewer(
+        viewModel = viewModel, title = "Career recap", label = label, built = built, pageNames = com.fctracker.career.logic.CareerRecap.PAGE_NAMES,
+        excluded = excluded, onExcluded = { excluded = it },
+        clubLine = "${state.clubName} · career", fileBase = "career-recap", shareTitle = "Career recap · ${state.clubName}",
+        pdfName = "Career recap ${state.clubName}.pdf", emptyReason = "Nothing to show yet",
+        about = listOf(
+            "Seven pages about the whole career: every season, the trophies, the records, the hall of fame, the best players and the transfers.",
+            "Each page is an image of its own, so they can be shared together or as one PDF.",
+            "Uses your crest and club colours; the figures come from every season the app holds."
+        ),
+        aboutTitle = "About the career recap",
+        archivedLabel = null,
+        onBack = onBack
+    )
+}
+
+/** Pages drawn as images: swipe through them, share them one by one or together, or save them as a PDF. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RecapViewer(
+    viewModel: MainViewModel,
+    title: String,
+    label: String,
+    built: List<com.fctracker.career.logic.RecapPage>,
+    pageNames: List<String>,
+    excluded: List<Int>,
+    onExcluded: (List<Int>) -> Unit,
+    clubLine: String,
+    fileBase: String,
+    shareTitle: String,
+    pdfName: String,
+    emptyReason: String,
+    about: List<String>,
+    aboutTitle: String,
+    archivedLabel: String?,
+    onBack: () -> Unit
+) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val c = FcTheme.colors
-    val view = remember(state, season) { if (season != null) SeasonView.of(state.copy(viewingSeasonYear = season)) else SeasonView.of(state) }
-    val built = remember(state, view) { Recap.build(state, view) }
     val builtNumbers = built.map { it.number }.toSet()
-    val pages = built.filter { it.number !in state.recapExcludedPages }.mapIndexed { i, p -> p.copy(number = i + 1) }
-    val clubLine = "${state.clubName} · ${view.label}"
+    val pages = built.filter { it.number !in excluded }.mapIndexed { i, p -> p.copy(number = i + 1) }
     val style = remember(state.primaryColorHex, state.secondaryColorHex) { RecapRenderer.style(context, state.primaryColorHex, state.secondaryColorHex) }
     var assets by remember { mutableStateOf<RecapRenderer.Assets?>(null) }
     var previews by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
@@ -109,9 +169,9 @@ fun RecapScreen(viewModel: MainViewModel, season: Int?, onBack: () -> Unit) {
                 val images = fullSize()
                 val uris = withContext(Dispatchers.IO) {
                     RecapShare.clear(context)
-                    images.mapIndexedNotNull { i, b -> if (only == null || only == i) RecapShare.savePng(context, b, "recap-${view.season}-${i + 1}.png") else null }
+                    images.mapIndexedNotNull { i, b -> if (only == null || only == i) RecapShare.savePng(context, b, "$fileBase-${i + 1}.png") else null }
                 }
-                RecapShare.shareImages(context, uris, "Season recap ${view.label}")
+                RecapShare.shareImages(context, uris, shareTitle)
             }.onFailure { problem = "Could not prepare the images: ${it.message ?: it.javaClass.simpleName}" }
             busy = null
         }
@@ -131,8 +191,8 @@ fun RecapScreen(viewModel: MainViewModel, season: Int?, onBack: () -> Unit) {
     }
 
     FcPage(header = {
-        if (view.isArchived) Box(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)) { ArchivedBanner("${view.label} · ${view.leagueName}", onBack) }
-        FcTopBar("Season recap", sub = if (pages.isEmpty()) view.label else "${view.label} · page ${pager.currentPage + 1} of ${pages.size}", nav = NavIcon.BACK, onNav = onBack)
+        if (archivedLabel != null) Box(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)) { ArchivedBanner(archivedLabel, onBack) }
+        FcTopBar(title, sub = if (pages.isEmpty()) label else "$label · page ${pager.currentPage + 1} of ${pages.size}", nav = NavIcon.BACK, onNav = onBack)
     }) {
         if (pages.isEmpty()) {
             item { EmptyCard("Every page is switched off. Turn on at least one page below.") }
@@ -142,7 +202,7 @@ fun RecapScreen(viewModel: MainViewModel, season: Int?, onBack: () -> Unit) {
                     val bmp = previews.getOrNull(i)
                     Box(
                         Modifier.fillMaxWidth().aspectRatio(0.8f).clip(RoundedCornerShape(28.dp)).background(c.surface)
-                            .semantics { contentDescription = "Season recap page ${i + 1}: ${pages.getOrNull(i)?.title.orEmpty()}" },
+                            .semantics { contentDescription = "$title page ${i + 1}: ${pages.getOrNull(i)?.title.orEmpty()}" },
                         contentAlignment = Alignment.Center
                     ) {
                         if (bmp != null) Image(bmp.asImageBitmap(), contentDescription = null, contentScale = ContentScale.FillWidth, modifier = Modifier.fillMaxWidth())
@@ -165,7 +225,7 @@ fun RecapScreen(viewModel: MainViewModel, season: Int?, onBack: () -> Unit) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     FcButton(busy ?: if (pages.size == 1) "Share the page" else "Share all ${pages.size} pages", { share(null) }, icon = Icons.Default.Share, full = true, enabled = busy == null && previews.isNotEmpty())
                     FieldPair(
-                        { m -> FcButton("Save as PDF", { savePdf.launch("Season recap ${view.label.replace("/", "-")}.pdf") }, m, kind = ButtonKind.SECONDARY, icon = Icons.Default.Download, enabled = busy == null && previews.isNotEmpty()) },
+                        { m -> FcButton("Save as PDF", { savePdf.launch(pdfName) }, m, kind = ButtonKind.SECONDARY, icon = Icons.Default.Download, enabled = busy == null && previews.isNotEmpty()) },
                         { m -> FcButton("Share this page", { share(pager.currentPage) }, m, kind = ButtonKind.SECONDARY, icon = Icons.Default.Share, enabled = busy == null && previews.isNotEmpty()) }
                     )
                     problem?.let { Muted(it, 12.sp) }
@@ -175,22 +235,19 @@ fun RecapScreen(viewModel: MainViewModel, season: Int?, onBack: () -> Unit) {
         item {
             FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
                 SectionHeader("Pages to include", icon = Icons.Default.List)
-                Recap.PAGE_NAMES.forEachIndexed { i, name ->
+                pageNames.forEachIndexed { i, name ->
                     val n = i + 1
                     val has = n in builtNumbers
-                    FcSwitchRow("$n. $name", has && n !in state.recapExcludedPages, { on ->
-                        viewModel.setRecapExcluded(if (on) state.recapExcludedPages - n else state.recapExcludedPages + n)
-                    }, sub = if (!has) "Nothing to show this season" else null, enabled = has)
+                    FcSwitchRow("$n. $name", has && n !in excluded, { on -> onExcluded(if (on) excluded - n else excluded + n) },
+                        sub = if (!has) emptyReason else null, enabled = has)
                 }
-                Muted("A page with nothing to show (no cup run, no transfers) is left out by itself.", 11.sp)
+                Muted("A page with nothing to show is left out by itself.", 11.sp)
             }
         }
         item {
             FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
-                SectionHeader("About the season recap", icon = Icons.Default.Info)
-                Bullet("Ten pages, made by itself when a season ends and any time from Season Summary. Swipe between them.")
-                Bullet("Each page is an image of its own, so they can be shared together (most apps show them as a swipeable set) or as one PDF.")
-                Bullet("Uses your crest and club colours; the figures come from your matches and the game.")
+                SectionHeader(aboutTitle, icon = Icons.Default.Info)
+                about.forEach { Bullet(it) }
             }
         }
     }

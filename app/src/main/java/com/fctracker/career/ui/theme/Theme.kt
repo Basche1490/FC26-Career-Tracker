@@ -21,6 +21,9 @@ data class FcColors(
     /** The accent at low strength, for selected chips, icon tiles and the highlighted table row. */
     val accentBg: Color = FcMint.copy(alpha = 0.14f),
     val accentLine: Color = FcMint.copy(alpha = 0.4f),
+    /** The second club colour: section icons, charts, the menu's selected place. Never a result or money colour. */
+    val accent2: Color = FcInfo,
+    val accent2Bg: Color = FcInfo.copy(alpha = 0.14f),
     val bg: Color = FcBg,
     val surface: Color = FcSurface,
     val surface2: Color = FcSurface2,
@@ -81,17 +84,22 @@ fun FCTheme(
     val accentHex = remember(primaryHex, secondaryHex, useClubColours) {
         if (useClubColours) Accent.choose(primaryHex, secondaryHex).hex else Accent.DEFAULT
     }
+    val accent2Hex = remember(primaryHex, secondaryHex, useClubColours, accentHex) {
+        if (useClubColours) Accent.chooseSecondary(primaryHex, secondaryHex, accentHex) else "#7CC4FF"
+    }
     val accent = parseHex(accentHex) ?: FcMint
+    val accent2 = parseHex(accent2Hex) ?: FcInfo
     val onAccent = parseHex(Accent.onColour(accentHex)) ?: FcOnMint
-    val colors = FcColors(accent = accent, onAccent = onAccent, accentBg = accent.copy(alpha = 0.14f), accentLine = accent.copy(alpha = 0.4f))
+    val colors = FcColors(accent = accent, onAccent = onAccent, accentBg = accent.copy(alpha = 0.14f), accentLine = accent.copy(alpha = 0.4f),
+        accent2 = accent2, accent2Bg = accent2.copy(alpha = 0.14f))
 
     val scheme = darkColorScheme(
         primary = accent,
         onPrimary = onAccent,
         primaryContainer = colors.accentBg,
         onPrimaryContainer = accent,
-        secondary = accent,
-        onSecondary = onAccent,
+        secondary = accent2,
+        onSecondary = parseHex(Accent.onColour(accent2Hex)) ?: FcOnMint,
         secondaryContainer = FcSurface2,
         onSecondaryContainer = FcText,
         tertiary = FcInfo,

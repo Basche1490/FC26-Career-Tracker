@@ -167,13 +167,34 @@ class AccentTest {
         assertEquals("#0B57D0", blue.fromHex)
         assertTrue(Accent.contrast(blue.hex, Accent.BACKGROUND) >= 4.5)
         assertEquals("lightened to stay readable", blue.why)
-        val gold = Accent.choose("#f2b705", "#111111")
-        assertEquals("kept as it is", gold.why)
+        val purple = Accent.choose("#d4a5ff", "#111111")
+        assertEquals("kept as it is", purple.why)
         val mono = Accent.choose("#111111", "#ffffff")
         assertEquals(Accent.DEFAULT, mono.hex)
         assertNull(mono.fromHex)
         assertEquals("#05140D", Accent.onColour("#62E0B0"))
         assertEquals("#FFFFFF", Accent.onColour("#0B57D0"))
+    }
+
+    @Test fun theAccentNeverLooksLikeAResultColour() {
+        // a red club whose other colour is white: red would read as a loss, so it is turned away from it
+        val red = Accent.choose("#c8102e", "#ffffff")
+        assertNull(Accent.clashesWith(red.hex))
+        assertTrue(red.why.contains("loss"))
+        assertTrue(Accent.contrast(red.hex, Accent.BACKGROUND) >= 4.5)
+        // a yellow and green club: both near a result colour, the hue is turned just enough
+        val canaries = Accent.choose("#fff200", "#00a650")
+        assertNull(Accent.clashesWith(canaries.hex))
+        // a green primary with a blue secondary: the blue is used instead
+        val greenBlue = Accent.choose("#18a33a", "#1e4bd2")
+        assertEquals("#1E4BD2", greenBlue.fromHex)
+        assertNull(Accent.clashesWith(greenBlue.hex))
+        // the second accent is the other club colour, also clear of the result colours, and different from the first
+        val second = Accent.chooseSecondary("#0b57d0", "#f2b705", Accent.choose("#0b57d0", "#f2b705").hex)
+        assertNull(Accent.clashesWith(second))
+        assertTrue(Accent.contrast(second, Accent.BACKGROUND) >= 4.5)
+        val tint = Accent.chooseSecondary("#0b57d0", "#ffffff", Accent.choose("#0b57d0", "#ffffff").hex)
+        assertTrue(Accent.parse(tint) != null)
     }
 
     @Test fun hlsRoundTrip() {
@@ -248,6 +269,24 @@ class StoryAndRecapTest {
         assertEquals("the player card's own count wins when it is higher", 9, p2.goals)
     }
 
+    @Test fun theCareerRecapCoversEverySeason() {
+        val past = HistoricalSeason(year = 2025, leagueName = "League One", finalPosition = 1, points = 92, matches = matches.map { it.copy(id = it.id + "-old", matchDate = it.matchDate.replace("2026", "2025")) },
+            players = listOf(varela, pike), trophies = listOf("League One 2025/26"))
+        val state = AppState(clubName = "Your Club", managerName = "Manager name", leagueName = "EFL Championship", startYear = 2026, players = listOf(varela, pike), recentMatches = matches,
+            historicalSeasons = listOf(past), teamTrophies = listOf(com.fctracker.career.TeamTrophy(name = "FA Cup 2026/27")),
+            transfers = listOf(TransferLog(playerName = "Dario Kane", type = "In (Permanent)", feeM = 2.4, fromToClub = "Sheffield United", date = "2026-07-14")))
+        val pages = CareerRecap.build(state)
+        assertEquals(listOf("Cover", "Season by season", "Trophies", "Records", "Hall of fame", "Best players", "Transfers"), pages.map { it.name })
+        val cover = pages.first()
+        assertEquals("2", (cover.blocks.first() as RecapBlock.Big).value)          // two trophies
+        val played = (cover.blocks.filterIsInstance<RecapBlock.Figures>().first()).items.first { it.first == "Played" }.second
+        assertEquals("10", played)
+        val seasons = pages[1].blocks.filterIsInstance<RecapBlock.Line>()
+        assertEquals("1st · 92 pts", seasons.first().value)
+        val scorer = pages[4].blocks.filterIsInstance<RecapBlock.Person>().first()
+        assertEquals("Marco Varela", scorer.name); assertEquals("8", scorer.value)   // four goals in each season
+    }
+
     @Test fun recapPagesAndAutomaticLeaveOuts() {
         val table = LeagueTableData(league = "EFL Championship", rows = listOf(TableRow("Coventry City", 14, 10, 2, 2, 30, 13, 32), TableRow("Your Club", 14, 6, 3, 5, 22, 14, 21, isUser = true)))
         val state = AppState(clubName = "Your Club", leagueName = "EFL Championship", startYear = 2026, players = listOf(varela, pike), recentMatches = matches,
@@ -305,5 +344,40 @@ class StoryAndRecapTest {
         assertNotNull(found.firstOrNull { it.key == "goals:50:p1" })
         val again = Milestones.detect(state.copy(milestones = found), "2026-12-02")
         assertTrue(again.isEmpty())
+    }
+}
+
+
+class SquadRulesTest {
+    @Test fun aPromotedProspectLeavesTheAcademy() {
+        val prospect = Player(id = "y1", name = "Kit Navarro", isAcademy = true, status = "Academy", potential = 84, headshotUrl = "http://x/kit.png")
+        val firstTeam = Player(id = "n1", name = "Kit Navarro", primaryPosition = "CDM", headshotUrl = "")
+        val state = AppState(startYear = 2026, players = listOf(firstTeam), academyPlayers = listOf(prospect, Player(id = "y2", name = "Other Kid", isAcademy = true)))
+        val fixed = Academy.firstTeamOnly(state)
+        assertEquals(listOf("Other Kid"), fixed.academyPlayers.map { it.name })
+        val p = fixed.players.single()
+        assertTrue(p.isPromoted); assertEquals(2026, p.promotedSeasonYear); assertEquals("http://x/kit.png", p.headshotUrl); assertEquals(84, p.potential)
+        // the game's "Promoted In" moves the academy card up instead of adding a second card
+        val moved = Academy.promote(emptyList(), listOf(prospect), "Kit Navarro", 2026)!!
+        assertEquals(1, moved.first.size); assertTrue(moved.first.single().isPromoted); assertTrue(moved.second.isEmpty())
+        assertNull(Academy.promote(listOf(firstTeam), emptyList(), "Kit Navarro", 2026))
+    }
+
+    @Test fun regensAreNamedByTheShortName() {
+        val lookup: (String) -> String? = { if (it == "Sergio Busquets Burgos") "Sergio Busquets" else null }
+        val state = AppState(players = listOf(Player(name = "Lucas Mora", isRegen = true, regenOriginalName = "Sergio Busquets Burgos")),
+            transfers = listOf(TransferLog(playerName = "Lucas Mora", isRegen = true, regenOriginalName = "Sergio Busquets Burgos")))
+        val s = RegenNames.shorten(state, lookup)
+        assertEquals("Sergio Busquets", s.players.single().regenOriginalName)
+        assertEquals("Sergio Busquets", s.transfers.single().regenOriginalName)
+        assertEquals("Kevin De Bruyne", RegenNames.short("Kevin De Bruyne", lookup))
+        assertTrue(RegenNames.shorten(s, lookup) === s)
+    }
+
+    @Test fun pointsOnlyCountInLeagueMatches() {
+        fun m(comp: String, gf: Int, ga: Int) = MatchResult(opponentName = "X", isHome = true, goalsFor = gf, goalsAgainst = ga, matchDate = "2026-10-01", competition = comp)
+        val list = listOf(m("EFL Championship", 2, 0), m("EFL Championship", 1, 1), m("Carabao Cup", 3, 0), m("FA Cup", 0, 1))
+        assertEquals(4, com.fctracker.career.insights.MatchInsights.leaguePoints(list, Competitions.isLeagueFn("EFL Championship")))
+        assertEquals(7, com.fctracker.career.insights.MatchInsights.record(list).points)
     }
 }

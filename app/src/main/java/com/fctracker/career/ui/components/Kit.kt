@@ -55,7 +55,7 @@ import com.fctracker.career.ui.theme.Outfit
 import com.fctracker.career.ui.theme.PlexMono
 
 /** The colour pairs of the design: a strong colour for text and icons, a dark one behind it. */
-enum class Tone { GOOD, WARN, BAD, INFO, ACCENT, MUTED, TEXT }
+enum class Tone { GOOD, WARN, BAD, INFO, ACCENT, ACCENT2, MUTED, TEXT }
 
 @Composable
 fun toneColors(tone: Tone): Pair<Color, Color> {
@@ -66,6 +66,7 @@ fun toneColors(tone: Tone): Pair<Color, Color> {
         Tone.BAD -> c.bad to c.badBg
         Tone.INFO -> c.info to c.infoBg
         Tone.ACCENT -> c.accent to c.accentBg
+        Tone.ACCENT2 -> c.accent2 to c.accent2Bg
         Tone.MUTED -> c.muted to c.surface2
         Tone.TEXT -> c.text to c.surface2
     }
@@ -180,8 +181,8 @@ fun SectionHeader(
     val c = FcTheme.colors
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         if (icon != null) {
-            Box(Modifier.size(32.dp).clip(CircleShape).background(c.accentBg), contentAlignment = Alignment.Center) {
-                Icon(icon, contentDescription = null, tint = c.accent, modifier = Modifier.size(17.dp))
+            Box(Modifier.size(32.dp).clip(CircleShape).background(c.accent2Bg), contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = null, tint = c.accent2, modifier = Modifier.size(17.dp))
             }
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {

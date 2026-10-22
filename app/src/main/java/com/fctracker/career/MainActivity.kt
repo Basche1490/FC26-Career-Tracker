@@ -91,7 +91,7 @@ class MainActivity : ComponentActivity() {
 }
 
 /** Routes that show the floating bar at the bottom, and which of its four places each one lights up. */
-private val NO_BAR_ROUTES = setOf("setup", "recap", "recap/{season}", "club_history_edit", "widgets", "theming")
+private val NO_BAR_ROUTES = setOf("setup", "recap", "recap/{season}", "career_recap", "club_history_edit", "widgets", "theming")
 
 private fun barPlace(route: String?): String? = when {
     route == null -> null
@@ -134,13 +134,14 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
         }
 
         val openDrawer: () -> Unit = { scope.launch { drawerState.open() } }
-        // Top-level places replace each other (Back goes to Home); detail pages stack on top.
+        // Top-level places replace each other (Back goes to Home); detail pages stack on top. A place always opens at
+        // its own main screen: a player profile (or any other detail) left open there earlier is not brought back.
         val goTop: (String) -> Unit = { route ->
             try {
                 navController.navigate(route) {
-                    popUpTo(navController.graph.startDestinationId) { saveState = true }
+                    popUpTo(navController.graph.startDestinationId) { saveState = false }
                     launchSingleTop = true
-                    restoreState = true
+                    restoreState = false
                 }
             } catch (e: Exception) {
             }
@@ -186,6 +187,7 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
                             composable("world") { WorldScreen(viewModel, openDrawer) }
                             composable("recap") { RecapScreen(viewModel, null, back) }
                             composable("recap/{season}") { entry -> RecapScreen(viewModel, entry.arguments?.getString("season")?.toIntOrNull(), back) }
+                            composable("career_recap") { com.fctracker.career.ui.recap.CareerRecapScreen(viewModel, back) }
                             composable("career_summary") { CareerSummaryScreen(viewModel, openDrawer, { id -> goDetail("player/$id") }, nav) }
                             composable("assistant") { AssistantScreen(viewModel, openDrawer, nav) }
                             composable("milestones") { MilestonesScreen(viewModel, back) }

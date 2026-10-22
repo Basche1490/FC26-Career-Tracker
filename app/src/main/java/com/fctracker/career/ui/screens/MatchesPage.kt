@@ -124,6 +124,7 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
     var newFixture by remember { mutableStateOf(false) }
     var deleteFixture by remember { mutableStateOf<Fixture?>(null) }
     var expandedId by remember { mutableStateOf<String?>(null) }
+    var headToHead by remember { mutableStateOf<String?>(null) }
 
     val matches = view.matches
     val upcoming = if (view.isArchived) emptyList() else CareerOps.upcoming(state)
@@ -179,6 +180,9 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
         if (compMatches.isNotEmpty()) {
             item {
                 val r = MatchInsights.record(compMatches)
+                val isLeague = com.fctracker.career.logic.Competitions.isLeagueFn(state.leagueName)
+                val leagueGames = compMatches.count { isLeague(it.competition) }
+                val pts = MatchInsights.leaguePoints(compMatches, isLeague)
                 FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         FcText("${r.played} played", 15.sp, FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -187,7 +191,14 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                         }
                     }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Muted("Goals ${r.goalsFor}–${r.goalsAgainst} · ${r.points} pts", 13.sp, Modifier.weight(1f))
+                        val gd = r.goalsFor - r.goalsAgainst
+                        // points only come from league matches; a cup filter shows none
+                        val ptsText = when {
+                            leagueGames == 0 -> ""
+                            leagueGames == compMatches.size -> " · $pts pts"
+                            else -> " · $pts league pts"
+                        }
+                        Muted("Goals ${r.goalsFor}–${r.goalsAgainst} (${if (gd > 0) "+" else ""}$gd)$ptsText", 13.sp, Modifier.weight(1f))
                         Muted("Form", 12.sp)
                         Spacer(Modifier.width(8.dp))
                         FormStrip(MatchInsights.form(compMatches), 22.dp, 4.dp)
@@ -195,7 +206,13 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                 }
             }
         }
-        item { SeasonCalendar(view.season, matches, upcoming, onMatch = { m -> expandedId = m.id }) }
+        item {
+            // a played day opens that match: its details (editable in the current season, read-only when archived)
+            SeasonCalendar(view.season, matches, upcoming, onMatch = { m ->
+                expandedId = m.id
+                if (view.isArchived) detailMatch = m else { editMatch = m; showForm = true }
+            })
+        }
         if (comps.size > 2) {
             item { FcSelectField("Competition", if (activeComp == MatchInsights.ALL_COMPETITIONS) "All competitions" else activeComp, listOf("All competitions") + comps.drop(1), { competition = if (it == "All competitions") MatchInsights.ALL_COMPETITIONS else it }) }
         }
@@ -232,12 +249,17 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
         MatchFormModal(viewModel = viewModel, state = state, initialMatch = editMatch, onDismiss = { showForm = false }, onSave = { m ->
             if (editMatch != null) viewModel.updateMatchResult(m) else viewModel.addMatchResult(m)
             showForm = false
+        }, onHeadToHead = if (editMatch != null) ({ opp -> showForm = false; headToHead = opp }) else null)
+    }
+    headToHead?.let { opp ->
+        HeadToHeadPage(state, opp, onClose = { headToHead = null }, onOpenMatch = { h ->
+            if (h.archived) detailMatch = h.match else { editMatch = h.match; showForm = true }
         })
     }
     deleteMatch?.let { m ->
         ConfirmDialog("Delete this match?", "${m.goalsFor}–${m.goalsAgainst} ${if (m.isHome) "vs" else "at"} ${m.opponentName} on ${Dates.full(m.matchDate)} will be removed from your match history. This cannot be undone.", "Delete", { viewModel.deleteMatchResult(m.id) }, { deleteMatch = null })
     }
-    detailMatch?.let { m -> MatchDetailDialog(m, state, onDismiss = { detailMatch = null }) }
+    detailMatch?.let { m -> MatchDetailDialog(m, state, onDismiss = { detailMatch = null }, onHeadToHead = { detailMatch = null; headToHead = m.opponentName }) }
     if (newFixture || fixtureDialog != null) {
         FixtureDialog(state, fixtureDialog, onDismiss = { newFixture = false; fixtureDialog = null },
             onSave = { f, again ->
@@ -438,11 +460,14 @@ fun FixtureDialog(state: AppState, initial: Fixture?, onDismiss: () -> Unit, onS
 /** An archived match's lineup and ratings, read-only. */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-fun MatchDetailDialog(m: MatchResult, state: AppState, onDismiss: () -> Unit) {
+fun MatchDetailDialog(m: MatchResult, state: AppState, onDismiss: () -> Unit, onHeadToHead: (() -> Unit)? = null) {
     val c = FcTheme.colors
     val players = state.players + state.historicalSeasons.flatMap { it.players }
     val ordered = LineupOrder.order(m.playerPerformances, m.substitutions, { p -> p.position ?: players.firstOrNull { it.id == p.playerId }?.primaryPosition }, { p -> lineupNameOf(p, players, m) })
-    FcDialog("Lineup & stats", onDismiss, actions = { FcButton("Close", onDismiss, small = true) }) {
+    FcDialog("Lineup & stats", onDismiss, actions = {
+        if (onHeadToHead != null) FcButton("Head to head", onHeadToHead, kind = ButtonKind.SECONDARY, small = true)
+        FcButton("Close", onDismiss, small = true)
+    }) {
         Muted("${m.opponentName} (${if (m.isHome) "H" else "A"}) · ${m.goalsFor}–${m.goalsAgainst} · ${Dates.full(m.matchDate)}", 12.sp)
         if (ordered.isEmpty()) Muted("No lineup was logged for this match.", 13.sp)
         ordered.forEach { p ->

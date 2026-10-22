@@ -43,6 +43,9 @@ object MatchInsights {
         val goalDifference: Int get() = goalsFor - goalsAgainst
     }
 
+    /** Points only count in league matches: cup and European matches have none. */
+    fun leaguePoints(matches: List<MatchResult>, isLeague: (String) -> Boolean): Int = record(matches.filter { isLeague(it.competition) }).points
+
     fun record(matches: List<MatchResult>): Record {
         var won = 0
         var drawn = 0

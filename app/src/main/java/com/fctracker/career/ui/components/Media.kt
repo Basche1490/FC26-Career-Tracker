@@ -188,10 +188,10 @@ fun LeagueChart(positions: List<Int>, clubs: Int, modifier: Modifier = Modifier,
                 val x = left + step * i
                 if (i == 0) path.moveTo(x, y(p)) else path.lineTo(x, y(p))
             }
-            drawPath(path, c.accent, style = Stroke(width = 2.5.dp.toPx(), join = StrokeJoin.Round))
+            drawPath(path, c.accent2, style = Stroke(width = 2.5.dp.toPx(), join = StrokeJoin.Round))
             positions.forEachIndexed { i, p ->
                 val last = i == positions.lastIndex
-                drawCircle(if (selected == i) c.text else c.accent, radius = (if (last || selected == i) 4.5 else 2.5).dp.toPx(), center = Offset(left + step * i, y(p)))
+                drawCircle(if (selected == i) c.text else c.accent2, radius = (if (last || selected == i) 4.5 else 2.5).dp.toPx(), center = Offset(left + step * i, y(p)))
             }
         }
         // axis labels
@@ -230,13 +230,13 @@ fun OvrChart(labels: List<String>, values: List<Int>, modifier: Modifier = Modif
                 lineTo(pts.last().x, top + h)
                 close()
             }
-            drawPath(area, c.accentBg)
+            drawPath(area, c.accent2Bg)
             val line = Path().apply { pts.forEachIndexed { i, p -> if (i == 0) moveTo(p.x, p.y) else lineTo(p.x, p.y) } }
-            drawPath(line, c.accent, style = Stroke(width = 2.5.dp.toPx(), join = StrokeJoin.Round))
+            drawPath(line, c.accent2, style = Stroke(width = 2.5.dp.toPx(), join = StrokeJoin.Round))
             pts.forEachIndexed { i, p ->
                 val last = i == pts.lastIndex
-                drawCircle(if (last) c.accent else c.surface, radius = (if (last) 5.0 else 3.5).dp.toPx(), center = p)
-                drawCircle(c.accent, radius = (if (last) 5.0 else 3.5).dp.toPx(), center = p, style = Stroke(2.dp.toPx()))
+                drawCircle(if (last) c.accent2 else c.surface, radius = (if (last) 5.0 else 3.5).dp.toPx(), center = p)
+                drawCircle(c.accent2, radius = (if (last) 5.0 else 3.5).dp.toPx(), center = p, style = Stroke(2.dp.toPx()))
             }
         }
         // value labels above each point, season labels under them

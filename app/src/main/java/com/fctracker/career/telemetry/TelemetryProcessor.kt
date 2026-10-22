@@ -121,7 +121,15 @@ object TelemetryProcessor {
                                     date = date, feeUnknown = feeUnknown && feeM <= 0.0
                                 )
                             )
-                            squad = applyTransferToSquad(squad, name, type, feeM, signedPlayer)
+                            // a prospect the game promoted: his academy card moves up, no second card is added
+                            val promoted = if (type.equals("Promoted In", true) || fromToClub.equals("Youth Academy", true))
+                                com.fctracker.career.logic.Academy.promote(squad, academy, name, state.startYear) else null
+                            if (promoted != null) {
+                                squad = promoted.first.toMutableList()
+                                academy = promoted.second
+                            } else {
+                                squad = applyTransferToSquad(squad, name, type, feeM, signedPlayer)
+                            }
                             if (alert) notices.add(TelemetryNotice(evTitle, evMessage, "transfers", true))
                         }
                     }
@@ -226,14 +234,16 @@ object TelemetryProcessor {
         if (!hasNew) return TelemetryResult(state, notices)
 
         return TelemetryResult(
-            base.copy(
-                liveEvents = events.sortedByDescending { it.timestamp }.take(MAX_LIVE_EVENTS),
-                transfers = transfers,
-                recentMatches = matches,
-                activeInjuries = injuries,
-                players = squad,
-                academyPlayers = academy,
-                careerDate = careerDate
+            com.fctracker.career.logic.Academy.firstTeamOnly(
+                base.copy(
+                    liveEvents = events.sortedByDescending { it.timestamp }.take(MAX_LIVE_EVENTS),
+                    transfers = transfers,
+                    recentMatches = matches,
+                    activeInjuries = injuries,
+                    players = squad,
+                    academyPlayers = academy,
+                    careerDate = careerDate
+                )
             ),
             notices
         )

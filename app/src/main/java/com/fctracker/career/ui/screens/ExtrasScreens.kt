@@ -256,7 +256,8 @@ fun ThemingScreen(viewModel: MainViewModel, onBack: () -> Unit) {
                     "Start from the primary colour; if it is black, white or grey, try the secondary.",
                     "Too dark (or too light) to read on the dark background? Lighten it until it reads, keeping its hue.",
                     "If both colours are black, white or grey, keep the default mint.",
-                    "Win, draw and loss colours and warnings never take the club colour, and results always show W, D or L as well.",
+                    "The other club colour is the second accent: section icons, charts and the menu's selected place.",
+                    "Win, draw and loss (and money in and out) keep their own green, amber and red. A club colour that looks like one of them gives way to the other club colour, or is turned a little round the colour wheel.",
                     "You can switch it off in Settings to go back to mint."
                 ).forEachIndexed { i, t ->
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -277,6 +278,7 @@ private fun ThemeExample(name: String, primary: String, secondary: String, overr
     val c = FcTheme.colors
     val choice = Accent.choose(primary, secondary)
     val acc = parseHex(choice.hex) ?: c.accent
+    val acc2 = parseHex(Accent.chooseSecondary(primary, secondary, choice.hex)) ?: c.accent2
     val on = parseHex(Accent.onColour(choice.hex)) ?: Color.Black
     val why = when {
         override != null -> override
@@ -295,6 +297,9 @@ private fun ThemeExample(name: String, primary: String, secondary: String, overr
                 FcText("Log match", 13.sp, FontWeight.Bold, on)
             }
             FcText("View all", 13.sp, FontWeight.SemiBold, acc)
+            Box(Modifier.size(32.dp).clip(CircleShape).background(acc2.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.EmojiEvents, null, tint = acc2, modifier = Modifier.size(17.dp))
+            }
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Icon(Icons.Default.SportsSoccer, null, tint = acc, modifier = Modifier.size(18.dp))
                 FcText("Story", 11.sp, color = acc)

@@ -113,9 +113,47 @@ private object CompetitionLogos {
     val aspect = ConcurrentHashMap<String, Float>()
     private val lead = ConcurrentHashMap<String, String>()
 
-    /** The article's lead picture ("" remembered when the article has none), or null when the lookup failed. */
+    /**
+     * The article's lead picture ("" remembered when the article has none), or null when the lookup failed. A league
+     * or cup logo is usually a non-free file, which the page summary leaves out, so the page-image lookup that
+     * includes non-free files is asked first (that is how the Carabao Cup gets its logo).
+     */
     suspend fun wikipediaLeadImage(title: String): String? {
         lead[title]?.let { return it.ifEmpty { null } }
+        val any = anyLicenceImage(title)
+        if (!any.isNullOrEmpty()) {
+            lead[title] = any
+            return any
+        }
+        return summaryImage(title)    // remembers what it found itself
+    }
+
+    /** The lead image of any licence ("" when the article has none), or null when the lookup failed. */
+    private suspend fun anyLicenceImage(title: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val encoded = URLEncoder.encode(title, "UTF-8")
+            val conn = URL("https://en.wikipedia.org/w/api.php?action=query&format=json&formatversion=2&redirects=1" +
+                "&prop=pageimages&piprop=thumbnail&pithumbsize=256&pilicense=any&titles=$encoded").openConnection() as HttpURLConnection
+            try {
+                conn.connectTimeout = 6000
+                conn.readTimeout = 6000
+                conn.setRequestProperty("User-Agent", "FC26CareerTracker/1.0 (Android career tracker; competition logos)")
+                conn.setRequestProperty("Accept", "application/json")
+                if (conn.responseCode != 200) return@withContext null
+                val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val pages = JSONObject(body).optJSONObject("query")?.optJSONArray("pages") ?: return@withContext null
+                val source = pages.optJSONObject(0)?.optJSONObject("thumbnail")?.optString("source").orEmpty()
+                if (source.startsWith("http")) source else ""
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** The page summary's picture (free files only). */
+    private suspend fun summaryImage(title: String): String? {
         return withContext(Dispatchers.IO) {
             try {
                 val encoded = URLEncoder.encode(title.replace(' ', '_'), "UTF-8").replace("+", "%20")

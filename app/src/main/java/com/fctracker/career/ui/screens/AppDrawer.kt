@@ -1,5 +1,11 @@
 package com.fctracker.career.ui.screens
 
+import androidx.compose.runtime.remember
+
+import androidx.compose.runtime.mutableStateOf
+
+import androidx.compose.runtime.setValue
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -87,12 +93,20 @@ fun AppDrawer(viewModel: MainViewModel, state: AppState, currentRoute: String, n
             .statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 22.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Row(Modifier.padding(start = 6.dp, end = 6.dp, bottom = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            ClubCrest(state.clubName, state.clubCrestFile, state.clubCrestUrl, state.isExistingTeam, 44.dp)
+        var showHistory by remember { mutableStateOf(false) }
+        // the crest opens the club's history, the same as on Home
+        Row(
+            Modifier.padding(bottom = 16.dp).clip(RoundedCornerShape(18.dp)).clickable(role = Role.Button) { showHistory = true }.padding(horizontal = 6.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            ClubCrest(state.clubName, state.clubCrestFile, state.clubCrestUrl, state.isExistingTeam, 44.dp, onClick = { showHistory = true })
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 FcText(state.clubName, 19.sp, FontWeight.SemiBold, maxLines = 2)
                 Muted("FC Tracker · ${view.label}", 12.sp)
             }
+        }
+        if (showHistory) {
+            ClubHistoryDialog(viewModel, state, onDismiss = { showHistory = false }, onWrite = { showHistory = false; navigateTo("club_history_edit") })
         }
         if (view.isArchived) {
             Row(
@@ -106,12 +120,12 @@ fun AppDrawer(viewModel: MainViewModel, state: AppState, currentRoute: String, n
         DRAWER_ITEMS.filter { !(console && it.route == "connection") }.forEach { item ->
             val on = currentRoute == item.route || (item.route == "squad" && currentRoute.startsWith("player"))
             Row(
-                Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(50)).background(if (on) c.accentBg else Color.Transparent)
+                Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(50)).background(if (on) c.accent2Bg else Color.Transparent)
                     .clickable(role = Role.Button) { navigateTo(item.route) }.padding(horizontal = 14.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                Icon(item.icon, contentDescription = null, tint = if (on) c.accent else c.text, modifier = Modifier.size(22.dp))
-                FcText(item.title, 15.sp, if (on) FontWeight.SemiBold else FontWeight.Medium, if (on) c.accent else c.text, Modifier.weight(1f), maxLines = 1)
+                Icon(item.icon, contentDescription = null, tint = if (on) c.accent2 else c.text, modifier = Modifier.size(22.dp))
+                FcText(item.title, 15.sp, if (on) FontWeight.SemiBold else FontWeight.Medium, if (on) c.accent2 else c.text, Modifier.weight(1f), maxLines = 1)
                 when {
                     view.isArchived && item.everySeason -> Muted("every season", 11.sp)
                     item.route == "connection" -> StatusPill(health.level, health.pill, onClick = { navigateTo("connection") })

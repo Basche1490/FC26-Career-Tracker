@@ -154,22 +154,8 @@ fun AssistantScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, nav: (Str
                 Notice(Tone.WARN, "API key needed", "Add the key of your AI agent (${state.aiAgent}) in Settings. Questions about anything other than your career are still answered here, without the agent.",
                     icon = Icons.Default.Key, actions = { FcButton("Open Settings", { nav("settings") }, small = true) })
             }
-            if (chat.isEmpty()) {
-                item {
-                    FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
-                        SectionHeader("Knows your whole career", icon = Icons.Default.SmartToy)
-                        Muted("Every question is answered from what the app holds, page by page:", 12.sp)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { ASSISTANT_KNOWS.forEach { Pill(it, Tone.MUTED) } }
-                    }
-                }
-                item {
-                    FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
-                        FcLabel("ONLY ABOUT YOUR CAREER")
-                        Bubble("This is to help me make better decisions: what is 1+1?", mine = true)
-                        Bubble("I only help with your ${state.clubName} career. Ask me about your squad, matches, transfers or tactics, for example: “Who should start against ${next?.opponent ?: "your next opponent"}?”", mine = false)
-                        Muted("Questions about anything else, however they are worded, get this short answer instead. Nothing outside the career is sent to the AI agent.", 11.sp)
-                    }
-                }
+            if (chat.isEmpty()) item {
+                Muted("Ask anything about your career: the squad, matches, transfers, tactics or your next opponent.", 13.sp)
             }
             itemsIndexed(chat.toList()) { _, t ->
                 Bubble(t.text, mine = t.role == "user", local = t.local, onSave = if (t.role == "assistant" && !t.local) ({ saving = t.text }) else null)

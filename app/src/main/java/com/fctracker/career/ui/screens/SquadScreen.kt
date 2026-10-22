@@ -175,6 +175,7 @@ fun PlayerListRow(p: Player, today: String?, onClick: () -> Unit, showPills: Boo
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 FcText(p.displayName, 15.sp, FontWeight.SemiBold, maxLines = 1)
                 if (youth || p.isAcademy) Tag("Youth", Tone.GOOD)
+                else if (p.isPromoted) Tag("Promoted", Tone.GOOD)
                 if (p.loanDirection == "in" || p.isLoanedIn) Tag("Loaned in", Tone.INFO)
                 if (p.loanDirection == "out" || p.isLoanedOut) Tag("On loan", Tone.INFO)
                 if (p.isRegen) Tag("Regen", Tone.ACCENT)
