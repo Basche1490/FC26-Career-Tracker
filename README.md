@@ -53,6 +53,10 @@ on r/seriousfifacareers.
 
 ## What is new
 
+- The capture script (2.10) no longer flashes a command window while you play: messages wait in the outbox for the bridge,
+  and the Project Atlas exporter (1.1.2, a small change to the original) makes its folders silently and names its newest
+  export in a file. The game's career report now also brings the trophies you win, player attributes and form, the
+  squad's league statistics and the club's prestige.
 - Career data is written to one file per save slot, atomically, with a backup copy. A crash or power loss in the
   middle of a save can no longer damage a career.
 - The AI API key is stored encrypted with the Android Keystore and is left out of save files and backups.
