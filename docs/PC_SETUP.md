@@ -104,6 +104,13 @@ It watches your club every 2 seconds and sends:
 - every transfer (permanent and loan, in and out) as it happens, as far as the game stores it (see
   "What the game stores about transfers" below)
 - once per start and after every match, the squad's **contract end dates and loan details**, read from the game (see "Contracts and loans in the Squad")
+- every few minutes, and soon after a match or a transfer, a **career report** (script 2.9.0 and newer): the league tables of
+  your league, the leagues above and below it and the five big leagues (with every club's last five results), the fixtures
+  still to play, your league's top scorers, shirt numbers, squad roles, wages, ratings, injuries (with their return day) and
+  suspensions, the team sheet you picked, your club's honours, stadium and transfer budget, the European club ranking and,
+  in June and July, last season's league and cup winners for Around the World. It is only sent when something changed, and
+  the bridge keeps only the newest one waiting for the phone. It never opens the game tables `transfers` or
+  `scenarioevents` (they closed the game during the table census).
 
 The folder `live-editor-scripts` holds exactly two scripts. Keep them together in the same Live Editor scripts folder (the launcher does this):
 

@@ -167,7 +167,8 @@ object LeagueTables {
 
     /** A domestic league (not a cup, a super cup or a European or international competition): its table decides the career's league. */
     fun isDomesticLeague(name: String): Boolean {
-        val n = name.lowercase()
+        // "Championship" is a league: it must not trip the "champions" (Champions League) test.
+        val n = name.lowercase().replace("championship", "league")
         val not = listOf("champions", "europa", "conference", "cup", "copa", "coppa", "coupe", "pokal", "trophy", "shield", "supercup", "super cup", "supercopa", "supercoppa", "libertadores", "sudamericana", "international", "club world", "friendly", "women", "youth", "u21", "u23", "u19")
         return n.isNotBlank() && not.none { n.contains(it) }
     }

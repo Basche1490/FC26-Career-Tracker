@@ -49,6 +49,28 @@ class LeagueTablesTest {
     private fun row(c: String, w: Int, d: Int, l: Int, gf: Int, ga: Int, me: Boolean = false) =
         LeagueTables.recalculated(TableRow(club = c, won = w, drawn = d, lost = l, goalsFor = gf, goalsAgainst = ga, isUser = me))
 
+    @Test fun clubsComingDownFromTheLeagueAbove() {
+        fun table(league: String, n: Int, prefix: String) = LeagueTableData(league = league, rows = (1..n).map { TableRow(club = "$prefix$it", points = 100 - it) })
+        val own = table("EFL Championship", 24, "C")
+        val m = LeagueTables.proposeMovements(own, table("EFL League One", 24, "L"), table("Premier League", 20, "P"))
+        assertEquals(listOf("C22", "C23", "C24"), m.down)
+        assertEquals(listOf("C1", "C2", "C3"), m.upFrom)
+        assertEquals(listOf("L1", "L2", "L3"), m.upInto)
+        assertEquals(listOf("P18", "P19", "P20"), m.downInto)
+        assertEquals("Premier League", m.leagueAbove)
+    }
+
+    @Test fun domesticLeagues() {
+        assertTrue(LeagueTables.isDomesticLeague("EFL Championship"))
+        assertTrue(LeagueTables.isDomesticLeague("Süper Lig"))
+        assertTrue(LeagueTables.isDomesticLeague("Scottish Premiership"))
+        assertFalse(LeagueTables.isDomesticLeague("UEFA Champions League"))
+        assertFalse(LeagueTables.isDomesticLeague("FA Cup"))
+        assertFalse(LeagueTables.isDomesticLeague("DFL-Supercup"))
+        assertFalse(LeagueTables.isDomesticLeague("Premier League U21"))
+        assertFalse(LeagueTables.isDomesticLeague(""))
+    }
+
     @Test fun orderAndRecalculation() {
         val rows = listOf(row("B", 6, 3, 5, 22, 14, true), row("A", 10, 2, 2, 30, 13), row("C", 6, 3, 5, 20, 14))
         val s = LeagueTables.sorted(rows)

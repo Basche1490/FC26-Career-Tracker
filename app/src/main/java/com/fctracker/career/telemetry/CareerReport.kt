@@ -128,6 +128,10 @@ object CareerReport {
 
         // -- players: injuries, suspensions, roles, numbers, wages, attributes -----------------------------------------
         data.optJSONArray("players")?.let { arr ->
+            // The capture script says whether it could read the game's injuries and suspensions: when it could not, a
+            // missing injury or suspension means "not known", not "fit again".
+            val injuriesKnown = data.optBoolean("injuriesKnown", true)
+            val suspensionsKnown = data.optBoolean("suspensionsKnown", true)
             val players = s.players.toMutableList()
             val reported = mutableSetOf<Int>()
             for (o in arr.objects()) {
@@ -151,8 +155,10 @@ object CareerReport {
                 }
                 // Suspension: a missing object means not suspended.
                 val susp = o.optJSONObject("suspension")
-                p = if (susp != null && susp.int("games") > 0) p.copy(suspendedGames = susp.int("games"), suspensionEnd = susp.str("end").ifBlank { null })
-                else p.copy(suspendedGames = 0, suspensionEnd = null)
+                if (suspensionsKnown || susp != null) {
+                    p = if (susp != null && susp.int("games") > 0) p.copy(suspendedGames = susp.int("games"), suspensionEnd = susp.str("end").ifBlank { null })
+                    else p.copy(suspendedGames = 0, suspensionEnd = null)
+                }
                 // Injury from the game.
                 val inj = o.optJSONObject("injury")
                 if (inj != null && Dates.isDate(inj.str("back"))) {
@@ -172,7 +178,7 @@ object CareerReport {
                     } else if (p.isInjured && p.injurySource == Source.GAME && p.injuryFollowGame) {
                         p = clearedInjury(p)
                     }
-                } else if (p.isInjured && p.injurySource == Source.GAME && p.injuryFollowGame) {
+                } else if (injuriesKnown && p.isInjured && p.injurySource == Source.GAME && p.injuryFollowGame) {
                     p = clearedInjury(p)      // the game no longer has him injured
                 }
                 if (p != before) { players[idx] = p; changed = true }

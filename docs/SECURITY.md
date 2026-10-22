@@ -8,7 +8,7 @@ who wants to check the work.
 
 - **The phone has to prove it knows the pairing code before the bridge tells it anything.** The code is shown on the PC
   only (in the launcher window, on the bridge page at `http://localhost:5050`, and with `FC26_Launcher.bat status`).
-  You type it into the app once. Without the code a device on your network gets nothing but "a bridge is here, version 3.0.0".
+  You type it into the app once. Without the code a device on your network gets nothing but "a bridge is here, version 3.1.0".
 - **The phone checks that every answer comes from your bridge.** An answer that is not signed with your code is thrown
   away, so a fake "bridge" on the network cannot slip invented matches or transfers into your career.
 - **The phone can only read.** It can fetch the news, the health report, and ask for the last match to be sent again.
@@ -40,7 +40,7 @@ who wants to check the work.
 | --- | --- |
 | **Phone (the app)** | `GET /events`, `GET /status`, `POST /resend`, each signed with the pairing code. Nothing else. |
 | **This PC** (a program on it, or a browser on it opening `http://localhost:5050`) | Everything: the dashboard, the test buttons, Clear, a new pairing code, and the capture script's reports. |
-| **Anybody else on the network** | `GET /ping`: `{"app":"fc26-bridge","protocol":3,"version":"3.0.0","name":"<PC name>","auth":"hmac-sha256"}`. That is what **Find my PC** uses. Anything else is refused. |
+| **Anybody else on the network** | `GET /ping`: `{"app":"fc26-bridge","protocol":3,"version":"3.1.0","name":"<PC name>","auth":"hmac-sha256"}`. That is what **Find my PC** uses. Anything else is refused. |
 | **A web page in a browser** | Nothing. No CORS headers, and Host / Origin checks refuse other sites and DNS rebinding. |
 
 "This PC" means all three: the connection comes from the loopback address, it is addressed to `localhost`, `127.0.0.1`

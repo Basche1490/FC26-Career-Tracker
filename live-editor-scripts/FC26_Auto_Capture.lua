@@ -10,6 +10,9 @@
 -- other side's scorers named from the players' goal tallies, loan-outs noticed while the game runs.
 -- v2.8: reports its own health to the bridge and the app (script_status.json), answers a "re-send the last match"
 -- request from the app, and sends the real contract and loan end dates of the squad.
+-- v2.9: sends a "career" report: league tables (with every club's form), fixtures still to play, the league's top
+-- scorers, shirt numbers, squad roles, wages, ratings, injuries and suspensions, the team sheet, the club's honours and
+-- stadium, the transfer budget, the European club ranking and, in June and July, last season's winners.
 
 local MEMORY = require "imports/core/memory"
 require "imports/other/helpers"
@@ -18,7 +21,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "2.8.0"
+local VERSION = "2.9.0"
 local SCRIPT_INSTANCE = "FC26_AUTOCAP_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
 _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] = SCRIPT_INSTANCE
 
@@ -1381,6 +1384,7 @@ local function send_payload_to_bridge(payload, log_label)
 
         track_outbox_file(json_path, id)
         local kind = payload:match('"dataType"%s*:%s*"(%w+)"')
+        if kind == "match" or kind == "transfer" then status.career_dirty_at = os.time() end  -- tables, squad and fixtures changed
         if kind == "match" then status.last_match = os.time()
         elseif kind == "transfer" then status.last_transfer = os.time()
         elseif kind == "squad" then status.last_squad = os.time() end
@@ -3968,6 +3972,220 @@ end
 -- ---------------------------------------------------------------------------
 -- Health report, squad contracts and "re-send the last match"
 -- ---------------------------------------------------------------------------
+-- BEGIN career_report (this exact block is also run by tests/lua/test_transfer_logic.lua)
+-- The "career" report: league tables, fixtures still to play, the league's top scorers, the squad's numbers, roles,
+-- wages, injuries and suspensions, the club's facts, the team sheet, the European ranking and, in June and July, last
+-- season's winners. Nothing in this block touches the game: it turns plain tables into the payload, so the tests run
+-- it as it is. It needs jstr, to_int and to_num from above.
+local CR = {}          -- everything of the career report lives in this one table (the main chunk is near Lua's 200-locals limit)
+do
+
+    CR.ARRAY = {}            -- metatable that marks a Lua table as a JSON array (also when it is empty)
+    function CR.array(t) return setmetatable(t or {}, CR.ARRAY) end
+
+    CR.TOP_FIVE = { "Premier League", "LALIGA EA SPORTS", "Serie A", "Bundesliga", "Ligue 1" }
+    CR.LADDERS = {
+        { "Premier League", "EFL Championship", "EFL League One", "EFL League Two" },
+        { "LALIGA EA SPORTS", "LALIGA HYPERMOTION" },
+        { "Serie A", "Serie BKT", "Serie B" },
+        { "Bundesliga", "Bundesliga 2", "2. Bundesliga", "3. Liga" },
+        { "Ligue 1", "Ligue 2" }
+    }
+
+    -- Where a competition belongs on the Around the World page (nil = not shown there).
+    function CR.region(name)
+        local n = tostring(name or ""):lower()
+        if n == "" then return nil end
+        for _, bad in ipairs({ "women", "féminine", "feminine", "frauen", "femenina", "femminile", "u21", "u-21", "u19", "u-19", "u17",
+                               "youth", "world cup", "nations league", "international", "friendly", "euro 20", "copa américa", "copa america" }) do
+            if n:find(bad, 1, true) then return nil end
+        end
+        if n:find("uefa", 1, true) or n:find("champions league", 1, true) or n:find("europa league", 1, true) or n:find("conference league", 1, true) then return "Europe" end
+        if n == "premier league" or n:find("fa cup", 1, true) or n:find("carabao", 1, true) or n:find("efl cup", 1, true) or n:find("community shield", 1, true) then return "England" end
+        if n:find("laliga ea sports", 1, true) or n == "la liga" or n:find("copa del rey", 1, true) or n:find("supercopa", 1, true) then return "Spain" end
+        if n == "serie a" or n:find("coppa italia", 1, true) or n:find("supercoppa", 1, true) then return "Italy" end
+        if n == "bundesliga" or n:find("dfb", 1, true) or n:find("dfl", 1, true) then return "Germany" end
+        if n == "ligue 1" or n:find("coupe de france", 1, true) or n:find("troph", 1, true) then return "France" end
+        return nil
+    end
+
+    CR.COUNTRY = {
+        ["premier league"] = "England", ["efl championship"] = "England", ["efl league one"] = "England", ["efl league two"] = "England",
+        ["laliga ea sports"] = "Spain", ["laliga hypermotion"] = "Spain", ["serie a"] = "Italy", ["serie bkt"] = "Italy", ["serie b"] = "Italy",
+        ["bundesliga"] = "Germany", ["bundesliga 2"] = "Germany", ["2. bundesliga"] = "Germany", ["3. liga"] = "Germany",
+        ["ligue 1"] = "France", ["ligue 1 mcdonald's"] = "France", ["ligue 2"] = "France", ["ligue 2 bkt"] = "France",
+        ["liga portugal"] = "Portugal", ["liga portugal betclic"] = "Portugal", ["eredivisie"] = "Netherlands",
+        ["scottish premiership"] = "Scotland", ["1a pro league"] = "Belgium", ["süper lig"] = "Türkiye", ["trendyol süper lig"] = "Türkiye"
+    }
+    function CR.country(league_name) return CR.COUNTRY[tostring(league_name or ""):lower()] or "" end
+
+    -- The leagues worth a table: the club's own, the five big ones, and the leagues above and below the club's own.
+    function CR.wanted_leagues(own)
+        local wanted = {}
+        if own and own ~= "" then wanted[own:lower()] = true end
+        for _, l in ipairs(CR.TOP_FIVE) do wanted[l:lower()] = true end
+        for _, ladder in ipairs(CR.LADDERS) do
+            for _, l in ipairs(ladder) do
+                if own and l:lower() == own:lower() then
+                    for _, x in ipairs(ladder) do wanted[x:lower()] = true end
+                end
+            end
+        end
+        return wanted
+    end
+
+    CR.ROLES = { [1] = "Crucial", [2] = "Important", [3] = "Rotation", [4] = "Sporadic", [5] = "Prospect" }
+    function CR.role(n) return CR.ROLES[to_int(n, 0)] end
+
+    -- The game's injury days count from 22 December 1995 (checked against the injury list in the game).
+    CR.INJURY_EPOCH_DAYS = 9486          -- days from 1970-01-01 to 1995-12-22
+    function CR.iso_from_days(days_since_1970)
+        local z = math.floor(days_since_1970) + 719468
+        local era = (z >= 0 and z or z - 146096) // 146097
+        local doe = z - era * 146097
+        local yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+        local y = yoe + era * 400
+        local doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+        local mp = (5 * doy + 2) // 153
+        local d = doy - (153 * mp + 2) // 5 + 1
+        local m = mp + (mp < 10 and 3 or -9)
+        if m <= 2 then y = y + 1 end
+        return string.format("%04d-%02d-%02d", y, m, d)
+    end
+    function CR.days_from_iso(iso)
+        local y, m, d = tostring(iso or ""):match("^(%d%d%d%d)%-(%d%d)%-(%d%d)")
+        if not y then return nil end
+        y, m, d = tonumber(y), tonumber(m), tonumber(d)
+        if m <= 2 then y = y - 1 end
+        local era = (y >= 0 and y or y - 399) // 400
+        local yoe = y - era * 400
+        local doy = (153 * (m + (m > 2 and -3 or 9)) + 2) // 5 + d - 1
+        local doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+        return era * 146097 + doe - 719468
+    end
+
+    -- An injury from career_playerlastgrowth: { start, back } (yyyy-mm-dd), or nil when there is none or it is over.
+    function CR.injury(injurydate, duration, today_iso)
+        local day, dur = to_int(injurydate, 0), to_int(duration, 0)
+        if day <= 0 or dur <= 0 or dur > 400 then return nil end
+        local start = CR.iso_from_days(CR.INJURY_EPOCH_DAYS + day)
+        local back = CR.iso_from_days(CR.INJURY_EPOCH_DAYS + day + dur)
+        if today_iso and today_iso ~= "" and back <= today_iso then return nil end
+        return { start = start, back = back }
+    end
+
+    -- "4-3-3" from the team sheet's position names (goalkeeper left out); nil when it does not add up to ten.
+    function CR.formation(position_names)
+        local def, mid, att = 0, 0, 0
+        local D = { CB = 1, LCB = 1, RCB = 1, LB = 1, RB = 1, LWB = 1, RWB = 1, SW = 1 }
+        local M = { CDM = 1, LDM = 1, RDM = 1, CM = 1, LCM = 1, RCM = 1, LM = 1, RM = 1, CAM = 1, LAM = 1, RAM = 1 }
+        local A = { ST = 1, LS = 1, RS = 1, CF = 1, LF = 1, RF = 1, LW = 1, RW = 1 }
+        for _, p in ipairs(position_names) do
+            local n = tostring(p):upper()
+            if D[n] then def = def + 1 elseif M[n] then mid = mid + 1 elseif A[n] then att = att + 1 end
+        end
+        if def + mid + att ~= 10 or def == 0 or att == 0 then return nil end
+        return string.format("%d-%d-%d", def, mid, att)
+    end
+
+    -- The last five results of a club, oldest first: results = list of { date, gf, ga }.
+    function CR.form(results)
+        table.sort(results, function(a, b) return (a.date or 0) < (b.date or 0) end)
+        local out = {}
+        for i = math.max(1, #results - 4), #results do
+            local r = results[i]
+            out[#out + 1] = (r.gf > r.ga) and "W" or ((r.gf == r.ga) and "D" or "L")
+        end
+        return table.concat(out)
+    end
+
+    -- The final of a cup from its last fixture: { home, away, hs, as, hp, ap } (team ids, scores, shoot-out or nil).
+    function CR.final(f)
+        if not f or not f.completed or not f.home or not f.away or f.home <= 0 or f.away <= 0 then return nil end
+        local hs, as = to_int(f.hs, -1), to_int(f.as, -1)
+        if hs < 0 or as < 0 or hs > 30 or as > 30 then return nil end
+        local hp, ap = to_int(f.hp, 0), to_int(f.ap, 0)
+        if hp >= 255 or ap >= 255 then hp, ap = 0, 0 end
+        local pens = (hs == as and (hp > 0 or ap > 0)) and (hp .. "–" .. ap) or nil
+        local home_won = hs > as or (pens ~= nil and hp > ap)
+        if hs == as and not pens then return nil end
+        return { winner = home_won and f.home or f.away, runner = home_won and f.away or f.home,
+                 score = home_won and (hs .. "–" .. as) or (as .. "–" .. hs), pens = pens and (home_won and (hp .. "–" .. ap) or (ap .. "–" .. hp)) or nil }
+    end
+
+    -- Kick-off from the fixture list: minutes after midnight (900 = 15:00), or hhmm when that cannot be a time of day.
+    function CR.kickoff(raw)
+        local n = to_int(raw, -1)
+        if n >= 0 and n < 1440 then return string.format("%02d:%02d", n // 60, n % 60) end
+        if n >= 0 and n <= 2359 and n % 100 < 60 then return string.format("%02d:%02d", n // 100, n % 100) end
+        return ""
+    end
+
+    -- Money the game keeps in units, as millions for the app (a value already below 10,000 is taken as millions).
+    function CR.millions(v)
+        local n = to_num(v, -1)
+        if n < 0 then return nil end
+        if n >= 10000 then n = n / 1000000 end
+        return math.floor(n * 100 + 0.5) / 100
+    end
+
+    -- A weekly wage in thousands (the app's unit); at least 1 for a paid player.
+    function CR.wage_k(v)
+        local n = to_num(v, 0)
+        if n <= 0 then return nil end
+        if n >= 1000 then return math.floor(n / 1000 + 0.5) end
+        return 1
+    end
+
+    function CR.json_value(v, indent)
+        local t = type(v)
+        if t == "string" then return '"' .. jstr(v) .. '"' end
+        if t == "boolean" then return tostring(v) end
+        if t == "number" then
+            if v ~= v or v == math.huge or v == -math.huge then return "0" end
+            if math.type and math.type(v) == "integer" then return string.format("%d", v) end
+            if v == math.floor(v) and math.abs(v) < 1e15 then return string.format("%d", math.floor(v)) end
+            local s = string.format("%.3f", v):gsub("0+$", ""):gsub("%.$", "")
+            return s
+        end
+        if t ~= "table" then return "null" end
+        local pad = indent and ("\n" .. string.rep("  ", indent + 1)) or ""
+        local close = indent and ("\n" .. string.rep("  ", indent)) or ""
+        local next_indent = indent and indent + 1 or nil
+        if getmetatable(v) == CR.ARRAY or (#v > 0) then
+            if #v == 0 then return "[]" end
+            local parts = {}
+            for i = 1, #v do parts[i] = CR.json_value(v[i], nil) end
+            if indent then return "[" .. pad .. table.concat(parts, "," .. pad) .. close .. "]" end
+            return "[" .. table.concat(parts, ", ") .. "]"
+        end
+        local keys = {}
+        for k in pairs(v) do keys[#keys + 1] = tostring(k) end
+        table.sort(keys)
+        if #keys == 0 then return "{}" end
+        local parts = {}
+        for _, k in ipairs(keys) do
+            local val = v[k]
+            if val == nil then val = v[tonumber(k)] end
+            parts[#parts + 1] = '"' .. jstr(k) .. '": ' .. CR.json_value(val, next_indent)
+        end
+        if indent then return "{" .. pad .. table.concat(parts, "," .. pad) .. close .. "}" end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+
+    -- The payload text. report holds the sections (any of them may be missing); the order of keys is fixed, so the same
+    -- report always gives the same text and an unchanged report is not sent again.
+    function CR.payload(report)
+        local body = {}
+        for k, v in pairs(report) do body[k] = v end
+        body.dataType = "career"
+        body.title = "Career report"
+        body.message = "Tables, fixtures and squad details from the game"
+        return CR.json_value(body, 0) .. "\n"
+    end
+end
+-- END career_report
+
 -- BEGIN squad_status (this exact block is also run by tests/lua/test_transfer_logic.lua)
 local SCRIPT_PROTOCOL = 2
 
@@ -4209,6 +4427,413 @@ local function check_squad_contracts()
         "Squad contracts (" .. #rows .. " players)")
 end
 
+-- ---------------------------------------------------------------------------------------------------------------------
+-- Career report: what the game knows beyond matches and transfers (see the career_report block). Read every few
+-- minutes, and soon after a match or a transfer; sent only when something changed.
+-- Tables it reads (all opened before by the table census without trouble): leagueteamlinks, teamplayerlinks,
+-- career_playercontract, career_playerlastgrowth, playersuspensions, players, teams, teamstadiumlinks, stadiums,
+-- clubcoefficients, competition. It never opens "transfers" or "scenarioevents" (those closed the game).
+-- ---------------------------------------------------------------------------------------------------------------------
+local check_career_report
+do
+    local CAREER_NEVER = { transfers = true, scenarioevents = true }
+    local CAREER_FIRST_SECONDS = 40
+    local CAREER_CHECK_SECONDS = 300
+    local CAREER_AFTER_EVENT_SECONDS = 30
+    local career_scan = { started = os.time(), last_check = 0, signature = nil, file = nil }
+
+    -- Rows of a table with the wanted fields; a field the table does not have is simply missing (nil). Returns rows and
+    -- whether the table could be opened at all.
+    local function career_rows(name, fields)
+        if CAREER_NEVER[tostring(name):lower()] then return {}, false end
+        local rows, opened = {}, false
+        pcall(function()
+            if type(GetDBTableRows) == "function" then
+                local raw = GetDBTableRows(name)
+                if type(raw) == "table" then
+                    opened = true
+                    for _, rr in ipairs(raw) do
+                        local row = {}
+                        for _, f in ipairs(fields) do
+                            local v = rr[f]
+                            if type(v) == "table" then v = v.value end
+                            row[f] = v
+                        end
+                        rows[#rows + 1] = row
+                    end
+                end
+            end
+        end)
+        if opened and #rows > 0 then return rows, true end
+        pcall(function()
+            if LE and LE.db then
+                local t = LE.db:GetTable(name)
+                if t then
+                    opened = true
+                    local r = t:GetFirstRecord()
+                    while r and r > 0 do
+                        local row = {}
+                        for _, f in ipairs(fields) do
+                            local ok, v = pcall(function() return t:GetRecordFieldValue(r, f) end)
+                            if ok then row[f] = v end
+                        end
+                        rows[#rows + 1] = row
+                        r = t:GetNextValidRecord()
+                    end
+                end
+            end
+        end)
+        return rows, opened
+    end
+
+    local function career_comp_name(obj_id)
+        local ok, name = pcall(function() return GetCompetitionNameByObjID(tonumber(obj_id)) end)
+        if ok and name and tostring(name) ~= "" and tostring(name) ~= "INVALID" then return tostring(name) end
+        return nil
+    end
+
+    local function collect_career_report(managed_tid)
+        local report = {}
+        local today = (get_current_career_date())
+        if type(today) ~= "string" then today = "" end
+        if today ~= "" then report.careerDate = today end
+        local month = tonumber(today:sub(6, 7)) or 0
+        local season_end = (month == 6 or month == 7)
+
+        local team_names = {}
+        local function tname(tid)
+            tid = tonumber(tid) or 0
+            if tid <= 0 then return "" end
+            if not team_names[tid] then team_names[tid] = safe_team_name(tid) end
+            return team_names[tid]
+        end
+
+        -- Fixtures still to play (from the game's fixture list, all competitions).
+        local managed = get_all_managed_fixtures(managed_tid)
+        local per_comp, upcoming, managed_comp_name = {}, CR.array(), {}
+        for _, f in ipairs(managed) do
+            managed_comp_name[f.compobjid] = f.competition
+            per_comp[f.competition] = (per_comp[f.competition] or 0) + 1
+            if not f.completed and f.date ~= "" and (today == "" or f.date >= today) and #upcoming < 40 then
+                upcoming[#upcoming + 1] = {
+                    key = string.format("%d-%d", to_int(f.compobjid, 0), to_int(f.fixture_id, 0)),
+                    date = f.date, time = CR.kickoff(f.time_raw), competition = f.competition,
+                    round = determine_stage(f.competition, per_comp[f.competition]),
+                    opponent = f.opponent_name, home = f.is_home == true
+                }
+            end
+        end
+        if #managed > 0 then report.fixtures = upcoming end
+
+        -- League tables from the season's results, with every club's last five league results.
+        local fixtures, standings = read_valid_fixtures(), read_valid_standings()
+        local own_comp = pick_league_comp(managed, nil, is_league_competition)
+        local own_league = own_comp and (career_comp_name(own_comp) or managed_comp_name[own_comp]) or nil
+        local wanted = CR.wanted_leagues(own_league)
+        local comps, comp_fixtures = {}, {}
+        for _, f in ipairs(fixtures) do
+            local c = f.competition_object_id
+            if comps[c] == nil then comps[c] = career_comp_name(c) or managed_comp_name[c] or false end
+            comp_fixtures[c] = comp_fixtures[c] or {}
+            local list = comp_fixtures[c]
+            list[#list + 1] = f
+        end
+        local tables_out, league_rows = CR.array(), {}
+        for c, name in pairs(comps) do
+            if name and wanted[name:lower()] and is_league_competition(name) then
+                local built = build_league_table(fixtures, standings, c, nil)
+                if #built.rows >= 4 then
+                    local results = {}
+                    local total, done = 0, 0
+                    for _, f in ipairs(comp_fixtures[c]) do
+                        total = total + 1
+                        local h, a = standings[f.home_standing_index], standings[f.away_standing_index]
+                        if f.completed and h and a then
+                            done = done + 1
+                            local hs, as = tonumber(f.home_score) or 0, tonumber(f.away_score) or 0
+                            results[h.team_id] = results[h.team_id] or {}
+                            results[a.team_id] = results[a.team_id] or {}
+                            table.insert(results[h.team_id], { date = f.date_raw, gf = hs, ga = as })
+                            table.insert(results[a.team_id], { date = f.date_raw, gf = as, ga = hs })
+                        end
+                    end
+                    local rows = CR.array()
+                    for _, t in ipairs(built.rows) do
+                        rows[#rows + 1] = { club = tname(t.team_id), p = t.played, w = t.won, d = t.drawn, l = t.lost, gf = t.gf, ga = t.ga,
+                                            pts = t.pts, form = CR.form(results[t.team_id] or {}), user = (t.team_id == managed_tid) }
+                    end
+                    tables_out[#tables_out + 1] = { league = name, country = CR.country(name), rows = rows }
+                    league_rows[name] = { rows = built.rows, complete = (total > 0 and done == total) }
+                end
+            end
+        end
+        table.sort(tables_out, function(a, b) return a.league < b.league end)
+        if #tables_out > 0 then report.tables = tables_out end
+
+        -- Squad links: numbers and the team sheet of the club; league goals of everybody (top scorers).
+        local links = career_rows("teamplayerlinks", { "teamid", "playerid", "jerseynumber", "position", "leaguegoals" })
+        local squad, xi, bench, goals_by_team = {}, {}, CR.array(), {}
+        for _, r in ipairs(links) do
+            local tid, pid = tonumber(r.teamid) or 0, tonumber(r.playerid) or 0
+            if pid > 0 and tid > 0 then
+                if tid == managed_tid then
+                    squad[pid] = { number = tonumber(r.jerseynumber), pos = tonumber(r.position) }
+                    local pos = tonumber(r.position) or 99
+                    if pos <= 27 then xi[#xi + 1] = { pid = pid, pos = pos } elseif pos == 28 then bench[#bench + 1] = pid end
+                end
+                local g = tonumber(r.leaguegoals) or 0
+                if g > 0 then
+                    goals_by_team[tid] = goals_by_team[tid] or {}
+                    table.insert(goals_by_team[tid], { pid = pid, goals = g })
+                end
+            end
+        end
+        local function top_scorers(league_name, limit)
+            local lr = league_rows[league_name]
+            if not lr then return {} end
+            local all = {}
+            for _, t in ipairs(lr.rows) do
+                for _, g in ipairs(goals_by_team[t.team_id] or {}) do all[#all + 1] = { pid = g.pid, goals = g.goals, tid = t.team_id } end
+            end
+            table.sort(all, function(a, b) if a.goals ~= b.goals then return a.goals > b.goals end return a.pid < b.pid end)
+            local out = {}
+            for i = 1, math.min(limit, #all) do
+                out[#out + 1] = { player = safe_player_name(all[i].pid), club = tname(all[i].tid), value = all[i].goals, user = (all[i].tid == managed_tid) }
+            end
+            return out
+        end
+        if own_league and league_rows[own_league] then
+            local goals = top_scorers(own_league, 10)
+            if #goals > 0 then report.leaders = CR.array({ { competition = own_league, goals = CR.array(goals) } }) end
+        end
+
+        -- The team sheet picked in the game.
+        table.sort(xi, function(a, b) return a.pos < b.pos end)
+        if #xi >= 7 then
+            local ids, names, positions = CR.array(), {}, {}
+            for _, e in ipairs(xi) do
+                ids[#ids + 1] = e.pid
+                local pname = safe_position_name(e.pos)
+                names[#names + 1] = pname
+                positions[tostring(e.pid)] = pname
+            end
+            report.teamsheet = { formation = CR.formation(names) or "", xi = ids, bench = bench, positions = positions }
+        end
+
+        -- The squad: roles and wages, ratings, injuries and suspensions.
+        local contracts = {}
+        for _, r in ipairs((career_rows("career_playercontract", { "playerid", "teamid", "playerrole", "wage" }))) do
+            local pid = tonumber(r.playerid) or 0
+            if squad[pid] then contracts[pid] = r end
+        end
+        local ratings = {}
+        for _, r in ipairs((career_rows("players", { "playerid", "overallrating", "potential" }))) do
+            local pid = tonumber(r.playerid) or 0
+            if squad[pid] then ratings[pid] = r end
+        end
+        local injuries = {}
+        local growth, growth_open = career_rows("career_playerlastgrowth", { "playerid", "injurydate", "injuryduration" })
+        for _, r in ipairs(growth) do
+            local pid = tonumber(r.playerid) or 0
+            if squad[pid] then injuries[pid] = CR.injury(r.injurydate, r.injuryduration, today) end
+        end
+        report.injuriesKnown = growth_open and #growth > 0
+        local suspensions, susp_known = {}, false
+        local susp_fields = { "playerid", "games", "numgames", "gamesremaining", "suspensiongames", "nummatches", "matches", "length", "duration" }
+        local susp_rows, susp_open = career_rows("playersuspensions", susp_fields)
+        if susp_open then
+            susp_known = true
+            for _, r in ipairs(susp_rows) do
+                local pid = tonumber(r.playerid) or 0
+                local games
+                for i = 2, #susp_fields do
+                    local v = tonumber(r[susp_fields[i]])
+                    if v and v > 0 and v < 20 then games = math.floor(v) break end
+                end
+                if pid > 0 and not games then susp_known = false end      -- rows exist but the game count is not readable
+                if pid > 0 and games and squad[pid] then suspensions[pid] = games end
+            end
+        end
+        report.suspensionsKnown = susp_known
+        local players = CR.array()
+        for pid, info in pairs(squad) do
+            local name = safe_player_name(pid)
+            if not is_unnamed_player(name) then
+                local p = { playerId = pid, name = name }
+                if info.number and info.number > 0 and info.number < 100 then p.number = math.floor(info.number) end
+                local c = contracts[pid]
+                if c then
+                    p.role = CR.role(c.playerrole)
+                    p.wage = CR.wage_k(c.wage)
+                end
+                local rt = ratings[pid]
+                if rt then
+                    local o, pot = to_int(rt.overallrating, 0), to_int(rt.potential, 0)
+                    if o > 0 and o < 100 then p.overall = o end
+                    if pot > 0 and pot < 100 then p.potential = pot end
+                end
+                if injuries[pid] then p.injury = { name = "Injury", start = injuries[pid].start, back = injuries[pid].back } end
+                if suspensions[pid] then p.suspension = { games = suspensions[pid] } end
+                players[#players + 1] = p
+            end
+        end
+        table.sort(players, function(a, b) return a.playerId < b.playerId end)
+        if #players > 0 then report.players = players end
+
+        -- The club: honours, founded, rival, stadium and the transfer budget.
+        local club = {}
+        for _, r in ipairs((career_rows("teams", { "teamid", "foundationyear", "rivalteam", "leaguetitles", "domesticcups", "uefa_cl_wins", "uefa_el_wins", "uefa_uecl_wins" }))) do
+            if tonumber(r.teamid) == managed_tid then
+                local founded = to_int(r.foundationyear, 0)
+                if founded > 1800 and founded < 2100 then club.founded = tostring(founded) end
+                local rival = tonumber(r.rivalteam) or 0
+                if rival > 0 and rival ~= managed_tid then club.rival = tname(rival) end
+                if r.leaguetitles ~= nil then club.leagueTitles = to_int(r.leaguetitles, 0) end
+                if r.domesticcups ~= nil then club.domesticCups = to_int(r.domesticcups, 0) end
+                if r.uefa_cl_wins ~= nil or r.uefa_el_wins ~= nil or r.uefa_uecl_wins ~= nil then
+                    club.europeanTrophies = to_int(r.uefa_cl_wins, 0) + to_int(r.uefa_el_wins, 0) + to_int(r.uefa_uecl_wins, 0)
+                end
+                break
+            end
+        end
+        local stadium_id
+        for _, r in ipairs((career_rows("teamstadiumlinks", { "teamid", "stadiumid" }))) do
+            if tonumber(r.teamid) == managed_tid then stadium_id = tonumber(r.stadiumid) break end
+        end
+        if stadium_id then
+            for _, r in ipairs((career_rows("stadiums", { "stadiumid", "name", "capacity" }))) do
+                if tonumber(r.stadiumid) == stadium_id then
+                    if r.name and tostring(r.name) ~= "" then club.stadium = tostring(r.name) end
+                    local cap = to_int(r.capacity, 0)
+                    if cap > 0 then club.capacity = cap end
+                    break
+                end
+            end
+        end
+        if type(GetUserTransferBudget) == "function" then
+            local ok, v = pcall(GetUserTransferBudget)
+            local m = ok and CR.millions(v) or nil
+            if m then club.transferBudget = m end
+        end
+        if next(club) then report.club = club end
+
+        -- The European club ranking: the top ten, the clubs of the club's own country, and the club itself.
+        local coeff = career_rows("clubcoefficients", { "teamid", "points", "year1" })
+        if #coeff > 0 then
+            table.sort(coeff, function(a, b) return (tonumber(a.points) or 0) > (tonumber(b.points) or 0) end)
+            local league_of = {}
+            for _, r in ipairs((career_rows("leagueteamlinks", { "teamid", "leagueid" }))) do league_of[tonumber(r.teamid) or 0] = tonumber(r.leagueid) end
+            local league_names = {}
+            local function country_of(tid)
+                local lid = league_of[tid]
+                if not lid then return "" end
+                if league_names[lid] == nil then league_names[lid] = safe_league_name_by_id(lid) or "" end
+                return CR.country(league_names[lid])
+            end
+            local own_country = country_of(managed_tid)
+            local out, same_country = CR.array(), 0
+            for i, r in ipairs(coeff) do
+                local tid = tonumber(r.teamid) or 0
+                local mine = tid == managed_tid
+                local country = (i <= 100 or mine) and country_of(tid) or ""
+                local take = i <= 10 or mine or (own_country ~= "" and country == own_country and i <= 100 and same_country < 12)
+                if take and tid > 0 then
+                    if i > 10 and not mine then same_country = same_country + 1 end
+                    out[#out + 1] = { rank = i, club = tname(tid), country = country, season = to_num(r.year1, 0), total = to_num(r.points, 0), user = mine }
+                end
+            end
+            if #out > 0 then report.coefficients = out end
+        end
+
+        -- June and July: last season's winners and top scorers (Around the World).
+        if season_end then
+            local holders, seen = CR.array(), {}
+            for c, name in pairs(comps) do
+                local region = name and CR.region(name)
+                if region then
+                    if is_league_competition(name) and not tostring(name):lower():find("play", 1, true) then
+                        local lr = league_rows[name]
+                        if lr and lr.complete and lr.rows[1] then
+                            local first, second = lr.rows[1], lr.rows[2]
+                            holders[#holders + 1] = { region = region, competition = name, winner = tname(first.team_id), league = true,
+                                                      detail = first.pts .. " pts" .. (second and (" · " .. tname(second.team_id) .. " 2nd") or "") }
+                            seen[name:lower()] = true
+                        end
+                    else
+                        local last
+                        for _, f in ipairs(comp_fixtures[c] or {}) do
+                            if not last or (f.date_raw or 0) >= (last.date_raw or 0) then last = f end
+                        end
+                        if last then
+                            local h, a = standings[last.home_standing_index], standings[last.away_standing_index]
+                            local fin = CR.final({ completed = last.completed, home = h and h.team_id, away = a and a.team_id, hs = last.home_score,
+                                                       as = last.away_score, hp = last.home_penalties, ap = last.away_penalties })
+                            if fin then
+                                holders[#holders + 1] = { region = region, competition = name, winner = tname(fin.winner), runnerUp = tname(fin.runner),
+                                                          score = fin.score, pens = fin.pens or "" }
+                                seen[name:lower()] = true
+                            end
+                        end
+                    end
+                end
+            end
+            -- Competitions without a final in the fixture list: the game's holder, without a score.
+            for _, r in ipairs((career_rows("competition", { "competitionid", "competitionchampionid" }))) do
+                local holder = tonumber(r.competitionchampionid) or 0
+                if holder > 0 and holder < 4294967295 then
+                    local ok, name = pcall(function() return GetCompetitionNameByID(tonumber(r.competitionid)) end)
+                    name = ok and name and tostring(name) or ""
+                    local region = CR.region(name)
+                    if region and not seen[name:lower()] then
+                        holders[#holders + 1] = { region = region, competition = name, winner = tname(holder), league = is_league_competition(name) }
+                        seen[name:lower()] = true
+                    end
+                end
+            end
+            if #holders > 0 then
+                table.sort(holders, function(a, b) return a.competition < b.competition end)
+                report.holders = holders
+            end
+            local scorers = CR.array()
+            for _, league in ipairs(CR.TOP_FIVE) do
+                local best = top_scorers(league, 1)[1]
+                if best then scorers[#scorers + 1] = { region = CR.region(league), competition = league, player = best.player, club = best.club, goals = best.value } end
+            end
+            if #scorers > 0 then report.topScorers = scorers end
+        end
+        return report
+    end
+
+    -- Sends the career report when it changed: shortly after the start, every few minutes, and soon after a match or a
+    -- transfer. A report still waiting in the outbox is replaced by the newer one.
+    function check_career_report()
+        if not state or not state.active then return end
+        if _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] ~= SCRIPT_INSTANCE then return end
+        local now = os.time()
+        if now - career_scan.started < CAREER_FIRST_SECONDS then return end
+        local due = now - career_scan.last_check >= CAREER_CHECK_SECONDS
+        if status.career_dirty_at and now - status.career_dirty_at >= CAREER_AFTER_EVENT_SECONDS then due = true end
+        if not due then return end
+        career_scan.last_check = now
+        status.career_dirty_at = nil
+        local report = collect_career_report(state.managed_team_id)
+        local payload = CR.payload(report)
+        if payload == career_scan.signature then return end
+        career_scan.signature = payload
+        if career_scan.file and outbox_pending[career_scan.file] and file_exists(career_scan.file) then
+            pcall(os.remove, career_scan.file)
+            outbox_pending[career_scan.file] = nil
+        end
+        local before = {}
+        for path in pairs(outbox_pending) do before[path] = true end
+        send_payload_to_bridge(payload, "Career report (" .. tostring(report.players and #report.players or 0) .. " players, " ..
+            tostring(report.tables and #report.tables or 0) .. " tables)")
+        for path in pairs(outbox_pending) do
+            if not before[path] then career_scan.file = path end
+        end
+    end
+end
+
 -- Run a periodic job; an error is logged (once a minute at most) instead of silently swallowed.
 local last_error_log = {}
 local function guarded(name, fn)
@@ -4230,6 +4855,7 @@ local function tick()
     guarded("outbox", service_outbox)
     guarded("re-send request", service_resend_request)
     guarded("squad contracts", check_squad_contracts)
+    guarded("career report", check_career_report)
     guarded("status report", write_script_status)
 end
 

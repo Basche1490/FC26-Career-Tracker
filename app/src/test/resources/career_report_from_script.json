@@ -1,0 +1,46 @@
+{
+  "careerDate": "2028-08-12",
+  "club": {
+    "capacity": 6500,
+    "domesticCups": 1,
+    "europeanTrophies": 0,
+    "founded": "1899",
+    "leagueTitles": 0,
+    "rival": "Sunderland",
+    "stadium": "Plainmoor"
+  },
+  "coefficients": [
+    {"club": "Parma", "country": "", "rank": 1, "season": 9, "total": 40.5, "user": false},
+    {"club": "Torquay AFC", "country": "", "rank": 2, "season": 3.25, "total": 3.25, "user": true}
+  ],
+  "dataType": "career",
+  "fixtures": [
+    {"competition": "EFL Championship", "date": "2028-08-12", "home": true, "key": "779-4", "opponent": "Sunderland", "round": "Matchday 2", "time": "15:00"},
+    {"competition": "EFL Championship", "date": "2028-08-19", "home": false, "key": "779-7", "opponent": "Parma", "round": "Matchday 3", "time": "15:00"}
+  ],
+  "injuriesKnown": true,
+  "leaders": [
+    {"competition": "EFL Championship", "goals": [{"club": "Torquay AFC", "player": "Enrique Iglesias", "user": true, "value": 4}]}
+  ],
+  "message": "Tables, fixtures and squad details from the game",
+  "players": [
+    {"name": "Pedro Lima", "playerId": 73049},
+    {"name": "Jordan Anderson", "playerId": 460045},
+    {"name": "Harry Dalton", "playerId": 460047},
+    {"name": "Ignacio Zapata", "playerId": 460053, "suspension": {"games": 2}},
+    {"name": "Kento Takeuchi", "playerId": 460055},
+    {"name": "Marc Palomino", "playerId": 460129},
+    {"injury": {"back": "2028-09-22", "name": "Injury", "start": "2028-08-13"}, "name": "Enrique Iglesias", "number": 9, "overall": 71, "playerId": 461483, "potential": 78, "role": "Crucial", "wage": 15},
+    {"name": "Bruno Henrique Gonzaga", "playerId": 462221},
+    {"name": "Oliver Ebner", "playerId": 462884},
+    {"name": "Leo Guerra", "playerId": 463320},
+    {"name": "Denilson Fernandes", "playerId": 463808},
+    {"name": "Elivélton Jesus", "playerId": 464205},
+    {"name": "Nico Striker", "playerId": 470001}
+  ],
+  "suspensionsKnown": true,
+  "tables": [
+    {"country": "England", "league": "EFL Championship", "rows": [{"club": "Torquay AFC", "d": 0, "form": "W", "ga": 0, "gf": 3, "l": 0, "p": 1, "pts": 3, "user": true, "w": 1}, {"club": "Watford", "d": 0, "form": "W", "ga": 1, "gf": 2, "l": 0, "p": 1, "pts": 3, "user": false, "w": 1}, {"club": "Birmingham City", "d": 2, "form": "DD", "ga": 3, "gf": 3, "l": 0, "p": 2, "pts": 2, "user": false, "w": 0}, {"club": "Sunderland", "d": 1, "form": "D", "ga": 1, "gf": 1, "l": 0, "p": 1, "pts": 1, "user": false, "w": 0}, {"club": "Parma", "d": 1, "form": "LD", "ga": 5, "gf": 2, "l": 1, "p": 2, "pts": 1, "user": false, "w": 0}, {"club": "Stoke City", "d": 0, "form": "L", "ga": 2, "gf": 1, "l": 1, "p": 1, "pts": 0, "user": false, "w": 0}]}
+  ],
+  "title": "Career report"
+}

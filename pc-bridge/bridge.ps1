@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 $EventsFile = Join-Path $PSScriptRoot "telemetry_events.json"
-$BridgeVersion = "3.0.0"
+$BridgeVersion = "3.1.0"
 $BridgeProtocol = 3             # 3 = the phone must prove it knows the pairing code (docs/SECURITY.md)
 $MinScriptVersion = "2.8.0"     # older capture scripts do not report their health or answer a re-send request
 $ScriptAliveSeconds = 20        # the script writes its heartbeat every 5 seconds
@@ -220,7 +220,8 @@ function Add-TelemetryEvent {
     param(
         [string]$Title,
         [string]$Message,
-        [string]$RawPayload
+        [string]$RawPayload,
+        [string]$ReplaceKind = ""
     )
     $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $global:EventSeq++
@@ -232,6 +233,15 @@ function Add-TelemetryEvent {
         message = if ($RawPayload) { $RawPayload } else { $Message }
     }
     $jsonStr = $formattedEvent | ConvertTo-Json -Compress
+    # Career and squad reports carry the whole picture: only the newest of each kind waits for the phone.
+    if ($ReplaceKind) {
+        for ($i = $global:EventList.Count - 1; $i -ge 0; $i--) {
+            $old = ConvertFrom-JsonObject ([string]$global:EventList[$i])
+            if ($null -eq $old) { continue }
+            $inner = ConvertFrom-JsonObject ([string]$old.message)
+            if ($null -ne $inner -and [string]$inner.dataType -eq $ReplaceKind) { $global:EventList.RemoveAt($i) }
+        }
+    }
     $global:EventList.Add($jsonStr)
 
     # Keep last 100 events
@@ -349,7 +359,9 @@ function Receive-PayloadText {
                 $reply = '{"status":"duplicate"}'
             }
         } else {
-            Add-TelemetryEvent -Title $title -Message $msg -RawPayload $text
+            $kind = [string]$jsonObj.dataType
+            $replace = if ($kind -eq "career" -or $kind -eq "squad") { $kind } else { "" }
+            Add-TelemetryEvent -Title $title -Message $msg -RawPayload $text -ReplaceKind $replace
             if ($jsonObj.playerName) {
                 Write-Host "  -> Transfer: $($jsonObj.playerName) ($($jsonObj.type))" -ForegroundColor Cyan
             }

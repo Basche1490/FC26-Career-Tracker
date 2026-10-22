@@ -87,6 +87,57 @@ class CareerReportTest {
         assertEquals(83, q.attributes["Finishing"]); assertEquals(81, q.seasonStartAttributes["Finishing"]); assertEquals(0, q.suspendedGames)
     }
 
+    /** The exact text the capture script produces (written by tests/lua/test_transfer_logic.lua, scenario 7c F). */
+    private fun scriptSample(): String {
+        javaClass.classLoader?.getResource("career_report_from_script.json")?.let { return it.readText() }
+        val candidates = listOf("src/test/resources", "test/resources", "app/src/test/resources")
+        return candidates.map { java.io.File(it, "career_report_from_script.json") }.first { it.isFile }.readText()
+    }
+
+    @Test fun theCaptureScriptsReportIsUnderstood() {
+        val club = AppState(clubName = "Torquay AFC", leagueName = "EFL Championship", startYear = 2028,
+            players = listOf(Player(id = "a", name = "Enrique Iglesias", gamePlayerId = 461483), Player(id = "b", name = "Ignacio Zapata", gamePlayerId = 460053)))
+        val r = CareerReport.apply(club, JSONObject(scriptSample()))
+        assertTrue(r.changed)
+        assertEquals("2028-08-12", r.state.careerDate)
+        assertEquals(listOf("Sunderland", "Parma"), r.state.fixtures.map { it.opponent })
+        assertEquals("15:00", r.state.fixtures.first().kickOff)
+        val table = r.state.leagueTables.single()
+        assertEquals(6, table.rows.size)
+        assertTrue(table.rows.first { it.club == "Torquay AFC" }.isUser)
+        val ig = r.state.players.first { it.id == "a" }
+        assertEquals(9, ig.number); assertEquals("Crucial", ig.squadRole); assertEquals(15, ig.wageK); assertEquals(71, ig.overall)
+        assertTrue(ig.isInjured); assertEquals(Source.GAME, ig.injurySource)
+        assertEquals(2, r.state.players.first { it.id == "b" }.suspendedGames)
+        assertEquals("Plainmoor", r.state.clubInfo.stadium); assertEquals("Sunderland", r.state.clubInfo.rival)
+        assertEquals(4, r.state.leaders.single().goals.single().value)
+        assertTrue(r.state.coefficients.last().isUser)
+        assertEquals(listOf("Enrique Iglesias"), r.newInjuries)
+    }
+
+    @Test fun unknownInjuriesAndSuspensionsAreLeftAlone() {
+        val r = report("""{"careerDate":"2026-10-12","players":[{"playerId":222,"name":"Jonah Pike","injury":{"name":"Knock","start":"2026-10-10","back":"2026-10-31"}},{"playerId":111,"name":"Marco Varela","suspension":{"games":1}}]}""")
+        // The next report could not read either table: nothing is cleared.
+        val later = CareerReport.apply(r.state, JSONObject("""{"careerDate":"2026-10-14","injuriesKnown":false,"suspensionsKnown":false,"players":[{"playerId":222,"name":"Jonah Pike"},{"playerId":111,"name":"Marco Varela"}]}"""))
+        assertTrue(later.state.players.first { it.id == "p2" }.isInjured)
+        assertEquals(1, later.state.players.first { it.id == "p1" }.suspendedGames)
+        // When they are readable again, a missing entry means fit and available.
+        val known = CareerReport.apply(later.state, JSONObject("""{"careerDate":"2026-10-15","injuriesKnown":true,"suspensionsKnown":true,"players":[{"playerId":222,"name":"Jonah Pike"},{"playerId":111,"name":"Marco Varela"}]}"""))
+        assertFalse(known.state.players.first { it.id == "p2" }.isInjured)
+        assertEquals(0, known.state.players.first { it.id == "p1" }.suspendedGames)
+    }
+
+    @Test fun promotionMovesTheCareerToTheNewLeague() {
+        val r = report("""{"tables":[{"league":"Premier League","rows":[{"club":"Arsenal","p":0},{"club":"Your Club","p":0,"user":true}]},{"league":"EFL Championship","rows":[{"club":"Hull City","p":0}]}]}""")
+        assertEquals("Premier League", r.state.leagueName)
+        // A table without the club (another league) never moves it.
+        val other = report("""{"tables":[{"league":"Serie A","rows":[{"club":"Inter","p":3}]}]}""")
+        assertEquals("EFL Championship", other.state.leagueName)
+        // A cup or European table with the club in it does not either.
+        val cup = report("""{"tables":[{"league":"UEFA Champions League","rows":[{"club":"Your Club","p":3,"user":true}]}]}""")
+        assertEquals("EFL Championship", cup.state.leagueName)
+    }
+
     @Test fun aroundTheWorldOnlyChangesInJune() {
         val json = """{"holders":[{"region":"Europe","competition":"UEFA Champions League","winner":"Real Madrid","runnerUp":"Arsenal","score":"2–1"},{"region":"World","competition":"FIFA World Cup","winner":"Spain"}],
             "topScorers":[{"region":"England","competition":"Premier League","player":"Rafael Duarte","club":"Arsenal","goals":27}]}"""
@@ -130,6 +181,20 @@ class CareerReportTest {
 }
 
 class CareerOpsTest {
+    @Test fun promotedOnConsoleTheCareerMovesLeague() {
+        val s = AppState(clubName = "Your Club", leagueName = "EFL Championship", country = "England",
+            leagueTables = listOf(LeagueTableData(league = "EFL Championship", rows = listOf(TableRow(club = "Your Club", isUser = true), TableRow(club = "Hull City")))))
+        val moved = CareerOps.moveLeague(s, "Premier League", listOf("Burnley", "Your Club", ""), promoted = true)
+        assertEquals("Premier League", moved.leagueName)
+        val pl = moved.leagueTables.first { it.league == "Premier League" }
+        assertEquals(listOf("Burnley", "Your Club"), pl.rows.map { it.club })
+        assertTrue(pl.rows.all { it.movement == "promoted" })
+        assertTrue(pl.rows.first { it.club == "Your Club" }.isUser)
+        assertTrue(moved.leagueTables.first { it.league == "EFL Championship" }.rows.none { it.isUser })
+        // Moving to the league it is already in changes nothing.
+        assertEquals(s, CareerOps.moveLeague(s, "efl championship", emptyList(), promoted = true))
+    }
+
     private val varela = Player(id = "p1", name = "Marco Varela", overall = 78, startingOverall = 75, birthDate = "1999-03-01", age = 27, matchesPlayed = 14, goals = 9, attributes = mapOf("Finishing" to 81))
     private val state = AppState(clubName = "Your Club", leagueName = "EFL Championship", startYear = 2026, players = listOf(varela),
         recentMatches = listOf(MatchResult(opponentName = "Hull City", isHome = true, goalsFor = 2, goalsAgainst = 0, matchDate = "2027-05-02", competition = "EFL Championship", leaguePosition = 4)),

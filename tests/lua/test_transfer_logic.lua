@@ -13,6 +13,7 @@ local scripts = root .. "/live-editor-scripts/"
 
 local failures, checks = 0, 0
 local out_print = print -- the pretend-game sessions below silence print while the script runs
+local real_getenv, real_open = os.getenv, io.open
 local function check(cond, label, detail)
     checks = checks + 1
     if cond then
@@ -1547,8 +1548,16 @@ do
         -- the bridge answers: the sender deletes the files
         for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end
         tick(handler, clk, 40)
+        -- the career report (sent 40 s after the start) is the only new payload; once it is delivered too, nothing more
+        local extra = outbox_files(vfs)
+        local only_career = true
+        for _, p in ipairs(extra) do if not vfs[p]:find('"dataType": "career"', 1, true) then only_career = false end end
+        check(#extra <= 1 and only_career, "the only payload after the start-up burst is the career report", #extra)
+        for _, p in ipairs(extra) do vfs[p] = nil end
+        local before = count(executed, "start /min")
         tick(handler, clk, 40)
-        check(count(executed, "start /min") == 2, "nothing more is started once everything is delivered")
+        tick(handler, clk, 40)
+        check(count(executed, "start /min") == before and before <= 3, "nothing more is started once everything is delivered", count(executed, "start /min"))
         restore()
     end
 
@@ -2346,7 +2355,7 @@ do
         local status_text = g.vfs[ROOT .. "/script_status.json"]
         check(status_text ~= nil, "script_status.json is written as soon as the script runs")
         local st = status_text and json_decode(status_text) or {}
-        check(st.version == "2.8.0" and st.protocol == 2 and st.app == "fc26-capture", "it names the script, its version and protocol",
+        check(st.version == "2.9.0" and st.protocol == 2 and st.app == "fc26-capture", "it names the script, its version and protocol",
             tostring(st.version))
         check(st.exporter == true, "it says the detailed-stats exporter is running")
         check(st.club == "Torquay AFC", "it names the club", tostring(st.club))
@@ -2376,6 +2385,95 @@ do
         st = json_decode(g.vfs[ROOT .. "/script_status.json"] or "{}")
         check((st.lastSquad or 0) > 0 and (st.scans or 0) >= 3, "the health report counts scans and knows when the squad was sent",
             tostring(st.lastSquad) .. "/" .. tostring(st.scans))
+        g.close()
+    end
+
+    -- F. the career report: tables, fixtures, the squad's details, the club and the ranking
+    do
+        local function career_payloads(vfs)
+            local list = {}
+            for path, text in pairs(vfs) do
+                if path:find("/outbox/", 1, true) and path:sub(-5) == ".json" and text:find('"dataType": "career"', 1, true) then list[#list + 1] = { path = path, data = json_decode(text) } end
+            end
+            return list
+        end
+        local injury_day = 33 * 365 -- some day in 2028 counted from 22 December 1995
+        local g = play({ db_extra = function(db)
+            db.career_playerlastgrowth = { { playerid = 461483, injurydate = 11923, injuryduration = 40 }, { playerid = 460129, injurydate = 100, injuryduration = 5 } }
+            db.career_playercontract = { { playerid = 461483, teamid = MANAGED, playerrole = 1, wage = 14500 } }
+            db.players = { { playerid = 461483, overallrating = 71, potential = 78 } }
+            db.playersuspensions = { { playerid = 460053, games = 2 } }
+            db.teams = { { teamid = MANAGED, foundationyear = 1899, rivalteam = 106, leaguetitles = 0, domesticcups = 1, uefa_cl_wins = 0, uefa_el_wins = 0, uefa_uecl_wins = 0 } }
+            db.teamstadiumlinks = { { teamid = MANAGED, stadiumid = 5 } }
+            db.stadiums = { { stadiumid = 5, name = "Plainmoor", capacity = 6500 } }
+            db.clubcoefficients = { { teamid = 50, points = 40.5, year1 = 9 }, { teamid = MANAGED, points = 3.25, year1 = 3.25 } }
+            for _, l in ipairs(db.teamplayerlinks) do
+                if l.playerid == 461483 then l.jerseynumber, l.leaguegoals, l.position = 9, 4, 25 end
+            end
+        end })
+        check(g.ok, "script starts (career report)", g.err)
+        g.tick(10)
+        check(#career_payloads(g.vfs) == 0, "no career report in the first seconds (the start-up scans come first)")
+        g.tick(40)
+        local reports = career_payloads(g.vfs)
+        check(#reports == 1, "one career report is queued", #reports)
+        local r = reports[1] and reports[1].data or {}
+        -- FC26_DUMP_CAREER=path writes the payload out (the app's unit test reads the same text: app/src/test/resources)
+        local dump = os.getenv and real_getenv and real_getenv("FC26_DUMP_CAREER")
+        if dump and reports[1] then local f = real_open(dump, "wb") if f then f:write(g.vfs[reports[1].path]) f:close() end end
+        check(r.careerDate == "2028-08-12", "it carries the game's date", r.careerDate)
+        local opp = {}
+        for _, f in ipairs(r.fixtures or {}) do opp[#opp + 1] = f.opponent .. "/" .. tostring(f.home) .. "/" .. f.round end
+        check(table.concat(opp, ",") == "Sunderland/true/Matchday 2,Parma/false/Matchday 3", "fixtures still to play, with home/away and the matchday", table.concat(opp, ","))
+        local t = (r.tables or {})[1] or {}
+        check(t.league == "EFL Championship" and #(t.rows or {}) == 6, "the league table from the season's results", t.league)
+        local top = t.rows and t.rows[1] or {}
+        check(top.club == "Torquay AFC" and top.pts == 3 and top.form == "W" and top.user == true, "the club tops it after a 3-0 win, with its form")
+        local by_id = {}
+        for _, p in ipairs(r.players or {}) do by_id[p.playerId] = p end
+        local ig = by_id[461483] or {}
+        check(ig.number == 9 and ig.role == "Crucial" and ig.wage == 15 and ig.overall == 71 and ig.potential == 78, "number, role, wage and ratings")
+        check(ig.injury and ig.injury.start and ig.injury.back > "2028-08-12", "a current injury is sent with its dates", ig.injury and ig.injury.back)
+        check(by_id[460129] and by_id[460129].injury == nil, "an old injury is not")
+        check(by_id[460053] and by_id[460053].suspension and by_id[460053].suspension.games == 2, "a suspension")
+        check(r.injuriesKnown == true and r.suspensionsKnown == true, "it says the injuries and suspensions were readable")
+        check(r.club and r.club.founded == "1899" and r.club.rival == "Sunderland" and r.club.stadium == "Plainmoor" and r.club.capacity == 6500, "the club's facts")
+        local lead = r.leaders and r.leaders[1] or {}
+        check(lead.competition == "EFL Championship" and lead.goals and lead.goals[1].player == "Enrique Iglesias" and lead.goals[1].value == 4, "the league's top scorers")
+        check(r.coefficients and #r.coefficients == 2 and r.coefficients[1].club == "Parma" and r.coefficients[2].user == true, "the European ranking with the club in it")
+        check(r.holders == nil, "no winners outside June and July")
+        -- nothing changed: nothing is sent again; a finished match brings a new report soon after
+        for _, x in ipairs(reports) do g.vfs[x.path] = nil end
+        g.tick(400)
+        check(#career_payloads(g.vfs) == 0, "an unchanged report is not sent again")
+        g.finish_match()
+        g.finish_other()
+        for _ = 1, 25 do g.tick(3) end
+        local after = career_payloads(g.vfs)
+        check(#after == 1, "a match brings a new career report", #after)
+        local t2 = after[1] and after[1].data.tables and after[1].data.tables[1] or {}
+        local mine
+        for _, row in ipairs(t2.rows or {}) do if row.user then mine = row end end
+        check(mine and mine.p == 2 and mine.form == "WL", "the table has the new result", mine and mine.form)
+        check(after[1] and #(after[1].data.fixtures or {}) == 1, "the played match leaves the fixture list")
+        g.close()
+    end
+
+    -- G. June: last season's cup final goes to Around the World
+    do
+        local g = play({})
+        check(g.ok, "script starts (June)", g.err)
+        -- the FA Cup final: Parma 2-1 Sunderland (shoot-outs are covered by the pure tests above)
+        g.set(7, { id = 7, date = 20290525, h = sidx(50), a = sidx(106), hs = 2, as = 1, done = true, comp = 1856 })
+        _G.GetCurrentDate = function() return { year = 2029, month = 6, day = 2 } end
+        g.tick(50)
+        local found
+        for path, text in pairs(g.vfs) do
+            if path:find("/outbox/", 1, true) and text:find('"dataType": "career"', 1, true) then found = json_decode(text) end
+        end
+        local h = found and found.holders and found.holders[1] or {}
+        check(found and found.careerDate == "2029-06-02", "a June report", found and found.careerDate)
+        check(h.competition == "FA Cup" and h.region == "England" and h.winner == "Parma" and h.runnerUp == "Sunderland" and h.score == "2–1" and (h.pens or "") == "", "the cup final's winner and score", h.winner)
         g.close()
     end
 
@@ -2454,6 +2552,62 @@ do
     check(parse_resend_request("") == "manual" and parse_resend_request(nil) == "manual" and parse_resend_request("x") == "manual",
         "a request without an id is 'manual'")
     check(#parse_resend_request('{"id": "' .. string.rep("z", 200) .. '"}') == 64, "a long id is cut")
+end
+
+
+-- ---------------------------------------------------------------------------------------------------------
+print("7e. career report (pure functions)")
+do
+    local src = read_file(scripts .. "FC26_Auto_Capture.lua")
+    local block = src:match("%-%- BEGIN career_report[^\n]*\n(.-)%-%- END career_report")
+    check(block ~= nil, "career_report block found between the markers")
+    local helpers = src:match("(local function jstr%(value%).-\nend\n)") .. src:match("(local function to_int%(value, default%).-\nend\n)")
+        .. src:match("(local function to_num%(value, default%).-\nend\n)")
+    local CR = assert(load(helpers .. block .. "\nreturn CR", "career_report"))()
+
+    -- dates: the injury epoch and the round trip
+    check(CR.iso_from_days(0) == "1970-01-01" and CR.iso_from_days(CR.INJURY_EPOCH_DAYS) == "1995-12-22", "injury epoch is 22 December 1995")
+    check(CR.days_from_iso("2028-02-29") and CR.iso_from_days(CR.days_from_iso("2028-02-29")) == "2028-02-29", "dates round-trip (leap day)")
+    local d = CR.days_from_iso("2028-09-09") - CR.INJURY_EPOCH_DAYS
+    local inj = CR.injury(d, 21, "2028-09-15")
+    check(inj and inj.start == "2028-09-09" and inj.back == "2028-09-30", "an injury: start and return day", inj and (inj.start .. " " .. inj.back))
+    check(CR.injury(d, 21, "2028-10-01") == nil, "an injury that is over is not sent")
+    check(CR.injury(0, 10, "") == nil and CR.injury(d, 0, "") == nil and CR.injury(d, 9999, "") == nil, "no or implausible injury gives nothing")
+
+    check(CR.kickoff(900) == "15:00" and CR.kickoff(1500) == "15:00" and CR.kickoff(1230) == "20:30" and CR.kickoff(-1) == "" and CR.kickoff(5000) == "", "kick-off times")
+    check(CR.role(1) == "Crucial" and CR.role("5") == "Prospect" and CR.role(9) == nil, "squad roles")
+    check(CR.wage_k(12500) == 13 and CR.wage_k(750) == 1 and CR.wage_k(0) == nil, "wages in thousands")
+    check(CR.millions(12500000) == 12.5 and CR.millions(7.25) == 7.25 and CR.millions(-1) == nil, "money in millions")
+    check(CR.formation({ "GK", "LB", "CB", "CB", "RB", "CDM", "CM", "CM", "LW", "ST", "RW" }) == "4-3-3", "formation from the team sheet")
+    check(CR.formation({ "GK", "CB", "CB", "CB", "LM", "RM", "CM", "CM", "CAM", "ST", "ST" }) == "3-5-2", "three at the back")
+    check(CR.formation({ "GK", "CB" }) == nil, "an incomplete team sheet gives no formation")
+    check(CR.form({ { date = 3, gf = 1, ga = 1 }, { date = 1, gf = 2, ga = 0 }, { date = 2, gf = 0, ga = 1 }, { date = 4, gf = 3, ga = 0 },
+                    { date = 5, gf = 0, ga = 2 }, { date = 6, gf = 1, ga = 0 } }) == "LDWLW", "form: the last five, oldest first")
+
+    local f = CR.final({ completed = true, home = 10, away = 20, hs = 1, as = 1, hp = 4, ap = 5 })
+    check(f and f.winner == 20 and f.runner == 10 and f.score == "1–1" and f.pens == "5–4", "a final won on penalties", f and f.score)
+    local g = CR.final({ completed = true, home = 10, away = 20, hs = 2, as = 1, hp = 0, ap = 0 })
+    check(g and g.winner == 10 and g.score == "2–1" and g.pens == nil, "a final won in normal time")
+    check(CR.final({ completed = false, home = 10, away = 20, hs = 0, as = 0 }) == nil and CR.final({ completed = true, home = 10, away = 0, hs = 1, as = 0 }) == nil,
+        "an unplayed or undecided final gives nothing")
+
+    check(CR.region("UEFA Champions League") == "Europe" and CR.region("Premier League") == "England" and CR.region("Copa del Rey") == "Spain"
+        and CR.region("DFB-Pokal") == "Germany" and CR.region("Trophée des Champions") == "France", "regions of the shown competitions")
+    check(CR.region("FIFA World Cup") == nil and CR.region("Women's Super League") == nil and CR.region("EFL Championship") == nil, "internationals, women's and other leagues are left out")
+    local w = CR.wanted_leagues("EFL Championship")
+    check(w["efl championship"] and w["efl league one"] and w["premier league"] and w["serie a"] and not w["eredivisie"], "tables wanted: own league, the ladder and the big five")
+    check(CR.country("LALIGA EA SPORTS") == "Spain" and CR.country("unknown") == "", "countries of the leagues")
+
+    local text = CR.payload({ careerDate = "2028-09-15", fixtures = CR.array(), players = CR.array({ { playerId = 7, name = 'A "Q"', wage = 13, injury = inj } }),
+        teamsheet = { formation = "4-3-3", xi = CR.array({ 1, 2 }), bench = CR.array(), positions = { ["1"] = "GK" } }, injuriesKnown = true, club = { transferBudget = 12.5 } })
+    local p = json_decode(text)
+    check(p and p.dataType == "career" and p.careerDate == "2028-09-15", "the payload is valid JSON with dataType career")
+    check(p and type(p.fixtures) == "table" and #p.fixtures == 0 and text:find('"fixtures": %[%]'), "an empty list stays a JSON list")
+    check(p and p.players[1].name == 'A "Q"' and p.players[1].injury.back == "2028-09-30" and p.injuriesKnown == true, "players with their injury")
+    check(p and p.teamsheet.positions["1"] == "GK" and p.club.transferBudget == 12.5, "nested objects and decimals")
+    check(text == CR.payload({ club = { transferBudget = 12.5 }, injuriesKnown = true, teamsheet = { positions = { ["1"] = "GK" }, bench = CR.array(), xi = CR.array({ 1, 2 }), formation = "4-3-3" },
+        players = CR.array({ { injury = inj, wage = 13, name = 'A "Q"', playerId = 7 } }), fixtures = CR.array(), careerDate = "2028-09-15" }),
+        "the same report always gives the same text (nothing is sent twice)")
 end
 
 

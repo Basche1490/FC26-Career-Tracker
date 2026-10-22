@@ -15,7 +15,7 @@ import secrets
 from urllib.parse import urlsplit
 
 LOCAL_PORT = 5050
-BRIDGE_VERSION = "3.0.0"
+BRIDGE_VERSION = "3.1.0"
 BRIDGE_PROTOCOL = 3            # 3 = the phone must prove it knows the pairing code (docs/SECURITY.md)
 MIN_SCRIPT_VERSION = "2.8.0"   # older capture scripts do not report their health or answer a re-send request
 SCRIPT_ALIVE_SECONDS = 20      # the script writes its heartbeat every 5 seconds
@@ -355,7 +355,20 @@ def save_events():
 
 _event_seq = 0
 
-def add_event(title, msg, raw_payload=None):
+# Reports that always carry the whole picture: only the newest one of each kind needs to wait for the phone, so an
+# older one is dropped when a new one arrives (they would otherwise push matches out of the 100-event list).
+REPLACEABLE_KINDS = ("career", "squad")
+
+
+def _event_kind(ev):
+    msg = ev.get("message")
+    if not isinstance(msg, str) or not msg.startswith("{"):
+        return None
+    m = re.search(r'"dataType"\s*:\s*"(\w+)"', msg[:400])
+    return m.group(1) if m else None
+
+
+def add_event(title, msg, raw_payload=None, replace_kind=None):
     global _event_seq
     ts = int(time.time())
     with events_lock:
@@ -369,6 +382,8 @@ def add_event(title, msg, raw_payload=None):
         "message": raw_payload if raw_payload else msg
     }
     with events_lock:
+        if replace_kind:
+            events[:] = [e for e in events if _event_kind(e) != replace_kind]
         events.append(ev)
         if len(events) > 100:
             events.pop(0)
@@ -434,7 +449,8 @@ def process_payload_text(text):
             if not add_match_event(title, msg, data):
                 reply = {"status": "duplicate"}
         else:
-            add_event(title, msg, json.dumps(data, ensure_ascii=False))
+            kind = data.get("dataType")
+            add_event(title, msg, json.dumps(data, ensure_ascii=False), replace_kind=kind if kind in REPLACEABLE_KINDS else None)
     else:
         # plain text message (not JSON): shown in the feed as-is
         add_event("Match Update", sanitize_penalty_text(text), None)

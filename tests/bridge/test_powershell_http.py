@@ -112,7 +112,7 @@ class PowerShellHttpTest(unittest.TestCase):
         code, body = self.request("GET", "/")
         text = body.decode("utf-8")
         self.assertEqual(200, code)
-        for needle in ("Self check", "Re-send last match", "refreshStatus", "v3.0.0", "Pairing code", "New pairing code"):
+        for needle in ("Self check", "Re-send last match", "refreshStatus", "v3.1.0", "Pairing code", "New pairing code"):
             self.assertIn(needle, text)
         self.assertNotIn("$BridgeVersion", text)
 
@@ -151,6 +151,17 @@ class PowerShellHttpTest(unittest.TestCase):
         self.assertEqual(1, len(events))
         self.assertEqual("squad", json.loads(events[0]["message"])["dataType"])
         self.assertGreater(self.status()["events"]["lastSquad"], 0)
+
+    def test_only_the_newest_career_report_waits_for_the_phone(self):
+        post = lambda d: self.request("POST", "/", body=json.dumps(d), headers={"Content-Type": "application/json"})
+        post({"dataType": "career", "title": "Career", "careerDate": "2026-09-01"})
+        post({"dataType": "transfer", "title": "Transfer Finalized", "message": "z signed", "playerName": "z", "type": "Bought"})
+        code, body = post({"dataType": "career", "title": "Career", "careerDate": "2026-09-08"})
+        self.assertEqual(200, code, body)
+        events = json.loads(self.request("GET", "/events")[1])
+        kinds = [json.loads(e["message"])["dataType"] for e in events]
+        self.assertEqual(["transfer", "career"], kinds)
+        self.assertEqual("2026-09-08", json.loads(events[-1]["message"])["careerDate"])
 
     def test_outbox_file_is_picked_up_by_the_watcher(self):
         path = os.path.join(self.outbox, "1_1.json")
