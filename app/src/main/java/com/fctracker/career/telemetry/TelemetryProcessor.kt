@@ -192,6 +192,11 @@ object TelemetryProcessor {
                                 if (events.none { it.title == "Injury" && it.message == msg }) events.add(LiveEvent("Injury", msg, timestamp))
                                 if (alert) notices.add(TelemetryNotice("Injury", msg, "squad", false))
                             }
+                            for (trophy in r.newTrophies) {
+                                val msg = "Trophy won: $trophy"
+                                if (events.none { it.title == "Trophy" && it.message == msg }) events.add(LiveEvent("Trophy", msg, timestamp))
+                                if (alert) notices.add(TelemetryNotice("Trophy won", msg, "season_summary", false))
+                            }
                         }
                     }
                     // Any other structured payload (for example a snapshot) is ignored, as before.

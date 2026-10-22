@@ -18,13 +18,15 @@ import com.fctracker.career.WorldWinner
 import com.fctracker.career.logic.Dates
 import com.fctracker.career.logic.WorldWinners
 import com.fctracker.career.logic.LeagueTables
+import com.fctracker.career.logic.Trophies
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
  * The "career" report from the capture script on the PC: fixtures, every league table, the league leaders, the
- * squad's season statistics, injuries, suspensions, squad roles, shirt numbers, wages and attributes, awards, the
- * holders of every competition (Around the World), the European club ranking, the club's facts and the team sheet.
+ * squad's season statistics, injuries, suspensions, squad roles, shirt numbers, wages, form and attributes, awards, the
+ * holders of every competition (Around the World), the European club ranking, the club's facts, the team sheet and the
+ * trophies the club won.
  *
  * Any part may be missing (the script sends a part only when it changed); a missing part leaves the app's data as
  * it is. Values the person typed are never overwritten: an injury whose "Follow the game" switch is off keeps its
@@ -32,7 +34,17 @@ import org.json.JSONObject
  */
 object CareerReport {
 
-    data class Result(val state: AppState, val changed: Boolean, val newInjuries: List<String>)
+    data class Result(val state: AppState, val changed: Boolean, val newInjuries: List<String>, val newTrophies: List<String> = emptyList())
+
+    private val FORMS = listOf("Excellent", "Good", "Okay", "Poor")
+
+    /** The season a report's date belongs to for its tables and statistics: the game starts a new season in July. */
+    fun reportSeason(careerDate: String?): Int? {
+        val d = careerDate?.takeIf { Dates.isDate(it) } ?: return null
+        val y = d.take(4).toIntOrNull() ?: return null
+        val m = d.substring(5, 7).toIntOrNull() ?: return null
+        return if (m >= 7) y else y - 1
+    }
 
     private fun JSONObject.str(key: String): String = if (has(key) && !isNull(key)) optString(key).trim() else ""
     private fun JSONObject.int(key: String): Int = if (has(key) && !isNull(key)) optInt(key, 0) else 0
@@ -58,6 +70,9 @@ object CareerReport {
             s = s.copy(careerDate = careerDate)
             changed = true
         }
+        // A report from the game's previous season (the season was already ended in the app, the game has not moved on
+        // yet): its tables and statistics belong to the archived season, so they do not replace the new season's.
+        val lastSeasonsData = reportSeason(careerDate)?.let { it < s.startYear } == true
 
         // -- fixtures: the game's list replaces its earlier one; fixtures added by hand stay -------------------------
         data.optJSONArray("fixtures")?.let { arr ->
@@ -77,7 +92,7 @@ object CareerReport {
         }
 
         // -- league tables ---------------------------------------------------------------------------------------------
-        data.optJSONArray("tables")?.let { arr ->
+        data.optJSONArray("tables")?.takeUnless { lastSeasonsData }?.let { arr ->
             val incoming = arr.objects().mapNotNull { o ->
                 val league = o.str("league")
                 val rows = o.optJSONArray("rows").objects().mapNotNull { r ->
@@ -103,7 +118,7 @@ object CareerReport {
         }
 
         // -- league leaders --------------------------------------------------------------------------------------------
-        data.optJSONArray("leaders")?.let { arr ->
+        data.optJSONArray("leaders")?.takeUnless { lastSeasonsData }?.let { arr ->
             fun list(a: JSONArray?) = a.objects().mapNotNull { o ->
                 val p = o.str("player")
                 if (p.isEmpty()) null else StatLeader(p, o.str("club"), o.int("value"), o.str("club").equals(s.clubName, true) || o.optBoolean("user", false))
@@ -115,7 +130,7 @@ object CareerReport {
         }
 
         // -- the squad's season statistics (every match, logged or not) ------------------------------------------------
-        data.optJSONArray("stats")?.let { arr ->
+        data.optJSONArray("stats")?.takeUnless { lastSeasonsData }?.let { arr ->
             val incoming = arr.objects().map { o ->
                 PlayerSeasonStat(
                     playerName = o.str("name"), gamePlayerId = o.int("playerId").takeIf { it > 0 }, competition = o.str("competition"),
@@ -147,6 +162,7 @@ object CareerReport {
                 if (o.has("bonus")) p = p.copy(bonus = o.str("bonus").ifBlank { null })
                 if (o.int("overall") in 1..99) p = p.copy(overall = o.int("overall"))
                 if (o.int("potential") in 1..99) p = p.copy(potential = o.int("potential"))
+                o.str("form").takeIf { it in FORMS }?.let { p = p.copy(form = it) }
                 o.optJSONObject("attributes")?.let { a ->
                     val map = a.keys().asSequence().associateWith { a.optInt(it, 0) }.filterValues { it in 1..99 }
                     if (map.isNotEmpty()) {
@@ -266,7 +282,19 @@ object CareerReport {
             if (sheet.starting.isNotEmpty() && sheet != s.gameTeamSheet) { s = s.copy(gameTeamSheet = sheet); changed = true }
         }
 
-        return Result(s, changed, newInjuries)
+        // -- trophies the club won (a league finished on top, a cup final won): added once ---------------------------------
+        var newTrophies = emptyList<String>()
+        data.optJSONArray("trophies")?.let { arr ->
+            val won = arr.objects().mapNotNull { o ->
+                val competition = o.str("competition")
+                val year = o.int("startYear")
+                if (competition.isEmpty() || year < 1900) null else competition to year
+            }
+            val added = Trophies.addFromGame(s, won)
+            if (added.names.isNotEmpty()) { s = added.state; changed = true; newTrophies = added.names }
+        }
+
+        return Result(s, changed, newInjuries, newTrophies)
     }
 
     fun clearedInjury(p: Player): Player = p.copy(

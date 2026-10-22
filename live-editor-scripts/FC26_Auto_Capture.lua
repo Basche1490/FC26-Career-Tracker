@@ -1,4 +1,4 @@
--- FC26 AutoCapture v2.8.0 (Precision Live Telemetry & Atlas Tracker)
+-- FC26 AutoCapture v2.10.0 (Precision Live Telemetry & Atlas Tracker)
 -- Complete support for EFL Championship, Premier League, FA Cup, Carabao Cup, Play-offs.
 -- Gathers REAL in-game data: Real League Position, Real Lineups, Real Goal Scorers, Real MOTM.
 -- Strict League Rules: League matches NEVER have extra time or penalty shootouts.
@@ -13,6 +13,11 @@
 -- v2.9: sends a "career" report: league tables (with every club's form), fixtures still to play, the league's top
 -- scorers, shirt numbers, squad roles, wages, ratings, injuries and suspensions, the team sheet, the club's honours and
 -- stadium, the transfer budget, the European club ranking and, in June and July, last season's winners.
+-- v2.10: never opens a command window while you play: payloads wait in the outbox for the bridge (which reads the
+-- folder itself) instead of being sent by a program, the Atlas export is found through MatchStats\last_export.txt
+-- instead of a folder listing, and the stock of spare folders lasts well over 100 matches. FC26_AutoCapture_SendNow()
+-- sends the outbox by hand. The career report also carries the trophies the club wins, every player's attributes and
+-- form, the squad's league statistics and the club's prestige.
 
 local MEMORY = require "imports/core/memory"
 require "imports/other/helpers"
@@ -21,7 +26,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "2.9.0"
+local VERSION = "2.10.0"
 local SCRIPT_INSTANCE = "FC26_AUTOCAP_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
 _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] = SCRIPT_INSTANCE
 
@@ -157,8 +162,9 @@ function QUIET.hidden_run(program, params)
     return ok
 end
 
--- Runs "cmd /c <inner>" and waits until it has finished (a "done" marker is written at the end).
-function QUIET.run_and_wait(inner, max_ms)
+-- Runs "cmd /c <inner>" hidden and waits until it has finished (a "done" marker is written at the end). When Live Editor
+-- cannot start a program hidden, nothing is run unless allow_visible is true (a visible start flashes a console window).
+function QUIET.run_and_wait(inner, max_ms, allow_visible)
     QUIET.counter = QUIET.counter + 1
     local temp_dir = os.getenv("TEMP") or os.getenv("TMP") or "."
     local done = temp_dir .. "/fc26_done_" .. tostring(os.time()) .. "_" .. QUIET.counter .. ".txt"
@@ -169,6 +175,7 @@ function QUIET.run_and_wait(inner, max_ms)
             return true
         end
     end
+    if not allow_visible then return false end
     QUIET.windows = QUIET.windows + 1
     pcall(QUIET.real_execute, 'cmd /c ' .. full) -- visible, but it finishes before it returns
     local ok = file_exists(done)
@@ -179,8 +186,8 @@ end
 -- Spare folders: empty folders made ahead of time in ONE program start. A folder that is needed later (the Atlas
 -- exporter makes a new one for every export) is simply renamed into place, which starts no program and shows no window.
 QUIET.pool_root = nil -- set by the script: the folder that holds the spare folders (nil = no spare folders)
-QUIET.pool_size = 60
-QUIET.pool_low = 20   -- topped up at script start when fewer than this are left
+QUIET.pool_size = 240 -- about two are used per match (snapshot + match stats), so this lasts for well over 100 matches
+QUIET.pool_low = 140  -- topped up at script start when fewer than this are left (a long session never runs out)
 QUIET.moved = 0       -- folders that were created by moving a spare into place
 QUIET.batches = 0     -- program starts used to create several folders at once
 
@@ -229,30 +236,55 @@ function QUIET.take_spare(path)
 end
 
 -- Creates several folders with ONE program start: hidden when Live Editor allows it, otherwise one visible window
--- for all of them. Returns true when every folder exists afterwards.
+-- for all of them. Spare folders are named relative to their own folder ("cd /d" there, then "mkdir s001 s002 ..."),
+-- which keeps even a full stock inside one short command. Returns true when every folder exists afterwards.
 function QUIET.batch_mkdir(paths)
-    local missing = {}
+    local others, spares = {}, {}
+    local pool = QUIET.pool_root and (QUIET.pool_root:gsub("[/\\]+$", "")) or nil
     for _, p in ipairs(paths) do
-        if not QUIET.dir_exists(p) then missing[#missing + 1] = p end
+        if not QUIET.dir_exists(p) then
+            local parent, name = tostring(p):match("^(.*)[/\\]([^/\\]+)$")
+            if pool and parent == pool and name:match("^s%d+$") then spares[#spares + 1] = { path = p, name = name }
+            else others[#others + 1] = p end
+        end
     end
-    local all_ok = true
+    -- the commands: plain "mkdir" lists of at most ~6000 characters, the spare folders appended to the first one
+    local commands, checks = {}, {}
     local first = 1
-    while first <= #missing do
-        local parts, len, last = {}, 0, first
-        while last <= #missing and (len < 6000 or last == first) do
-            local quoted = '"' .. win_path(missing[last]) .. '"'
+    repeat
+        local parts, len, last, list = {}, 0, first, {}
+        while last <= #others and (len < 6000 or last == first) do
+            local quoted = '"' .. win_path(others[last]) .. '"'
             parts[#parts + 1] = quoted
+            list[#list + 1] = others[last]
             len = len + #quoted + 1
             last = last + 1
         end
-        local chunk_first, chunk_last = first, last - 1
+        if #commands == 0 and #spares > 0 then
+            local names = {}
+            for _, sp in ipairs(spares) do
+                names[#names + 1] = sp.name
+                list[#list + 1] = sp.path
+            end
+            parts[#parts + 1] = '"' .. win_path(pool) .. '"'
+            commands[#commands + 1] = "mkdir " .. table.concat(parts, " ") .. ' 2>nul & cd /d "' .. win_path(pool)
+                .. '" && mkdir ' .. table.concat(names, " ")
+            checks[#commands] = list
+        elseif #parts > 0 then
+            commands[#commands + 1] = "mkdir " .. table.concat(parts, " ")
+            checks[#commands] = list
+        end
+        first = last
+    until first > #others
+    local all_ok = true
+    for i, command in ipairs(commands) do
+        local list = checks[i]
         local function all_there()
-            for k = chunk_first, chunk_last do
-                if not QUIET.dir_exists(missing[k]) then return false end
+            for _, p in ipairs(list) do
+                if not QUIET.dir_exists(p) then return false end
             end
             return true
         end
-        local command = "mkdir " .. table.concat(parts, " ")
         QUIET.batches = QUIET.batches + 1
         local done = false
         if QUIET.hidden ~= false and QUIET.hidden_run(QUIET.comspec(), "/c " .. command) then
@@ -264,7 +296,6 @@ function QUIET.batch_mkdir(paths)
             done = all_there()
         end
         all_ok = all_ok and done
-        first = last
     end
     return all_ok
 end
@@ -326,8 +357,20 @@ function QUIET.api_list(fn_name, trusted, path, extra)
     return names
 end
 
--- Names via "dir" (a program is started: hidden when possible).
+-- True when a folder can be listed without a console window (Live Editor's own function, or a hidden program start).
+function QUIET.can_list(api_ok)
+    return api_ok or QUIET.hidden == true
+end
+
+-- Names via "dir", only ever started hidden: when that is not possible the list is empty (and the log says so once).
 function QUIET.shell_list(dir_command)
+    if QUIET.hidden ~= true then
+        if not QUIET.listing_note then
+            QUIET.listing_note = true
+            QUIET.notes[#QUIET.notes + 1] = "folder listings are skipped: Live Editor cannot list a folder without a console window"
+        end
+        return {}
+    end
     QUIET.counter = QUIET.counter + 1
     local temp_dir = os.getenv("TEMP") or os.getenv("TMP") or "."
     local out = temp_dir .. "/fc26_list_" .. tostring(os.time()) .. "_" .. QUIET.counter .. ".txt"
@@ -417,12 +460,18 @@ end
 
 function QUIET.describe()
     if QUIET.pool_root and QUIET.spares == nil then QUIET.spares = QUIET.scan_pool() end
+    local function listing(api)
+        if api then return "Live Editor function" end
+        return QUIET.hidden and "hidden dir command" or "skipped (would open a window)"
+    end
     return string.format("hidden program start: %s | folder listing: %s / %s | spare folders: %d ready, %d used | visible windows opened so far: %d",
         QUIET.hidden and "yes" or "no (Live Editor has no working shellExecute)",
-        QUIET.dir_api and "Live Editor function" or "dir command",
-        QUIET.file_api and "Live Editor function" or "dir command",
+        listing(QUIET.dir_api), listing(QUIET.file_api),
         #(QUIET.spares or {}), QUIET.moved, QUIET.windows)
 end
+
+-- The Atlas exporter (FC26_AutoCapture_v1.1.1.lua) makes its folders through this too when it finds it here.
+rawset(_G, "FC26_QUIET", QUIET)
 
 -- Answer the Atlas exporter's "create this folder" commands here (nothing is started when the folder exists).
 -- Everything else goes to the real os.execute unchanged.
@@ -1243,14 +1292,7 @@ end
 local SEND_LOG = COMMUNITY_ROOT .. "/bridge_send_log.txt"
 local WATCH_FILE = COMMUNITY_ROOT .. "/bridge_watching.txt"
 local SENDER_LOCK = COMMUNITY_ROOT .. "/sender.lock"
-local OUTBOX_RETRY_SECONDS = 30
-local OUTBOX_MAX_ATTEMPTS = 40
-local OUTBOX_MAX_AGE_SECONDS = 7 * 24 * 3600
-local SENDER_DEBOUNCE_SECONDS = 2        -- a burst of payloads is collected first and goes out in one batch
-local BRIDGE_GRACE_SECONDS = 20          -- the bridge reads the folder itself; our sender only starts if it does not
 local WATCH_FRESH_SECONDS = 20
-local SENDER_LOCK_STALE_SECONDS = 180
-local SENDER_PROOF_SECONDS = 15          -- a hidden sender that leaves no trace in the log by then did not start
 
 -- BEGIN sender_bat (this exact text is also checked by tests/lua/test_transfer_logic.lua)
 local SENDER_BAT = [[
@@ -1291,15 +1333,7 @@ exit /b
 
 local outbox_pending = {} -- json path -> { id = , tries = , queued_at = , last_try = }
 local outbox_serial = 0
-local sender_state = { last_launch = 0, seq = 0, hidden = false, log_size = 0, checked = true }
-
-local function file_size(path)
-    local f = io.open(path, "rb")
-    if not f then return 0 end
-    local size = f:seek("end") or 0
-    f:close()
-    return size
-end
+local sender_state = { last_launch = 0, seq = 0, hidden = false, last_note = 0 }
 
 -- true while the bridge is reading the outbox folder itself (it refreshes bridge_watching.txt every few seconds)
 local function bridge_is_watching()
@@ -1309,10 +1343,6 @@ local function bridge_is_watching()
     f:close()
     local stamp = tonumber(text:match("%d+"))
     return stamp ~= nil and math.abs(os.time() - stamp) <= WATCH_FRESH_SECONDS
-end
-
-local function sender_busy()
-    return file_exists(SENDER_LOCK) and (os.time() - sender_state.last_launch) < SENDER_LOCK_STALE_SECONDS
 end
 
 -- Starts ONE sender that posts every file waiting in the outbox. Returns true when it was started.
@@ -1328,11 +1358,9 @@ local function launch_outbox_sender()
     if not bf then return false end
     bf:write(body)
     bf:close()
-    sender_state.log_size = file_size(SEND_LOG)
     local started, hidden = QUIET.run_bat(bat_path)
     sender_state.last_launch = os.time()
     sender_state.hidden = hidden
-    sender_state.checked = not hidden -- a hidden start is verified below
     return started
 end
 
@@ -1395,80 +1423,50 @@ local function send_payload_to_bridge(payload, log_label)
     end
 end
 
--- Every 2 s: forget what was delivered, and start the sender when something is still waiting after its grace period.
+-- Every 2 s: forget what was delivered. The bridge reads the outbox folder itself (bridge 3.0 and newer), so no program
+-- is ever started here - every program a Live Editor script starts flashes a console window on top of the game. A
+-- payload simply waits until the bridge picks it up, also when the bridge is started later (it reads every file that
+-- is waiting, from this session or an earlier one). FC26_AutoCapture_SendNow() sends them at once when asked.
 local function service_outbox()
     local now = os.time()
-
-    -- A hidden sender must leave a trace in the log (its "started" line). If it did not, hidden start does not work here:
-    -- from now on the visible one is used, so nothing is ever left undelivered.
-    if not sender_state.checked and now - sender_state.last_launch >= SENDER_PROOF_SECONDS then
-        sender_state.checked = true
-        if file_size(SEND_LOG) <= sender_state.log_size and not file_exists(SENDER_LOCK) then
-            QUIET.hidden = false
-            log_monitor("The hidden sender left no trace - using the visible one from now on")
-        end
-    end
-
-    local watching = nil
-    local due = false
+    local waiting, oldest = 0, nil
     for json_path, entry in pairs(outbox_pending) do
         if not file_exists(json_path) then
-            outbox_pending[json_path] = nil -- delivered (the bridge or the sender deleted it)
-        elseif entry.tries >= OUTBOX_MAX_ATTEMPTS then
-            -- leave the file in the outbox; it is adopted again on the next script start
-            outbox_pending[json_path] = nil
+            outbox_pending[json_path] = nil -- delivered (the bridge deleted it)
         else
-            local wait
-            if entry.tries == 0 then
-                if watching == nil then watching = bridge_is_watching() end
-                wait = watching and BRIDGE_GRACE_SECONDS or SENDER_DEBOUNCE_SECONDS
-            else
-                wait = OUTBOX_RETRY_SECONDS
-            end
-            if now - math.max(entry.queued_at, entry.last_try) >= wait then due = true end
+            waiting = waiting + 1
+            if not oldest or entry.queued_at < oldest then oldest = entry.queued_at end
         end
     end
-    if not due or sender_busy() then return end
-
-    if launch_outbox_sender() then
-        local count = 0
-        for _, entry in pairs(outbox_pending) do
-            entry.tries = entry.tries + 1
-            entry.last_try = now
-            count = count + 1
-        end
-        log_monitor("Sending " .. count .. " waiting payload(s) to the bridge in one batch" ..
-            (sender_state.hidden and " (hidden)" or ""))
+    if waiting == 0 or now - oldest < 60 then return end
+    if now - (sender_state.last_note or 0) < 600 then return end
+    sender_state.last_note = now
+    if bridge_is_watching() then
+        log_monitor(waiting .. " payload(s) still waiting in the outbox although the bridge reads the folder - check the bridge window for errors")
     else
-        log_monitor("Could not start the sender - will retry")
+        log_monitor(waiting .. " payload(s) waiting in the outbox: the bridge is not running. They are delivered as soon as it starts "
+            .. "(FC26_AutoCapture_SendNow() sends them right away, with a short console window).")
     end
 end
 
--- On startup: pick up payloads that were never delivered last time (bridge was not running).
+-- On startup nothing has to be picked up: the bridge reads every file in the outbox, also those an earlier session left
+-- (listing the folder here would open a console window when Live Editor has no folder function of its own).
 local function adopt_outbox_leftovers()
-    if bridge_is_watching() then
-        -- the bridge reads the folder itself, including files left by an earlier session
-        log_monitor("The bridge is reading the outbox folder itself - nothing to pick up here")
-        return 0
+    if not bridge_is_watching() then
+        log_monitor("The bridge is not running yet: payloads wait in the outbox until it starts")
     end
-    local adopted = 0
-    local now = os.time()
-    for _, name in ipairs(QUIET.list_files(OUTBOX_DIR, ".json")) do
-        local ts = tonumber(name:match("^(%d+)_%d+%.json$"))
-        if ts then
-            local path = OUTBOX_DIR .. "/" .. name
-            if now - ts > OUTBOX_MAX_AGE_SECONDS then
-                pcall(os.remove, path)
-            elseif not outbox_pending[path] then
-                outbox_pending[path] = { id = (name:gsub("%.json$", "")), tries = 0, queued_at = now, last_try = 0 }
-                adopted = adopted + 1
-            end
-        end
-    end
-    if adopted > 0 then
-        log_monitor("Found " .. adopted .. " undelivered payload(s) from an earlier session - sending now")
-    end
-    return adopted
+    return 0
+end
+
+-- Sends everything waiting in the outbox right away (only when asked: the sender is a program, so a console window may
+-- flash when Live Editor cannot start it hidden).
+function FC26_AutoCapture_SendNow()
+    local ok = launch_outbox_sender()
+    local msg = ok and ("Sending everything in the outbox to the bridge now" .. (sender_state.hidden and " (hidden)" or ""))
+        or "Could not start the sender"
+    log_monitor(msg)
+    print("[FC26 AutoCapture] " .. msg)
+    return ok
 end
 
 -- ---------------------------------------------------------------------------
@@ -1504,6 +1502,21 @@ local function last_export_folder()
     return nil, nil
 end
 
+-- The exporter (1.1.2 and newer) also writes the folder it published last into MatchStats\last_export.txt, for when it
+-- runs on its own and its answer above is not visible here. Reading a file starts no program (a folder listing would).
+local function pointer_export_folder()
+    local f = io.open(MATCH_STATS_ROOT .. "/last_export.txt", "rb")
+    if not f then return nil, nil end
+    local text = f:read("*a") or ""
+    f:close()
+    local line = ((text:match("[^\r\n]+") or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+    if line == "" then return nil, nil end
+    local path = (line:gsub("\\", "/")):gsub("/+$", "")
+    local name = path:match("([^/]+)$")
+    if not name then return nil, nil end
+    return name, path
+end
+
 local SCRIPT_START_STAMP = os.date("%Y%m%d_%H%M%S")
 local ATLAS_LISTING_AFTER_SECONDS = 12   -- only look at the folder itself when the exporter has not reported one by then
 local ATLAS_LISTING_EVERY_SECONDS = 8
@@ -1518,6 +1531,14 @@ local function find_atlas_folder(include_used, waited)
     local name, path = last_export_folder()
     if name and (include_used or not used[name]) and atlas_folder_is_ready(path) then
         return name, path, { name }
+    end
+    local pname, ppath = pointer_export_folder()
+    if pname and (include_used or not used[pname]) then
+        -- an export made before this script started belongs to an earlier match
+        local stamp = pname:match("(%d%d%d%d%d%d%d%d_%d%d%d%d%d%d)")
+        if (include_used or stamp == nil or stamp >= SCRIPT_START_STAMP) and atlas_folder_is_ready(ppath) then
+            return pname, ppath, { pname }
+        end
     end
 
     local now = os.time()
@@ -3661,7 +3682,7 @@ local function list_subdirs(path)
     return QUIET.list_dirs(path, false)
 end
 
-local function script_search_dirs()
+local function script_search_dirs(with_listing)
     local dirs, seen = {}, {}
     local function add(dir)
         dir = tostring(dir or "")
@@ -3695,7 +3716,7 @@ local function script_search_dirs()
         add(root)
         add(root .. "\\FC26-LE")
         add(root .. "\\FC26-LE\\lua\\scripts")
-        for _, sub in ipairs(list_subdirs(root .. "\\FC26-LE")) do
+        for _, sub in ipairs(with_listing and list_subdirs(root .. "\\FC26-LE") or {}) do
             add(root .. "\\FC26-LE\\" .. sub .. "\\lua\\scripts")
             add(root .. "\\FC26-LE\\" .. sub)
         end
@@ -3703,9 +3724,17 @@ local function script_search_dirs()
     return dirs
 end
 
--- Full path of one of our scripts, or nil. Returns the folders that were searched as a second value.
+-- Full path of one of our scripts, or nil. Returns the folders that were searched as a second value. The usual places
+-- are tried first; the FC26-LE version folders are only listed when the script is in none of them (and only when that
+-- can be done without a console window).
 local function find_script(name)
-    local dirs = script_search_dirs()
+    local dirs = script_search_dirs(false)
+    for _, dir in ipairs(dirs) do
+        local path = dir .. name
+        if file_exists(path) then return path, dirs end
+    end
+    if not QUIET.can_list(QUIET.dir_api) then return nil, dirs end
+    dirs = script_search_dirs(true)
     for _, dir in ipairs(dirs) do
         local path = dir .. name
         if file_exists(path) then return path, dirs end
@@ -4121,6 +4150,46 @@ do
         return ""
     end
 
+    -- Attribute columns of the players table, with the names the app shows.
+    CR.ATTRIBUTES = {
+        { "acceleration", "Acceleration" }, { "sprintspeed", "Sprint speed" }, { "agility", "Agility" }, { "balance", "Balance" },
+        { "reactions", "Reactions" }, { "ballcontrol", "Ball control" }, { "dribbling", "Dribbling" }, { "finishing", "Finishing" },
+        { "shotpower", "Shot power" }, { "longshots", "Long shots" }, { "volleys", "Volleys" }, { "penalties", "Penalties" },
+        { "positioning", "Positioning" }, { "vision", "Vision" }, { "crossing", "Crossing" }, { "freekickaccuracy", "Free kick accuracy" },
+        { "shortpassing", "Short passing" }, { "longpassing", "Long passing" }, { "curve", "Curve" }, { "interceptions", "Interceptions" },
+        { "headingaccuracy", "Heading accuracy" }, { "defensiveawareness", "Defensive awareness" }, { "standingtackle", "Standing tackle" },
+        { "slidingtackle", "Sliding tackle" }, { "jumping", "Jumping" }, { "stamina", "Stamina" }, { "strength", "Strength" },
+        { "aggression", "Aggression" }, { "composure", "Composure" }, { "gkdiving", "GK diving" }, { "gkhandling", "GK handling" },
+        { "gkkicking", "GK kicking" }, { "gkreflexes", "GK reflexes" }, { "gkpositioning", "GK positioning" }
+    }
+    -- A player's attributes from a players row ({ ["Sprint speed"] = 81, ... }); nil when the row does not carry them.
+    function CR.attributes(row)
+        local out, n = {}, 0
+        for _, a in ipairs(CR.ATTRIBUTES) do
+            local v = to_int(row[a[1]], 0)
+            if v >= 1 and v <= 99 then
+                out[a[2]] = v
+                n = n + 1
+            end
+        end
+        if n < 10 then return nil end
+        return out
+    end
+
+    -- The game's form value (1 = worst, 5 = best) in the app's words.
+    CR.FORMS = { [1] = "Poor", [2] = "Poor", [3] = "Okay", [4] = "Good", [5] = "Excellent" }
+    function CR.form_label(v) return CR.FORMS[to_int(v, 0)] end
+
+    -- The season a day belongs to: from August on it is the new one (a cup final in May 2027 belongs to 2026/27).
+    function CR.season_start(iso)
+        local y, m = tostring(iso or ""):match("^(%d%d%d%d)%-(%d%d)")
+        if not y then return nil end
+        y, m = tonumber(y), tonumber(m)
+        if m >= 8 then return y end
+        return y - 1
+    end
+    function CR.season_label(start) return string.format("%d/%02d", start, (start + 1) % 100) end
+
     -- Money the game keeps in units, as millions for the app (a value already below 10,000 is taken as millions).
     function CR.millions(v)
         local n = to_num(v, -1)
@@ -4286,14 +4355,13 @@ end
 
 local STATUS_FILE = COMMUNITY_ROOT .. "/script_status.json"
 local RESEND_FILE = COMMUNITY_ROOT .. "/resend_request.json"
-local STATUS_WRITE_SECONDS = 5
-local SQUAD_FIRST_CHECK_SECONDS = 20     -- the start-up scans come first
-local SQUAD_CHECK_SECONDS = 600
-local squad_scan = { started = os.time(), last_check = 0, signature = nil }
+-- the health report is written every 5 s; the squad's contracts are checked 20 s after the start (the start-up scans
+-- come first), then every 10 minutes and after a transfer
+local squad_scan = { started = os.time(), last_check = 0, signature = nil, status_every = 5, first_after = 20, every = 600 }
 
 local function write_script_status(force)
     local now = os.time()
-    if not force and now - status.written < STATUS_WRITE_SECONDS then return end
+    if not force and now - status.written < squad_scan.status_every then return end
     status.written = now
     local pending_out = 0
     for json_path in pairs(outbox_pending) do
@@ -4412,8 +4480,8 @@ local function check_squad_contracts()
     if not state or not state.active then return end
     if _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] ~= SCRIPT_INSTANCE then return end
     local now = os.time()
-    if now - squad_scan.started < SQUAD_FIRST_CHECK_SECONDS then return end
-    if not status.squad_dirty and now - squad_scan.last_check < SQUAD_CHECK_SECONDS then return end
+    if now - squad_scan.started < squad_scan.first_after then return end
+    if not status.squad_dirty and now - squad_scan.last_check < squad_scan.every then return end
     squad_scan.last_check = now
     status.squad_dirty = false
 
@@ -4440,31 +4508,42 @@ do
     local CAREER_FIRST_SECONDS = 40
     local CAREER_CHECK_SECONDS = 300
     local CAREER_AFTER_EVENT_SECONDS = 30
-    local career_scan = { started = os.time(), last_check = 0, signature = nil, file = nil }
+    -- champions: each competition's holder at the last report; won: competitions the club took over while running
+    local career_scan = { started = os.time(), last_check = 0, signature = nil, file = nil, champions = nil, won = {} }
 
     -- Rows of a table with the wanted fields; a field the table does not have is simply missing (nil). Returns rows and
     -- whether the table could be opened at all.
-    local function career_rows(name, fields)
+    -- only = { field = "playerid", ids = { [id] = true } } keeps just those rows (a big table is not copied whole).
+    local function career_rows(name, fields, only)
         if CAREER_NEVER[tostring(name):lower()] then return {}, false end
-        local rows, opened = {}, false
+        local rows, opened, seen = {}, false, 0
+        local function wanted(get)
+            if not only then return true end
+            local v = get(only.field)
+            if type(v) == "table" then v = v.value end
+            return only.ids[tonumber(v) or -1] == true
+        end
         pcall(function()
             if type(GetDBTableRows) == "function" then
                 local raw = GetDBTableRows(name)
                 if type(raw) == "table" then
                     opened = true
                     for _, rr in ipairs(raw) do
-                        local row = {}
-                        for _, f in ipairs(fields) do
-                            local v = rr[f]
-                            if type(v) == "table" then v = v.value end
-                            row[f] = v
+                        seen = seen + 1
+                        if wanted(function(f) return rr[f] end) then
+                            local row = {}
+                            for _, f in ipairs(fields) do
+                                local v = rr[f]
+                                if type(v) == "table" then v = v.value end
+                                row[f] = v
+                            end
+                            rows[#rows + 1] = row
                         end
-                        rows[#rows + 1] = row
                     end
                 end
             end
         end)
-        if opened and #rows > 0 then return rows, true end
+        if opened and seen > 0 then return rows, true end
         pcall(function()
             if LE and LE.db then
                 local t = LE.db:GetTable(name)
@@ -4472,12 +4551,17 @@ do
                     opened = true
                     local r = t:GetFirstRecord()
                     while r and r > 0 do
-                        local row = {}
-                        for _, f in ipairs(fields) do
-                            local ok, v = pcall(function() return t:GetRecordFieldValue(r, f) end)
-                            if ok then row[f] = v end
+                        local rec = r
+                        local function get(f)
+                            local ok, v = pcall(function() return t:GetRecordFieldValue(rec, f) end)
+                            if ok then return v end
+                            return nil
                         end
-                        rows[#rows + 1] = row
+                        if wanted(get) then
+                            local row = {}
+                            for _, f in ipairs(fields) do row[f] = get(f) end
+                            rows[#rows + 1] = row
+                        end
                         r = t:GetNextValidRecord()
                     end
                 end
@@ -4571,13 +4655,16 @@ do
         if #tables_out > 0 then report.tables = tables_out end
 
         -- Squad links: numbers and the team sheet of the club; league goals of everybody (top scorers).
-        local links = career_rows("teamplayerlinks", { "teamid", "playerid", "jerseynumber", "position", "leaguegoals" })
+        local links = career_rows("teamplayerlinks", { "teamid", "playerid", "jerseynumber", "position", "leaguegoals",
+                                                       "leagueappearances", "yellows", "reds", "form" })
         local squad, xi, bench, goals_by_team = {}, {}, CR.array(), {}
         for _, r in ipairs(links) do
             local tid, pid = tonumber(r.teamid) or 0, tonumber(r.playerid) or 0
             if pid > 0 and tid > 0 then
                 if tid == managed_tid then
-                    squad[pid] = { number = tonumber(r.jerseynumber), pos = tonumber(r.position) }
+                    squad[pid] = { number = tonumber(r.jerseynumber), pos = tonumber(r.position), apps = tonumber(r.leagueappearances),
+                                   goals = tonumber(r.leaguegoals), yellow = tonumber(r.yellows), red = tonumber(r.reds),
+                                   form = CR.form_label(r.form) }
                     local pos = tonumber(r.position) or 99
                     if pos <= 27 then xi[#xi + 1] = { pid = pid, pos = pos } elseif pos == 28 then bench[#bench + 1] = pid end
                 end
@@ -4626,8 +4713,11 @@ do
             local pid = tonumber(r.playerid) or 0
             if squad[pid] then contracts[pid] = r end
         end
-        local ratings = {}
-        for _, r in ipairs((career_rows("players", { "playerid", "overallrating", "potential" }))) do
+        local ratings, squad_ids = {}, {}
+        for pid in pairs(squad) do squad_ids[pid] = true end
+        local player_fields = { "playerid", "overallrating", "potential" }
+        for _, a in ipairs(CR.ATTRIBUTES) do player_fields[#player_fields + 1] = a[1] end
+        for _, r in ipairs((career_rows("players", player_fields, { field = "playerid", ids = squad_ids }))) do
             local pid = tonumber(r.playerid) or 0
             if squad[pid] then ratings[pid] = r end
         end
@@ -4671,7 +4761,9 @@ do
                     local o, pot = to_int(rt.overallrating, 0), to_int(rt.potential, 0)
                     if o > 0 and o < 100 then p.overall = o end
                     if pot > 0 and pot < 100 then p.potential = pot end
+                    p.attributes = CR.attributes(rt)
                 end
+                if info.form then p.form = info.form end
                 if injuries[pid] then p.injury = { name = "Injury", start = injuries[pid].start, back = injuries[pid].back } end
                 if suspensions[pid] then p.suspension = { games = suspensions[pid] } end
                 players[#players + 1] = p
@@ -4680,10 +4772,28 @@ do
         table.sort(players, function(a, b) return a.playerId < b.playerId end)
         if #players > 0 then report.players = players end
 
+        -- The squad's league statistics as the game counts them (every match, also those not logged in the app).
+        local stats = CR.array()
+        for pid, info in pairs(squad) do
+            if info.apps ~= nil and (info.apps > 0 or (info.goals or 0) > 0) then
+                local name = safe_player_name(pid)
+                if not is_unnamed_player(name) then
+                    stats[#stats + 1] = { playerId = pid, name = name, competition = own_league or "League", apps = math.floor(info.apps),
+                                          goals = math.floor(info.goals or 0), yellow = math.floor(info.yellow or 0), red = math.floor(info.red or 0) }
+                end
+            end
+        end
+        table.sort(stats, function(a, b) return a.playerId < b.playerId end)
+        if #stats > 0 then report.stats = stats end
+
         -- The club: honours, founded, rival, stadium and the transfer budget.
         local club = {}
-        for _, r in ipairs((career_rows("teams", { "teamid", "foundationyear", "rivalteam", "leaguetitles", "domesticcups", "uefa_cl_wins", "uefa_el_wins", "uefa_uecl_wins" }))) do
+        for _, r in ipairs((career_rows("teams", { "teamid", "foundationyear", "rivalteam", "leaguetitles", "domesticcups", "uefa_cl_wins", "uefa_el_wins",
+                                                   "uefa_uecl_wins", "domesticprestige", "internationalprestige" }))) do
             if tonumber(r.teamid) == managed_tid then
+                local home, abroad = to_int(r.domesticprestige, 0), to_int(r.internationalprestige, 0)
+                if home >= 1 and home <= 10 then club.prestigeHome = home end
+                if abroad >= 1 and abroad <= 10 then club.prestigeAbroad = abroad end
                 local founded = to_int(r.foundationyear, 0)
                 if founded > 1800 and founded < 2100 then club.founded = tostring(founded) end
                 local rival = tonumber(r.rivalteam) or 0
@@ -4745,6 +4855,57 @@ do
             if #out > 0 then report.coefficients = out end
         end
 
+        -- Every competition's holder as the game keeps it.
+        local champions = {}
+        for _, r in ipairs((career_rows("competition", { "competitionid", "competitionchampionid" }))) do
+            local holder = tonumber(r.competitionchampionid) or 0
+            local ok, cname = pcall(function() return GetCompetitionNameByID(tonumber(r.competitionid)) end)
+            cname = ok and cname and tostring(cname) or ""
+            if cname ~= "" and cname ~= "INVALID" and holder > 0 and holder < 4294967295 then champions[cname] = holder end
+        end
+
+        -- Trophies the club won: a finished league it tops, a cup final it won (judged in June and July, when every final
+        -- has been played), and any competition whose holder became the club while this script was running.
+        local trophies, have = CR.array(), {}
+        local function add_trophy(name, iso, is_league)
+            local start = CR.season_start(iso)
+            if not name or name == "" or not start then return end
+            local key = name:lower() .. "|" .. start
+            if have[key] then return end
+            have[key] = true
+            trophies[#trophies + 1] = { competition = name, season = CR.season_label(start), startYear = start, league = is_league == true }
+        end
+        for c, name in pairs(comps) do
+            if name then
+                local last
+                for _, f in ipairs(comp_fixtures[c] or {}) do
+                    if not last or (f.date_raw or 0) >= (last.date_raw or 0) then last = f end
+                end
+                local iso = last and ea_day_to_iso(last.date_raw) or ""
+                if is_league_competition(name) and not name:lower():find("play", 1, true) then
+                    local lr = league_rows[name]
+                    if lr and lr.complete and lr.rows[1] and lr.rows[1].team_id == managed_tid then add_trophy(name, iso, true) end
+                elseif season_end and last then
+                    local h, a = standings[last.home_standing_index], standings[last.away_standing_index]
+                    local fin = CR.final({ completed = last.completed, home = h and h.team_id, away = a and a.team_id, hs = last.home_score,
+                                           as = last.away_score, hp = last.home_penalties, ap = last.away_penalties })
+                    if fin and fin.winner == managed_tid then add_trophy(name, iso, false) end
+                end
+            end
+        end
+        if career_scan.champions ~= nil then
+            for cname, holder in pairs(champions) do
+                local before = career_scan.champions[cname]
+                if holder == managed_tid and before ~= nil and before ~= managed_tid and today ~= "" then career_scan.won[cname] = today end
+            end
+        end
+        career_scan.champions = champions
+        for cname, iso in pairs(career_scan.won) do add_trophy(cname, iso, is_league_competition(cname)) end
+        if #trophies > 0 then
+            table.sort(trophies, function(a, b) if a.startYear ~= b.startYear then return a.startYear < b.startYear end return a.competition < b.competition end)
+            report.trophies = trophies
+        end
+
         -- June and July: last season's winners and top scorers (Around the World).
         if season_end then
             local holders, seen = CR.array(), {}
@@ -4778,16 +4939,11 @@ do
                 end
             end
             -- Competitions without a final in the fixture list: the game's holder, without a score.
-            for _, r in ipairs((career_rows("competition", { "competitionid", "competitionchampionid" }))) do
-                local holder = tonumber(r.competitionchampionid) or 0
-                if holder > 0 and holder < 4294967295 then
-                    local ok, name = pcall(function() return GetCompetitionNameByID(tonumber(r.competitionid)) end)
-                    name = ok and name and tostring(name) or ""
-                    local region = CR.region(name)
-                    if region and not seen[name:lower()] then
-                        holders[#holders + 1] = { region = region, competition = name, winner = tname(holder), league = is_league_competition(name) }
-                        seen[name:lower()] = true
-                    end
+            for name, holder in pairs(champions) do
+                local region = CR.region(name)
+                if region and not seen[name:lower()] then
+                    holders[#holders + 1] = { region = region, competition = name, winner = tname(holder), league = is_league_competition(name) }
+                    seen[name:lower()] = true
                 end
             end
             if #holders > 0 then
@@ -4922,4 +5078,5 @@ print("   - FC26_BeamTransfer(name, type, fee, club): Manually beam any transfer
 print("   - Deals the game does not store (fees, July deals made before the first run): list them in")
 print("     Documents\\FC26 Export\\manual_transfers.csv  (date,player,type,fee_m,club) and run this script again")
 print("   - FC26_AutoCapture_Status()       : Show queue + last bridge answers")
+print("   - FC26_AutoCapture_SendNow()      : Send what waits in the outbox now (the bridge normally reads it itself)")
 print("=========================================================================")

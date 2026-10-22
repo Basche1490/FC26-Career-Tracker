@@ -115,7 +115,7 @@ object CareerFacts {
     fun trophies(state: AppState): List<String> = (state.teamTrophies.map { it.name } + state.historicalSeasons.flatMap { it.trophies }).map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
 
     fun isContinental(t: String) = listOf("champions league", "europa", "conference", "uefa", "libertadores", "sudamericana", "club world").any { t.lowercase().contains(it) }
-    fun isCup(t: String) = !isContinental(t) && listOf("cup", "copa", "coppa", "pokal", "coupe", "shield", "trophy", "trophée", "supercopa", "supercoppa", "supercup").any { t.lowercase().contains(it) }
+    fun isCup(t: String) = !isContinental(t) && listOf("cup", "copa", "coppa", "pokal", "coupe", "shield", "trophy", "trophée", "supercopa", "supercoppa", "supercup", "play-off", "playoff").any { t.lowercase().contains(it) }
 
     /** League titles: seasons finished first, or league trophies on the list, whichever is more. */
     fun leagueTitles(state: AppState): Int {

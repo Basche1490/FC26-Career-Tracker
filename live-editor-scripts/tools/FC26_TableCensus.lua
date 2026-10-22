@@ -36,7 +36,10 @@ local VERSION = "1.4.0"
 
 local user_profile = os.getenv("USERPROFILE") or ""
 local ROOT = (user_profile ~= "" and user_profile or ".") .. "\\Documents\\FC26 Export"
-pcall(os.execute, 'if not exist "' .. ROOT .. '" mkdir "' .. ROOT .. '"')
+do -- only start mkdir (a console window) when the folder is really missing
+    local there, _, code = os.rename(ROOT, ROOT)
+    if not (there or code == 13 or code == 17) then pcall(os.execute, 'if not exist "' .. ROOT .. '" mkdir "' .. ROOT .. '"') end
+end
 -- FC26_CENSUS_OUT_PATH, _PROGRESS_PATH and _SKIP_PATH only exist so the automated tests can choose where files go
 local OUT_PATH = rawget(_G, "FC26_CENSUS_OUT_PATH") or (ROOT .. "\\FC26_census_" .. os.date("%Y%m%d_%H%M%S") .. ".txt")
 local CSV_PATH = OUT_PATH:gsub("%.txt$", "") .. "_tables.csv"

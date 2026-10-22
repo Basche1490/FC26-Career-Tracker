@@ -24,6 +24,27 @@ local function check(cond, label, detail)
     end
 end
 
+-- The folders a "mkdir" command makes: quoted full paths, and bare names after a "cd /d" into their folder
+-- (the script names its spare folders that way to keep the command short).
+local function mkdir_targets(cmd)
+    local out, cwd = {}, nil
+    for part in (cmd .. "&"):gmatch("(.-)&+") do
+        part = part:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^/c%s+", "")
+        local cd = part:match('^cd /d "([^"]+)"$')
+        if cd then
+            cwd = cd
+        elseif part:find("^mkdir ") then
+            for quoted in part:gmatch('"([^"]+)"') do out[#out + 1] = quoted end
+            if cwd then
+                for bare in part:sub(7):gsub('"[^"]*"', ""):gmatch("%S+") do
+                    if not bare:find(">", 1, true) then out[#out + 1] = cwd .. "\\" .. bare end
+                end
+            end
+        end
+    end
+    return out
+end
+
 local function read_file(path)
     local f = assert(io.open(path, "rb"), "cannot open " .. path)
     local s = f:read("a")
@@ -118,7 +139,8 @@ do
     check(quiet_block ~= nil, "quiet_exec block found between the markers")
     local popen_calls = 0
 
-    local function run_search(files, env, cwd, subdirs_of)
+    local visible_calls = 0
+    local function run_search(files, env, cwd, subdirs_of, hidden)
         local saved_getenv, saved_execute, saved_popen, saved_rename = os.getenv, os.execute, io.popen, os.rename
         os.getenv = function(k) return env[k] end
         io.popen = function()
@@ -130,16 +152,23 @@ do
             if a == b and subdirs_of[a:lower()] then return true end
             return nil, "No such file or directory", 2
         end
-        os.execute = function(cmd)
-            -- mimic:  cmd /c dir /b /ad "<folder>" > "<file>" 2>nul & echo x> "<done file>"
+        -- mimic:  cmd /c dir /b /ad "<folder>" > "<file>" 2>nul & echo x> "<done file>"
+        local function run_dir(cmd)
             local folder, out = cmd:match('dir /b /ad "([^"]*)" > "([^"]*)"')
             if folder then
                 local list = subdirs_of[folder:lower()] or {}
                 local f = io.open((out:gsub("\\", "/")), "w")
                 if f then f:write(table.concat(list, "\r\n")) f:close() end
             end
+            local done = cmd:match('echo x> "([^"]*)"')
+            if done then local f = io.open((done:gsub("\\", "/")), "w") if f then f:write("x") f:close() end end
+        end
+        os.execute = function(cmd)
+            visible_calls = visible_calls + 1 -- a visible console window
+            run_dir(cmd)
             return true
         end
+        rawset(_G, "shellExecute", hidden and function(program, params) run_dir(params) end or nil)
         rawset(_G, "FC26_REAL_OS_EXECUTE", nil)
         local prelude = [[
             local SCRIPT_DIR, user_profile, FILES = ...
@@ -147,27 +176,32 @@ do
             local function win_path(p) return (tostring(p or ""):gsub("/", "\\")) end
             local function file_exists(path) return FILES[path:lower()] == true end
         ]]
-        local fn = assert(load(prelude .. quiet_block .. block .. "\nreturn find_script", "find_script"))
+        local fn = assert(load(prelude .. quiet_block .. block .. "\nQUIET.hidden = select(4, ...)\nreturn find_script", "find_script"))
         local lower = {}
         for path in pairs(files) do lower[path:lower()] = true end
-        local find = fn("", env.USERPROFILE or "", lower)
+        local find = fn("", env.USERPROFILE or "", lower, hidden == true)
         local found, dirs = find("FC26_AutoCapture_v1.1.1.lua")
         os.getenv, os.execute, io.popen, os.rename = saved_getenv, saved_execute, saved_popen, saved_rename
         rawset(_G, "FC26_REAL_OS_EXECUTE", nil)
+        rawset(_G, "shellExecute", nil)
         return found, dirs
     end
 
     local base_env = { USERPROFILE = "C:\\Users\\Joel", TEMP = os.getenv("TMPDIR") or "/tmp" }
     local EXE = "FC26_AutoCapture_v1.1.1.lua"
 
-    local found = run_search({ ["C:\\Users\\Joel\\Desktop\\FC26-LE\\FC 26 LE v26.3.6\\lua\\scripts\\" .. EXE] = true },
-        base_env, nil, { ["c:\\users\\joel\\desktop\\fc26-le"] = { "FC 26 LE v26.3.6" } })
+    local deep = { ["C:\\Users\\Joel\\Desktop\\FC26-LE\\FC 26 LE v26.3.6\\lua\\scripts\\" .. EXE] = true }
+    local deep_dirs = { ["c:\\users\\joel\\desktop\\fc26-le"] = { "FC 26 LE v26.3.6" } }
+    local found = run_search(deep, base_env, nil, deep_dirs, true)
     check(found == "C:\\Users\\Joel\\Desktop\\FC26-LE\\FC 26 LE v26.3.6\\lua\\scripts\\" .. EXE,
-        "found in Desktop\\FC26-LE\\<version>\\lua\\scripts", tostring(found))
+        "found in Desktop\\FC26-LE\\<version>\\lua\\scripts (folder listed with a hidden program start)", tostring(found))
+    check(visible_calls == 0, "no console window was needed for that", visible_calls)
+    found = run_search(deep, base_env, nil, deep_dirs, false)
+    check(found == nil and visible_calls == 0, "without a hidden program start the version folders are not listed: no console window, ever", visible_calls)
 
     local env2 = { USERPROFILE = "C:\\Users\\Joel", OneDrive = "C:\\Users\\Joel\\OneDrive", TEMP = base_env.TEMP }
     found = run_search({ ["C:\\Users\\Joel\\OneDrive\\Desktop\\FC26-LE\\LE 26\\lua\\scripts\\" .. EXE] = true },
-        env2, nil, { ["c:\\users\\joel\\onedrive\\desktop\\fc26-le"] = { "LE 26" } })
+        env2, nil, { ["c:\\users\\joel\\onedrive\\desktop\\fc26-le"] = { "LE 26" } }, true)
     check(found == "C:\\Users\\Joel\\OneDrive\\Desktop\\FC26-LE\\LE 26\\lua\\scripts\\" .. EXE,
         "found when the Desktop lives in OneDrive", tostring(found))
 
@@ -203,7 +237,7 @@ do
         os.execute = function(cmd)
             real_calls[#real_calls + 1] = cmd
             if cmd:find("mkdir", 1, true) then
-                for made in cmd:gmatch('"([^"]+)"') do dirs[(made:gsub("\\", "/"))] = true end
+                for _, made in ipairs(mkdir_targets(cmd)) do dirs[(made:gsub("\\", "/"))] = true end
             end
             return true
         end
@@ -279,7 +313,8 @@ do
             "start-up on a new PC: the folders and the spare folders come from ONE command", #real_calls .. "/" .. Q.windows .. "/" .. Q.batches)
         local ready = Q.scan_pool()
         check(#ready == 10 and dirs[R .. "/outbox"] and dirs[R .. "/Snapshots"], "10 spare folders and the base folders exist")
-        check(#real_calls[1] < 8000 and real_calls[1]:find('^mkdir "') ~= nil, "the command is a plain mkdir listing every folder", real_calls[1]:sub(1, 40))
+        check(#real_calls[1] < 8000 and real_calls[1]:find('^mkdir "') ~= nil and real_calls[1]:find("mkdir s001 s002", 1, true) ~= nil,
+            "the command is a plain mkdir: the folders, then the spare folders by name inside their own folder", real_calls[1]:sub(1, 40))
         check(Q.prepare({ R, R .. "/outbox", R .. "/Snapshots" }) == true and #real_calls == 1, "nothing is started when everything is there")
 
         local new_dir = [[C:\Users\Joel\Documents\FC26 Export\Snapshots\incoming\x.partial]]
@@ -317,7 +352,7 @@ do
         _G.shellExecute = function(program, params, folder, show)
             started[#started + 1] = { params = params, show = show }
             if params:find("mkdir", 1, true) then
-                for made in params:gmatch('"([^"]+)"') do dirs[(made:gsub("\\", "/"))] = true end
+                for _, made in ipairs(mkdir_targets(params)) do dirs[(made:gsub("\\", "/"))] = true end
             end
         end
         Q.pool_root = R .. "/spare_folders"
@@ -345,6 +380,13 @@ do
             local function file_exists(p) return FILES[p] == true end
             local function os_date() return STAMP end
             local os = setmetatable({ date = os_date }, { __index = _G.os })
+            local io = { open = function(p)
+                if p == MATCH_STATS_ROOT .. "/last_export.txt" and CALLS.pointer then
+                    local text = CALLS.pointer
+                    return { read = function() return text end, close = function() end }
+                end
+                return nil
+            end }
             ]] .. atlas_block .. [[
             return { find = find_atlas_folder, last = last_export_folder, used = _G["FC26_ATLAS_USED"] }
         ]], "atlas"))("C:/FC26 Export/MatchStats", files, listing, start_stamp, calls)
@@ -388,6 +430,23 @@ do
     n = env.find(false, 40)
     os.time = nowt
     check(n == nil and env.used["FC26_MatchStats_pmc_20261019_100000_old"] == true, "a folder made before the script started is treated as an earlier match's")
+
+    -- the exporter (1.1.2) names its newest export in MatchStats\last_export.txt: found without any folder listing
+    local files3 = ready_files(R .. "/FC26_MatchStats_pmc_20261019_160000_p")
+    env, calls = atlas_env(files3, { "should not be listed" }, "20261019_150000")
+    _G["FC26_ATLAS_USED"] = env.used
+    calls.pointer = "C:\\FC26 Export\\MatchStats\\ready\\FC26_MatchStats_pmc_20261019_160000_p\r\n"
+    local pn, pp = env.find(false, 0)
+    check(pn == "FC26_MatchStats_pmc_20261019_160000_p" and pp == R .. "/FC26_MatchStats_pmc_20261019_160000_p" and calls.listing == 0,
+        "the export named in last_export.txt is used straight away, with no folder listing", tostring(pn))
+    env.used[pn] = true
+    check(env.find(false, 0) == nil, "and not a second time")
+    env, calls = atlas_env(ready_files(R .. "/FC26_MatchStats_pmc_20261019_090000_q"), {}, "20261019_150000")
+    _G["FC26_ATLAS_USED"] = env.used
+    calls.pointer = "C:\\FC26 Export\\MatchStats\\ready\\FC26_MatchStats_pmc_20261019_090000_q"
+    check(env.find(false, 0) == nil, "an export named there from before this script started belongs to an earlier match")
+    check(exporter:find("last_export.txt", 1, true) ~= nil and exporter:find("FC26_QUIET", 1, true) ~= nil,
+        "the exporter writes last_export.txt and makes its folders through this script's quiet folder code")
 
     local half = {} -- newest folder has no MATCH_READY yet
     env, calls = atlas_env(half, { "FC26_MatchStats_pmc_20261019_150000_half", "FC26_MatchStats_pmc_20261019_141500_new" }, "20261019_120000")
@@ -993,7 +1052,7 @@ local function run_capture_session(spec)
     os.execute = function(cmd)
         if spec.executed then spec.executed[#spec.executed + 1] = cmd end -- what would have opened a command window
         if cmd:find("mkdir", 1, true) then
-            for made in cmd:gmatch('"([^"]+)"') do mark_dir(made) end -- "mkdir" with one or several folders
+            for _, made in ipairs(mkdir_targets(cmd)) do mark_dir(made) end -- "mkdir" with one or several folders
         end
         return true
     end
@@ -1056,6 +1115,7 @@ local function run_capture_session(spec)
     _G.GetTeamName = function(tid) return spec.teams[tid] end
     _G.GetUserTeamID = function() return 115486 end
     _G.GetCompetitionNameByObjID = function(id) return spec.comps and spec.comps[id] or nil end
+    _G.GetCompetitionNameByID = function(id) return spec.comp_ids and spec.comp_ids[id] or nil end
     _G.GetPlayerPrimaryPositionName = function(id) return spec.positions and spec.positions[id] or nil end
     _G.GetCurrentDate = function() return spec.today end
     _G.createTimer = nil
@@ -1076,7 +1136,7 @@ local function run_capture_session(spec)
         _G.shellExecute = nil
         _G.dofile, _G.print = real.dofile, real.print
         _G.AddEventHandler = nil
-        _G.GetCompetitionNameByObjID, _G.GetPlayerPrimaryPositionName = nil, nil
+        _G.GetCompetitionNameByObjID, _G.GetPlayerPrimaryPositionName, _G.GetCompetitionNameByID = nil, nil, nil
     end
     return ok, err, handler, restore
 end
@@ -1431,17 +1491,18 @@ do
     end
     local BASE_FOLDERS = { "/outbox", "/Snapshots", "/Snapshots/incoming", "/Snapshots/ready", "/Snapshots/imported",
                            "/Snapshots/failed", "/MatchStats", "/MatchStats/incoming", "/MatchStats/ready" }
+    local POOL = 240 -- QUIET.pool_size
     local function spare(i) return string.format("%s/spare_folders/s%03d", ROOT, i) end
     -- a PC where the script has run before: every folder is there and the stock of spare folders is full
     local function existing_dirs(spares)
         local dirs = { [ROOT] = true, ["/home/test/tmp"] = true }
         for _, sub in ipairs(BASE_FOLDERS) do dirs[ROOT .. sub] = true end
-        for i = 1, (spares or 60) do dirs[spare(i)] = true end
+        for i = 1, (spares or POOL) do dirs[spare(i)] = true end
         return dirs
     end
     local function spare_count(dirs)
         local n = 0
-        for i = 1, 60 do if dirs[spare(i)] then n = n + 1 end end
+        for i = 1, POOL do if dirs[spare(i)] then n = n + 1 end end
         return n
     end
     local function start(spec_extra, vfs, clock_ref)
@@ -1466,7 +1527,7 @@ do
         check(fresh_dirs[ROOT .. "/outbox"] and fresh_dirs[ROOT .. "/Snapshots"] and fresh_dirs[ROOT .. "/MatchStats"],
             "that command made the folders the script uses")
         check(not fresh_dirs[ROOT .. "/MatchStats/ready"], "but not the exporter's own folders (their existence means 'an export was made before')")
-        check(spare_count(fresh_dirs) == 60, "and 60 spare folders", spare_count(fresh_dirs))
+        check(spare_count(fresh_dirs) == POOL, "and " .. POOL .. " spare folders", spare_count(fresh_dirs))
         local mk = ""
         for _, c in ipairs(executed) do if c:find("mkdir", 1, true) then mk = c end end
         check(#mk > 0 and #mk < 8000, "and it stays short enough for the command line (8191 characters)", #mk)
@@ -1486,7 +1547,7 @@ do
         end
         check(all_ok, "the exporter's folder requests succeed and the folders exist")
         check(#executed == before, "no program is started for them (no command window)", #executed - before)
-        check(spare_count(fresh_dirs) == 52, "eight spare folders were used up", spare_count(fresh_dirs))
+        check(spare_count(fresh_dirs) == POOL - 8, "eight spare folders were used up", spare_count(fresh_dirs))
         restore()
 
         local again = {}
@@ -1497,10 +1558,10 @@ do
 
     -- the stock runs low: it is topped up with one command at the next start, and a folder is never lost on the way
     do
-        local executed, dirs = {}, existing_dirs(5)
+        local executed, dirs = {}, existing_dirs(100)
         local ok, err, _, restore = start({ executed = executed, dirs = dirs }, {}, { t = 1793950000 })
         check(ok and count(executed, "mkdir") == 1, "a low stock is refilled with one command at start", count(executed, "mkdir"))
-        check(spare_count(dirs) == 60, "back to 60 spare folders", spare_count(dirs))
+        check(spare_count(dirs) == POOL, "back to a full stock", spare_count(dirs))
         restore()
 
         -- the spare folders vanish in the middle of a run (deleted by hand): the folder still gets made, and with the
@@ -1508,12 +1569,12 @@ do
         executed, dirs = {}, existing_dirs()
         ok, err, _, restore = start({ executed = executed, dirs = dirs }, {}, { t = 1793970000 })
         check(ok and count(executed, "mkdir") == 0, "full stock: nothing created at start", count(executed, "mkdir"))
-        for i = 1, 60 do dirs[spare(i)] = nil end
+        for i = 1, POOL do dirs[spare(i)] = nil end
         local folder = ROOT:gsub("/", "\\") .. "\\Snapshots\\incoming\\late.partial"
         local r = os.execute('if not exist "' .. folder .. '" mkdir "' .. folder .. '"')
         check(r == true and dirs[(folder:gsub("\\", "/"))], "a folder is still created when the stock vanished")
         check(count(executed, "mkdir") == 1, "with a single command", count(executed, "mkdir"))
-        check(spare_count(dirs) == 60, "which also rebuilt the stock", spare_count(dirs))
+        check(spare_count(dirs) == POOL, "which also rebuilt the stock", spare_count(dirs))
         local before = #executed
         local next_folder = ROOT:gsub("/", "\\") .. "\\Snapshots\\incoming\\later.partial"
         os.execute('if not exist "' .. next_folder .. '" mkdir "' .. next_folder .. '"')
@@ -1521,11 +1582,12 @@ do
         restore()
     end
 
-    -- a) the bridge does not read the folder itself (older bridge): ONE sender for the whole burst
+    -- a) the bridge is not running yet: the payloads wait in the outbox and nothing is ever started for them (every
+    --    program start flashes a console window over the game); FC26_AutoCapture_SendNow() sends them when asked
     do
         local vfs, executed, clk = {}, {}, { t = 1794000000 }
         local ok, err, handler, restore = start({ executed = executed }, vfs, clk)
-        check(ok and type(handler) == "function", "script starts (older bridge)", err)
+        check(ok and type(handler) == "function", "script starts (bridge not running)", err)
         local files = outbox_files(vfs)
         check(#files == 3, "three payloads are waiting in the outbox", #files)
         local sorted_ok = true
@@ -1533,35 +1595,29 @@ do
         check(sorted_ok and files[1]:match("/(%d+_%d+)%.json$") ~= nil, "payload file names are unique and in order", files[1])
         for _, p in ipairs(files) do check(vfs[p]:sub(1, 1) == "{", "outbox file is a complete JSON object: " .. p:match("[^/]+$")) end
         for path in pairs(vfs) do check(path:sub(-4) ~= ".tmp", "no half-written .tmp file is left behind") end
-        check(count(executed, "start /min") == 0, "nothing is started while the burst is still being collected")
-        tick(handler, clk, 1)
-        check(count(executed, "start /min") == 0, "still collecting after 1 s")
-        tick(handler, clk, 2)
-        check(count(executed, "start /min") == 1, "one sender starts for all three payloads", count(executed, "start /min"))
+        check(#executed == 0, "nothing is started at start-up", table.concat(executed, " | "))
+        for _ = 1, 30 do tick(handler, clk, 20) end -- ten minutes of play
+        check(#executed == 0, "nothing is started in ten minutes of play either (no sender, no listing)", table.concat(executed, " | "):sub(1, 200))
+        local log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
+        check(log:find("the bridge is not running", 1, true) ~= nil, "the log says the payloads wait for the bridge")
+        local _, notes = log:gsub("waiting in the outbox: the bridge is not running", "")
+        check(notes >= 1 and notes <= 2, "and repeats that only every ten minutes", notes)
+        check(#outbox_files(vfs) >= 3, "the payloads are still there for the bridge", #outbox_files(vfs))
+
+        check(type(FC26_AutoCapture_SendNow) == "function", "FC26_AutoCapture_SendNow() exists")
+        local sent = FC26_AutoCapture_SendNow()
+        check(sent == true and count(executed, "start /min") == 1, "asked: one sender for everything waiting", table.concat(executed, " | "))
         local bat_text
         for path, content in pairs(vfs) do if path:find("fc26_send_", 1, true) and path:sub(-4) == ".bat" then bat_text = content end end
         check(bat_text and bat_text:find("\\outbox", 1, true) and not bat_text:find("@@", 1, true), "the sender batch file points at the outbox folder")
-        tick(handler, clk, 10)
-        check(count(executed, "start /min") == 1, "no second sender while the first one's files are still being retried (30 s)")
-        tick(handler, clk, 25)
-        check(count(executed, "start /min") == 2, "undelivered files are retried after 30 s with one more sender", count(executed, "start /min"))
-        -- the bridge answers: the sender deletes the files
-        for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end
-        tick(handler, clk, 40)
-        -- the career report (sent 40 s after the start) is the only new payload; once it is delivered too, nothing more
-        local extra = outbox_files(vfs)
-        local only_career = true
-        for _, p in ipairs(extra) do if not vfs[p]:find('"dataType": "career"', 1, true) then only_career = false end end
-        check(#extra <= 1 and only_career, "the only payload after the start-up burst is the career report", #extra)
-        for _, p in ipairs(extra) do vfs[p] = nil end
-        local before = count(executed, "start /min")
-        tick(handler, clk, 40)
-        tick(handler, clk, 40)
-        check(count(executed, "start /min") == before and before <= 3, "nothing more is started once everything is delivered", count(executed, "start /min"))
+        for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end -- delivered
+        local before = #executed
+        for _ = 1, 10 do tick(handler, clk, 20) end
+        check(#executed == before, "nothing more is started afterwards", #executed - before)
         restore()
     end
 
-    -- b) the bridge reads the folder itself: no program at all unless a file stays unread
+    -- b) the bridge reads the folder itself: no program at all
     do
         local vfs, executed, clk = {}, {}, { t = 1794100000 }
         vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t)
@@ -1569,40 +1625,38 @@ do
         check(ok, "script starts (bridge reads the folder)", err)
         check(#outbox_files(vfs) == 3, "payloads are saved in the outbox")
         check(#executed == 0, "no program is started at all at startup (no folder listing, no mkdir, no sender)", table.concat(executed, " | "))
-        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 4)
-        tick(handler, clk, 5)
-        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t)
-        tick(handler, clk, 5)
-        check(count(executed, "start /min") == 0, "the bridge gets time to read the files first")
-        for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end -- the bridge read and deleted them
-        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 20)
-        tick(handler, clk, 20)
-        for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end -- the squad report that appeared meanwhile is read too
-        tick(handler, clk, 20)
-        for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end
+        for _ = 1, 20 do
+            for _, p in ipairs(outbox_files(vfs)) do vfs[p] = nil end -- the bridge reads and deletes what arrives
+            vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 5)
+            tick(handler, clk, 5)
+        end
         check(#executed == 0, "the bridge read everything: nothing was ever started", table.concat(executed, " | "))
+        local log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
+        check(log:find("still waiting in the outbox", 1, true) == nil, "and no warning was logged")
         restore()
     end
 
-    -- c) the bridge says it reads the folder but a file is still there after the grace period: the sender takes over
+    -- c) the bridge says it reads the folder but a file stays: still no program, the log points at the bridge
     do
         local vfs, executed, clk = {}, {}, { t = 1794200000 }
         vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t)
         local ok, err, handler, restore = start({ executed = executed }, vfs, clk)
         check(ok, "script starts (bridge claims to read the folder)", err)
-        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 15)
-        tick(handler, clk, 15)
-        check(count(executed, "start /min") == 0, "no sender within the grace period")
-        vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 10)
-        tick(handler, clk, 10)
-        check(count(executed, "start /min") == 1, "a file still waiting after 20 s is sent by the sender", count(executed, "start /min"))
+        for _ = 1, 15 do
+            vfs[ROOT .. "/bridge_watching.txt"] = tostring(clk.t + 5)
+            tick(handler, clk, 5)
+        end
+        check(#executed == 0, "a file left in the outbox does not start a sender", table.concat(executed, " | "))
+        local log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
+        check(log:find("still waiting in the outbox although the bridge reads the folder", 1, true) ~= nil,
+            "the log says to look at the bridge window")
         restore()
     end
 
-    -- d) Live Editor can start programs hidden (shellExecute): no window, and a sender that leaves no trace is replaced
+    -- d) Live Editor can start programs hidden (shellExecute): the sender asked for runs hidden
     do
         local vfs, executed, clk = {}, {}, { t = 1794300000 }
-        local calls, sender_writes_log = {}, true
+        local calls = {}
         local function shell(program, params, folder, show)
             calls[#calls + 1] = { program = program, params = params, folder = folder, show = show }
             local echo_path = params:match('echo ok> "([^"]+)"')
@@ -1611,47 +1665,35 @@ do
             if list_out then vfs[(list_out:gsub("\\", "/"))] = "" end -- an empty folder listing
             local done = params:match('echo x> "([^"]+)"')
             if done then vfs[(done:gsub("\\", "/"))] = "x" end
-            if params:find("fc26_send_", 1, true) and sender_writes_log then
-                vfs[ROOT .. "/bridge_send_log.txt"] = (vfs[ROOT .. "/bridge_send_log.txt"] or "") .. "x [sender] started\n"
-            end
         end
         local ok, err, handler, restore = start({ executed = executed, shell = shell }, vfs, clk)
         check(ok, "script starts with shellExecute available", err)
         local log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
         check(log:find("hidden program start: yes", 1, true) ~= nil, "the log says hidden start works", log:match("Quiet mode[^\n]*"))
-        tick(handler, clk, 3)
-        local sender_calls = 0
-        for _, c in ipairs(calls) do if c.params:find("fc26_send_", 1, true) then sender_calls = sender_calls + 1 check(c.show == 0, "the sender is started hidden (SW_HIDE = 0)", c.show) end end
-        check(sender_calls == 1, "one hidden sender for the burst", sender_calls)
-        check(count(executed, "start /min") == 0 and count(executed, "cmd /c") == 0, "no visible window was needed", table.concat(executed, " | "))
-        tick(handler, clk, 20)
-        log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
-        check(log:find("left no trace", 1, true) == nil, "a hidden sender that wrote its log line is trusted")
-        restore()
-
-        vfs, executed, clk = {}, {}, { t = 1794400000 }
-        calls, sender_writes_log = {}, false
-        ok, err, handler, restore = start({ executed = executed, shell = shell }, vfs, clk)
-        check(ok, "script starts (hidden sender that does nothing)", err)
-        tick(handler, clk, 3)
-        check(count(executed, "start /min") == 0, "first attempt is hidden")
-        tick(handler, clk, 16)
-        log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
-        check(log:find("left no trace", 1, true) ~= nil, "a hidden sender that left no trace is noticed")
-        tick(handler, clk, 20)
-        check(count(executed, "start /min") == 1, "the visible sender takes over so nothing is left undelivered", count(executed, "start /min"))
+        for _ = 1, 10 do tick(handler, clk, 20) end
+        local senders = 0
+        for _, c in ipairs(calls) do if c.params:find("fc26_send_", 1, true) then senders = senders + 1 end end
+        check(senders == 0, "no sender is started on its own", senders)
+        for _, c in ipairs(calls) do check(c.show == 0, "every program is started hidden (SW_HIDE = 0): " .. c.params:sub(1, 40), c.show) end
+        FC26_AutoCapture_SendNow()
+        senders = 0
+        for _, c in ipairs(calls) do if c.params:find("fc26_send_", 1, true) then senders = senders + 1 check(c.show == 0, "the sender is started hidden", c.show) end end
+        check(senders == 1, "asked: one hidden sender", senders)
+        check(#executed == 0, "no visible window at all", table.concat(executed, " | "))
         restore()
     end
 
-    -- e) shellExecute exists but does nothing: it is not used at all
+    -- e) shellExecute exists but does nothing: it is not used at all, the sender asked for opens a minimized window
     do
         local vfs, executed, clk = {}, {}, { t = 1794500000 }
         local ok, err, handler, restore = start({ executed = executed, shell = function() end }, vfs, clk)
         check(ok, "script starts with a shellExecute that does nothing", err)
         local log = vfs[ROOT .. "/auto_capture_monitor.log"] or ""
         check(log:find("hidden program start: no", 1, true) ~= nil, "the log says hidden start does not work here")
-        tick(handler, clk, 3)
-        check(count(executed, "start /min") == 1, "the visible sender is used", count(executed, "start /min"))
+        for _ = 1, 10 do tick(handler, clk, 20) end
+        check(#executed == 0, "nothing visible is started on its own", table.concat(executed, " | "))
+        FC26_AutoCapture_SendNow()
+        check(count(executed, "start /min") == 1, "asked: the minimized sender is used", count(executed, "start /min"))
         restore()
     end
 end
@@ -2189,16 +2231,17 @@ do
         if opts.db_extra then opts.db_extra(db) end
         local spec = { db = db, vfs = vfs, clock = function() return clk.t end, names = NAMES, teams = TEAMS,
                        today = { year = 2028, month = 8, day = 12 }, memory = mem, positions = POSITIONS,
-                       comps = { [779] = "EFL Championship", [1856] = "FA Cup" },
+                       comps = { [779] = "EFL Championship", [1856] = "FA Cup" }, comp_ids = { [1] = "EFL Championship", [2] = "FA Cup" },
                        dirs = { [ROOT] = true, [ROOT .. "/outbox"] = true, [ROOT .. "/Snapshots"] = true, [ROOT .. "/MatchStats"] = true,
-                                ["/home/test/tmp"] = true } }
+                                ["/home/test/tmp"] = true }, executed = {} }
+        for i = 1, 240 do spec.dirs[string.format("%s/spare_folders/s%03d", ROOT, i)] = true end -- a PC that is set up
         if opts.exporter then _G.FC26_EXPORT_AUTO_CAPTURE_STATE = {} end
         local ok, err, handler, restore = run_capture_session(spec)
         local function tick(seconds)
             clk.t = clk.t + seconds
             handler(nil, 1, nil)
         end
-        local game = { ok = ok, err = err, vfs = vfs, tick = tick, fixtures = fixtures, set = set_fixture }
+        local game = { ok = ok, err = err, vfs = vfs, tick = tick, fixtures = fixtures, set = set_fixture, executed = spec.executed }
         function game.finish_match()
             fixtures[4].hs, fixtures[4].as, fixtures[4].done = 1, 3, true
             set_fixture(4, fixtures[4])
@@ -2280,6 +2323,7 @@ do
         local ours = {}
         for _, gd in ipairs(m.goalDetails or {}) do if not gd.isOpponent then ours[#ours + 1] = gd.playerName end end
         check(#ours == 1 and ours[1] == "Enrique Iglesias", "our goal is credited to our scorer", table.concat(ours, "|"))
+        check(#g.executed == 0, "no command window opened during the whole match", table.concat(g.executed, " | "):sub(1, 200))
         g.close()
     end
 
@@ -2303,6 +2347,8 @@ do
         check(by_name["Nico Striker"] == nil, "the unused substitute is not")
         check(#(m.substitutions or {}) == 2, "the substitutions come from the game's record", #(m.substitutions or {}))
         check(m.possessionEstimated == true, "possession is flagged as a guess")
+        for _ = 1, 60 do g.tick(5) end -- five more minutes in the menus
+        check(#g.executed == 0, "looking for an export that never came opened no command window", table.concat(g.executed, " | "):sub(1, 200))
         g.close()
     end
 
@@ -2355,7 +2401,7 @@ do
         local status_text = g.vfs[ROOT .. "/script_status.json"]
         check(status_text ~= nil, "script_status.json is written as soon as the script runs")
         local st = status_text and json_decode(status_text) or {}
-        check(st.version == "2.9.0" and st.protocol == 2 and st.app == "fc26-capture", "it names the script, its version and protocol",
+        check(st.version == "2.10.0" and st.protocol == 2 and st.app == "fc26-capture", "it names the script, its version and protocol",
             tostring(st.version))
         check(st.exporter == true, "it says the detailed-stats exporter is running")
         check(st.club == "Torquay AFC", "it names the club", tostring(st.club))
@@ -2401,14 +2447,19 @@ do
         local g = play({ db_extra = function(db)
             db.career_playerlastgrowth = { { playerid = 461483, injurydate = 11923, injuryduration = 40 }, { playerid = 460129, injurydate = 100, injuryduration = 5 } }
             db.career_playercontract = { { playerid = 461483, teamid = MANAGED, playerrole = 1, wage = 14500 } }
-            db.players = { { playerid = 461483, overallrating = 71, potential = 78 } }
+            db.players = { { playerid = 461483, overallrating = 71, potential = 78, acceleration = 80, sprintspeed = 83, agility = 75, balance = 70,
+                             reactions = 72, ballcontrol = 74, dribbling = 73, finishing = 76, shotpower = 77, longshots = 65, volleys = 60,
+                             penalties = 66, positioning = 75, vision = 60, crossing = 55, gkdiving = 10 },
+                           { playerid = 999999, overallrating = 90, potential = 90 } }           -- another club's player
             db.playersuspensions = { { playerid = 460053, games = 2 } }
-            db.teams = { { teamid = MANAGED, foundationyear = 1899, rivalteam = 106, leaguetitles = 0, domesticcups = 1, uefa_cl_wins = 0, uefa_el_wins = 0, uefa_uecl_wins = 0 } }
+            db.teams = { { teamid = MANAGED, foundationyear = 1899, rivalteam = 106, leaguetitles = 0, domesticcups = 1, uefa_cl_wins = 0, uefa_el_wins = 0, uefa_uecl_wins = 0,
+                           domesticprestige = 4, internationalprestige = 2 } }
             db.teamstadiumlinks = { { teamid = MANAGED, stadiumid = 5 } }
             db.stadiums = { { stadiumid = 5, name = "Plainmoor", capacity = 6500 } }
             db.clubcoefficients = { { teamid = 50, points = 40.5, year1 = 9 }, { teamid = MANAGED, points = 3.25, year1 = 3.25 } }
             for _, l in ipairs(db.teamplayerlinks) do
-                if l.playerid == 461483 then l.jerseynumber, l.leaguegoals, l.position = 9, 4, 25 end
+                if l.playerid == 461483 then l.jerseynumber, l.leaguegoals, l.position, l.leagueappearances, l.yellows, l.reds, l.form = 9, 4, 25, 5, 1, 0, 4 end
+                if l.playerid == 460129 then l.leagueappearances, l.leaguegoals, l.yellows, l.reds, l.form = 0, 0, 0, 0, 2 end
             end
         end })
         check(g.ok, "script starts (career report)", g.err)
@@ -2438,6 +2489,17 @@ do
         check(by_id[460053] and by_id[460053].suspension and by_id[460053].suspension.games == 2, "a suspension")
         check(r.injuriesKnown == true and r.suspensionsKnown == true, "it says the injuries and suspensions were readable")
         check(r.club and r.club.founded == "1899" and r.club.rival == "Sunderland" and r.club.stadium == "Plainmoor" and r.club.capacity == 6500, "the club's facts")
+        check(r.club and r.club.prestigeHome == 4 and r.club.prestigeAbroad == 2, "the club's prestige at home and abroad")
+        check(ig.attributes and ig.attributes["Sprint speed"] == 83 and ig.attributes["Finishing"] == 76 and ig.attributes["GK diving"] == 10,
+            "the player's attributes, by the names the app shows")
+        check(ig.form == "Good" and by_id[460129] and by_id[460129].form == "Poor", "the game's form of each player")
+        check(by_id[460129] and by_id[460129].attributes == nil, "no attributes when the game has none for him")
+        local st = {}
+        for _, x in ipairs(r.stats or {}) do st[x.playerId] = x end
+        check(st[461483] and st[461483].apps == 5 and st[461483].goals == 4 and st[461483].yellow == 1 and st[461483].red == 0
+            and st[461483].competition == "EFL Championship", "the league statistics the game keeps for him")
+        check(st[460129] == nil, "a player without a league appearance has no statistics line")
+        check(r.trophies == nil, "no trophy in August")
         local lead = r.leaders and r.leaders[1] or {}
         check(lead.competition == "EFL Championship" and lead.goals and lead.goals[1].player == "Enrique Iglesias" and lead.goals[1].value == 4, "the league's top scorers")
         check(r.coefficients and #r.coefficients == 2 and r.coefficients[1].club == "Parma" and r.coefficients[2].user == true, "the European ranking with the club in it")
@@ -2474,6 +2536,83 @@ do
         local h = found and found.holders and found.holders[1] or {}
         check(found and found.careerDate == "2029-06-02", "a June report", found and found.careerDate)
         check(h.competition == "FA Cup" and h.region == "England" and h.winner == "Parma" and h.runnerUp == "Sunderland" and h.score == "2–1" and (h.pens or "") == "", "the cup final's winner and score", h.winner)
+        g.close()
+    end
+
+    -- G2. June: the club won the cup final itself, so the trophy is in the report (for the season the final was in)
+    do
+        local g = play({})
+        g.set(7, { id = 7, date = 20290525, h = sidx(MANAGED), a = sidx(106), hs = 1, as = 1, done = true, comp = 1856 })
+        _G.GetCurrentDate = function() return { year = 2029, month = 6, day = 2 } end
+        g.tick(50)
+        local found
+        for path, text in pairs(g.vfs) do
+            if path:find("/outbox/", 1, true) and text:find('"dataType": "career"', 1, true) then found = json_decode(text) end
+        end
+        check(found and found.trophies == nil, "a drawn final without a shoot-out is no trophy")
+        g.close()
+
+        g = play({})
+        g.set(7, { id = 7, date = 20290525, h = sidx(MANAGED), a = sidx(106), hs = 2, as = 1, done = true, comp = 1856 })
+        _G.GetCurrentDate = function() return { year = 2029, month = 6, day = 2 } end
+        g.tick(50)
+        found = nil
+        for path, text in pairs(g.vfs) do
+            if path:find("/outbox/", 1, true) and text:find('"dataType": "career"', 1, true) then found = json_decode(text) end
+        end
+        local tr = found and found.trophies or {}
+        check(#tr == 1 and tr[1].competition == "FA Cup" and tr[1].season == "2028/29" and tr[1].startYear == 2028 and tr[1].league == false,
+            "the cup won in May 2029 is a 2028/29 trophy", tr[1] and (tr[1].competition .. " " .. tr[1].season))
+        g.close()
+    end
+
+    -- H. the league: every match played and the club on top (any month)
+    do
+        local g = play({})
+        g.set(4, { id = 4, date = 20280812, h = sidx(MANAGED), a = sidx(106), hs = 2, as = 0, done = true })
+        g.set(6, { id = 6, date = 20280812, h = sidx(1795), a = sidx(1806), hs = 1, as = 0, done = true })
+        g.set(7, { id = 7, date = 20280819, h = sidx(50), a = sidx(MANAGED), hs = 0, as = 1, done = true })
+        g.tick(50)
+        local found
+        for path, text in pairs(g.vfs) do
+            if path:find("/outbox/", 1, true) and text:find('"dataType": "career"', 1, true) then found = json_decode(text) end
+        end
+        local tr = found and found.trophies or {}
+        check(#tr == 1 and tr[1].competition == "EFL Championship" and tr[1].season == "2028/29" and tr[1].league == true,
+            "a finished league the club tops is a trophy", tr[1] and tr[1].competition)
+        g.close()
+    end
+
+    -- I. the game names the club holder of a competition while the script runs
+    do
+        local g = play({ db_extra = function(db) db.competition = { { competitionid = 2, competitionchampionid = 50 } } end })
+        g.tick(50)
+        local function trophies_now()
+            local latest, latest_name
+            for path, text in pairs(g.vfs) do
+                if path:find("/outbox/", 1, true) and text:find('"dataType": "career"', 1, true) and (not latest_name or path > latest_name) then
+                    latest, latest_name = json_decode(text), path
+                end
+            end
+            return latest and latest.trophies
+        end
+        check(trophies_now() == nil, "another club holding the cup: no trophy")
+        g.close()
+
+        local db_ref
+        g = play({ db_extra = function(db) db.competition = { { competitionid = 2, competitionchampionid = 50 } } db_ref = db end })
+        g.tick(50)
+        db_ref.competition[1].competitionchampionid = MANAGED
+        _G.GetCurrentDate = function() return { year = 2029, month = 5, day = 20 } end
+        g.tick(310)
+        local tr = trophies_now() or {}
+        check(#tr == 1 and tr[1].competition == "FA Cup" and tr[1].season == "2028/29", "the cup the club just won is a trophy",
+            tr[1] and (tr[1].competition .. " " .. tr[1].season))
+        g.close()
+
+        g = play({ db_extra = function(db) db.competition = { { competitionid = 2, competitionchampionid = MANAGED } } end })
+        g.tick(50)
+        check(trophies_now() == nil, "holding it already when the script starts (last season's win) is not a new trophy")
         g.close()
     end
 
@@ -2597,6 +2736,17 @@ do
     local w = CR.wanted_leagues("EFL Championship")
     check(w["efl championship"] and w["efl league one"] and w["premier league"] and w["serie a"] and not w["eredivisie"], "tables wanted: own league, the ladder and the big five")
     check(CR.country("LALIGA EA SPORTS") == "Spain" and CR.country("unknown") == "", "countries of the leagues")
+
+    local attrs = CR.attributes({ acceleration = 80, sprintspeed = 83, agility = 75, balance = 70, reactions = 72, ballcontrol = 74,
+                                  dribbling = 73, finishing = 76, shotpower = 77, longshots = 65, gkdiving = 0, vision = 120 })
+    check(attrs and attrs["Sprint speed"] == 83 and attrs["Ball control"] == 74 and attrs["GK diving"] == nil and attrs["Vision"] == nil,
+        "attributes by name; impossible values are left out")
+    check(CR.attributes({ acceleration = 80 }) == nil and CR.attributes({}) == nil, "a row without the attribute columns gives none")
+    check(CR.form_label(5) == "Excellent" and CR.form_label("4") == "Good" and CR.form_label(3) == "Okay" and CR.form_label(1) == "Poor"
+        and CR.form_label(0) == nil and CR.form_label(9) == nil, "form in the app's words")
+    check(CR.season_start("2029-05-25") == 2028 and CR.season_start("2028-08-01") == 2028 and CR.season_start("2028-07-31") == 2027
+        and CR.season_start("") == nil, "the season a day belongs to")
+    check(CR.season_label(2028) == "2028/29" and CR.season_label(2099) == "2099/00", "season labels")
 
     local text = CR.payload({ careerDate = "2028-09-15", fixtures = CR.array(), players = CR.array({ { playerId = 7, name = 'A "Q"', wage = 13, injury = inj } }),
         teamsheet = { formation = "4-3-3", xi = CR.array({ 1, 2 }), bench = CR.array(), positions = { ["1"] = "GK" } }, injuriesKnown = true, club = { transferBudget = 12.5 } })

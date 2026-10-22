@@ -108,7 +108,10 @@ It watches your club every 2 seconds and sends:
   your league, the leagues above and below it and the five big leagues (with every club's last five results), the fixtures
   still to play, your league's top scorers, shirt numbers, squad roles, wages, ratings, injuries (with their return day) and
   suspensions, the team sheet you picked, your club's honours, stadium and transfer budget, the European club ranking and,
-  in June and July, last season's league and cup winners for Around the World. It is only sent when something changed, and
+  in June and July, last season's league and cup winners for Around the World. Since script 2.10 it also carries every
+  player's attributes (for "Development this season") and form, the squad's league statistics as the game counts them, your
+  club's prestige, and the **trophies you win**: a league you finish top of, and a cup final you win (added to the trophy
+  list with its season, once, also when you typed it yourself). It is only sent when something changed, and
   the bridge keeps only the newest one waiting for the phone. It never opens the game tables `transfers` or
   `scenarioevents` (they closed the game during the table census).
 
@@ -266,21 +269,23 @@ or transfer through the bridge to the phone.
 
 ### No flashing command windows
 
-Earlier versions started a small program for every folder check and every message, and Windows showed a black
-window for a second each time. The script now:
+Every program a Live Editor script starts (even a one-line `cmd` command) shows a black window over the game for a
+moment. Script 2.10 starts **no program at all while you play**:
 
-- saves every message as a small `.json` file in `Documents\FC26 Export\outbox`. The bridge reads that folder
-  itself and tells the script that it does so by refreshing `bridge_watching.txt` every few seconds. While the
-  heartbeat is fresh, no program is started at all. Only if the bridge is not running does the script fall back to
-  a sender, which is started hidden and sends everything waiting in one go.
-- checks folders from Lua instead of starting `cmd`, and starts the remaining helper programs without a window.
+- Every message is saved as a small `.json` file in `Documents\FC26 Export\outbox`. The bridge reads that folder
+  itself (it refreshes `bridge_watching.txt` every few seconds to say so). Nothing else sends them: when the bridge is
+  not running, the messages simply wait and are delivered as soon as it starts, and the log says so every ten minutes.
+  `FC26_AutoCapture_SendNow()` in the Lua console sends the outbox by hand if you ever need it (that one may show a
+  short window).
+- The Project Atlas exporter (1.1.2) writes the folder of its newest export into `MatchStats\last_export.txt`, so the
+  script never has to list a folder to find it. Folder listings are only used when Live Editor can do them silently.
+- Folders are checked from Lua. The folders the script needs are made with one command on the very first start on a
+  PC, together with 240 empty spare folders in `Documents\FC26 Export\spare_folders`. The exporter makes a new folder
+  for every export (about two per match); the script answers that by renaming a spare folder into place, which needs
+  no program. The stock is topped up at the next start once fewer than 140 are left, so even a long session of
+  simulated matches never runs out. The `spare_folders` folder is safe to delete: it is made again.
 
-- creates every folder it needs with one command, together with 60 empty spare folders in
-  `Documents\FC26 Export\spare_folders`. The Project Atlas exporter makes a new folder for every export; the
-  script answers that by renaming one of the spare folders into place, which needs no program and shows no window.
-  The stock is topped up when the script starts and fewer than 20 are left. So only the very first start on a PC
-  can flash one window (none if hidden start is available); later starts and the time after a match are silent.
-  The `spare_folders` folder is safe to delete: it is made again.
+So at most one window can appear, on the first start on a new PC (none if Live Editor can start programs hidden).
 
 On start the script logs a line such as `Quiet mode - ...` in `auto_capture_monitor.log` and the console. It says
 which of these methods this Live Editor build supports, how many spare folders are ready and how many windows were

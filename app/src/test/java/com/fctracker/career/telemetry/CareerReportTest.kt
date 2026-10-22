@@ -113,6 +113,64 @@ class CareerReportTest {
         assertEquals(4, r.state.leaders.single().goals.single().value)
         assertTrue(r.state.coefficients.last().isUser)
         assertEquals(listOf("Enrique Iglesias"), r.newInjuries)
+        // the auto items added in script 2.10: attributes, form, the league statistics and the club's prestige
+        assertEquals(83, ig.attributes["Sprint speed"]); assertEquals(76, ig.attributes["Finishing"])
+        assertEquals(ig.attributes, ig.seasonStartAttributes)
+        assertEquals("Good", ig.form)
+        val stat = r.state.squadStats.single()
+        assertEquals(461483, stat.gamePlayerId); assertEquals(5, stat.appearances); assertEquals(4, stat.goals); assertEquals(1, stat.yellowCards)
+        assertEquals(4, r.state.clubInfo.prestigeHome); assertEquals(2, r.state.clubInfo.prestigeAbroad)
+    }
+
+    @Test fun trophiesAreAddedOnceWithTheirSeason() {
+        val json = """{"careerDate":"2027-05-20","trophies":[{"competition":"FA Cup","season":"2026/27","startYear":2026,"league":false}]}"""
+        val r = report(json)
+        assertEquals(listOf("FA Cup 2026/27"), r.state.teamTrophies.map { it.name })
+        assertEquals(listOf("FA Cup 2026/27"), r.newTrophies)
+        val again = CareerReport.apply(r.state, JSONObject(json))
+        assertEquals(1, again.state.teamTrophies.size)
+        assertTrue(again.newTrophies.isEmpty())
+        // the person typed it already, in their own words
+        val typed = CareerReport.apply(base.copy(teamTrophies = listOf(TeamTrophy(name = "Emirates FA Cup winners (2026/27)"))), JSONObject(json))
+        assertEquals(1, typed.state.teamTrophies.size)
+        // the same cup another season is a new trophy
+        val next = CareerReport.apply(r.state.copy(startYear = 2027), JSONObject("""{"trophies":[{"competition":"FA Cup","startYear":2027}]}"""))
+        assertEquals(listOf("FA Cup 2026/27", "FA Cup 2027/28"), next.state.teamTrophies.map { it.name })
+    }
+
+    @Test fun aTrophyForASeasonAlreadyEndedGoesToThatSeason() {
+        val ended = CareerOps.endSeason(base.copy(careerDate = "2027-05-25"))
+        assertEquals(2027, ended.startYear)
+        val r = CareerReport.apply(ended, JSONObject("""{"careerDate":"2027-06-02","trophies":[{"competition":"EFL Championship","startYear":2026,"league":true}]}"""))
+        assertEquals(listOf("EFL Championship 2026/27"), r.state.historicalSeasons.single { it.year == 2026 }.trophies)
+        assertTrue(r.state.teamTrophies.none { it.name.contains("2026/27") })
+        // a season the career never had is ignored
+        val older = CareerReport.apply(ended, JSONObject("""{"trophies":[{"competition":"FA Cup","startYear":2019}]}"""))
+        assertFalse(older.changed)
+    }
+
+    @Test fun lastSeasonsTablesDoNotReplaceTheNewSeason() {
+        val ended = CareerOps.endSeason(base.copy(careerDate = "2027-05-25"))
+        val json = """{"careerDate":"2027-06-03","tables":[{"league":"EFL Championship","rows":[{"club":"Your Club","p":46,"pts":90,"user":true},{"club":"Hull City","p":46,"pts":80}]}],
+            "stats":[{"playerId":111,"name":"Marco Varela","apps":44,"goals":20}],
+            "players":[{"playerId":111,"name":"Marco Varela","form":"Excellent"}]}"""
+        val june = CareerReport.apply(ended, JSONObject(json))
+        assertTrue(june.state.leagueTables.isEmpty() || june.state.leagueTables.none { t -> t.rows.any { it.played == 46 } })
+        assertTrue(june.state.squadStats.isEmpty())
+        assertEquals("Excellent", june.state.players.first { it.id == "p1" }.form)   // the squad's details still count
+        // in July the game has started the new season: its tables count again
+        val july = CareerReport.apply(ended, JSONObject(json.replace("2027-06-03", "2027-07-10")))
+        assertTrue(july.state.leagueTables.isNotEmpty())
+        assertEquals(2027, CareerReport.reportSeason("2027-07-01")); assertEquals(2026, CareerReport.reportSeason("2027-06-30"))
+    }
+
+    @Test fun theProcessorAnnouncesATrophy() {
+        val payload = JSONObject().put("time", 1000L).put("title", "Career").put("message",
+            """{"dataType":"career","careerDate":"2027-05-20","trophies":[{"competition":"FA Cup","startYear":2026}]}""")
+        val r = TelemetryProcessor.apply(base, listOf(payload), notify = true, nowSeconds = 1000L, today = "2027-05-20")
+        assertEquals(listOf("FA Cup 2026/27"), r.state.teamTrophies.map { it.name })
+        assertTrue(r.state.liveEvents.any { it.title == "Trophy" })
+        assertEquals("season_summary", r.notices.single().route)
     }
 
     @Test fun unknownInjuriesAndSuspensionsAreLeftAlone() {

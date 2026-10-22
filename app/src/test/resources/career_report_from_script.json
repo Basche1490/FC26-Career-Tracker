@@ -6,6 +6,8 @@
     "europeanTrophies": 0,
     "founded": "1899",
     "leagueTitles": 0,
+    "prestigeAbroad": 2,
+    "prestigeHome": 4,
     "rival": "Sunderland",
     "stadium": "Plainmoor"
   },
@@ -29,14 +31,17 @@
     {"name": "Harry Dalton", "playerId": 460047},
     {"name": "Ignacio Zapata", "playerId": 460053, "suspension": {"games": 2}},
     {"name": "Kento Takeuchi", "playerId": 460055},
-    {"name": "Marc Palomino", "playerId": 460129},
-    {"injury": {"back": "2028-09-22", "name": "Injury", "start": "2028-08-13"}, "name": "Enrique Iglesias", "number": 9, "overall": 71, "playerId": 461483, "potential": 78, "role": "Crucial", "wage": 15},
+    {"form": "Poor", "name": "Marc Palomino", "playerId": 460129},
+    {"attributes": {"Acceleration": 80, "Agility": 75, "Balance": 70, "Ball control": 74, "Crossing": 55, "Dribbling": 73, "Finishing": 76, "GK diving": 10, "Long shots": 65, "Penalties": 66, "Positioning": 75, "Reactions": 72, "Shot power": 77, "Sprint speed": 83, "Vision": 60, "Volleys": 60}, "form": "Good", "injury": {"back": "2028-09-22", "name": "Injury", "start": "2028-08-13"}, "name": "Enrique Iglesias", "number": 9, "overall": 71, "playerId": 461483, "potential": 78, "role": "Crucial", "wage": 15},
     {"name": "Bruno Henrique Gonzaga", "playerId": 462221},
     {"name": "Oliver Ebner", "playerId": 462884},
     {"name": "Leo Guerra", "playerId": 463320},
     {"name": "Denilson Fernandes", "playerId": 463808},
     {"name": "Elivélton Jesus", "playerId": 464205},
     {"name": "Nico Striker", "playerId": 470001}
+  ],
+  "stats": [
+    {"apps": 5, "competition": "EFL Championship", "goals": 4, "name": "Enrique Iglesias", "playerId": 461483, "red": 0, "yellow": 1}
   ],
   "suspensionsKnown": true,
   "tables": [

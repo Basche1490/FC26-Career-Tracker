@@ -1,4 +1,5 @@
--- FC26 AutoCapture v1.1.1
+-- FC26 AutoCapture v1.1.2 (file name kept as FC26_AutoCapture_v1.1.1.lua so FC26 Auto Capture finds it)
+-- v1.1.2: no command window for folders that already exist; MatchStats\last_export.txt names the newest export.
 -- Single-file post-match monitor with full snapshot + detailed MatchStats exporters embedded.
 -- Run once after loading a career. It creates a startup snapshot, arms detailed
 -- MatchStats for the next match, and publishes a paired snapshot + MatchStats package
@@ -12,7 +13,7 @@ require 'imports/career_mode/helpers'
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "1.1.1"
+local VERSION = "1.1.2"
 local EMBEDDED_EXPORTER_VERSION = "1.1.0"
 local EMBEDDED_MATCH_STATS_VERSION = "1.1.0"
 local STATE_KEY = "FC26_EXPORT_AUTO_CAPTURE_STATE"
@@ -96,6 +97,14 @@ local function command_succeeded(a, _, c)
 end
 
 local function ensure_dir(path)
+    -- a folder that is already there needs no program (every os.execute flashes a console window)
+    local exists, _, code = os.rename(path, path)
+    if exists or code == 13 or code == 17 then return end
+    local quiet = rawget(_G, "FC26_QUIET")
+    if type(quiet) == "table" and type(quiet.make_dir) == "function" then
+        local ok, made = pcall(quiet.make_dir, path)
+        if ok and made then return end
+    end
     local a, b, c = os.execute('if not exist "' .. path .. '" mkdir "' .. path .. '"')
     if not command_succeeded(a, b, c) then
         error("Could not create directory: " .. path)
@@ -2588,11 +2597,20 @@ local function write_csv_row(file, values)
 end
 
 local function ensure_dir(path)
-    pcall(function()
-        os.execute('cmd.exe /C if not exist "' .. path .. '" mkdir "' .. path .. '"')
-    end)
     local test_path = path .. '\\.__fc26_dir_test.tmp'
+    -- a folder that is already there needs no program (every os.execute flashes a console window)
     local test_file = io.open(test_path, 'wb')
+    if not test_file then
+        local quiet = rawget(_G, 'FC26_QUIET')
+        if type(quiet) == 'table' and type(quiet.make_dir) == 'function' then pcall(quiet.make_dir, path) end
+        test_file = io.open(test_path, 'wb')
+    end
+    if not test_file then
+        pcall(function()
+            os.execute('cmd.exe /C if not exist "' .. path .. '" mkdir "' .. path .. '"')
+        end)
+        test_file = io.open(test_path, 'wb')
+    end
     if not test_file then
         pcall(function()
             os.execute('if not exist "' .. path .. '" mkdir "' .. path .. '"')
@@ -5927,6 +5945,20 @@ local function stop_probe(reason)
         participant_rows = final_participant_rows_exported,
         error = publish_error
     })
+    -- FC26 Auto Capture reads this file to find the export without listing the folder (a listing opens a window)
+    if publish_ok and type(PIPELINE_ROOT) == 'string' and PIPELINE_ROOT ~= '' then
+        pcall(function()
+            local pointer = PIPELINE_ROOT .. '\\MatchStats\\last_export.txt'
+            local tmp = pointer .. '.tmp'
+            local f = io.open(tmp, 'wb')
+            if f then
+                f:write(tostring(final_dir), '\r\n')
+                f:close()
+                pcall(os.remove, pointer)
+                if not os.rename(tmp, pointer) then pcall(os.remove, tmp) end
+            end
+        end)
+    end
 end
 
 state.stop = stop_probe
@@ -6058,8 +6090,19 @@ assert(type(user_profile) == "string" and user_profile ~= "",
     "USERPROFILE environment variable is unavailable.")
 local COMMUNITY_ROOT = user_profile .. "\\Documents\\FC26 Export"
 local EXPORT_ROOT = COMMUNITY_ROOT .. "\\Snapshots"
-os.execute('if not exist "' .. COMMUNITY_ROOT .. '" mkdir "' .. COMMUNITY_ROOT .. '"')
-os.execute('if not exist "' .. EXPORT_ROOT .. '" mkdir "' .. EXPORT_ROOT .. '"')
+-- Folders are only "created" when they are missing: every os.execute flashes a console window over the game.
+local function quiet_mkdir(path)
+    local exists, _, code = os.rename(path, path)
+    if exists or code == 13 or code == 17 then return end
+    local quiet = rawget(_G, "FC26_QUIET")
+    if type(quiet) == "table" and type(quiet.make_dir) == "function" then
+        local ok, made = pcall(quiet.make_dir, path)
+        if ok and made then return end
+    end
+    os.execute('if not exist "' .. path .. '" mkdir "' .. path .. '"')
+end
+quiet_mkdir(COMMUNITY_ROOT)
+quiet_mkdir(EXPORT_ROOT)
 local LOG_PATH = COMMUNITY_ROOT .. "\\auto_capture_monitor.csv"
 
 local function csv_escape(value)
