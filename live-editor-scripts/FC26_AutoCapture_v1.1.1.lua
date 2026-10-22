@@ -303,14 +303,18 @@ local function get_field(table_name, db_table, record, field_name, default_value
     end
 
     if value == nil then
-        -- Live Editor answers nil (and logs an error) for a field the table does not have: stop asking for it
-        UNAVAILABLE_FIELDS[key] = true
-        if not MISSING_FIELD_LOGGED[key] then
-            MISSING_FIELD_LOGGED[key] = true
-            log("Field unavailable: " .. key .. " (disabled for this export run)")
+        -- Live Editor answers nil (and logs an error) for a field the table does not have: stop asking for it. A field
+        -- that already gave a value (false below) is kept: one empty row does not make it missing.
+        if UNAVAILABLE_FIELDS[key] == nil then
+            UNAVAILABLE_FIELDS[key] = true
+            if not MISSING_FIELD_LOGGED[key] then
+                MISSING_FIELD_LOGGED[key] = true
+                log("Field unavailable: " .. key .. " (disabled for this export run)")
+            end
         end
         return default_value
     end
+    UNAVAILABLE_FIELDS[key] = false
     return value
 end
 

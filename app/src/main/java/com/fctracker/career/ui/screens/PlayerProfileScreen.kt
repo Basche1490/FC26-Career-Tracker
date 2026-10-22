@@ -126,8 +126,9 @@ fun PlayerProfileScreen(viewModel: MainViewModel, playerId: String, onBack: () -
         // Rating by season
         item {
             val history = p.ratingHistory.filter { it.season < view.season }.sortedBy { it.season }
-            // a first season starts the line at the rating he began it with
-            val start = p.startingOverall.takeIf { history.isEmpty() && it in 1..99 && it != p.overall }
+            // a first season starts the line at the rating he began it with (flat when it has not moved), so the
+            // chart is always a line, never a lone dot
+            val start = if (history.isEmpty()) p.startingOverall.takeIf { it in 1..99 } ?: p.overall else null
             val labels = history.map { SeasonView.seasonLabel(it.season).let { l -> l.substring(2) } } + listOfNotNull(start?.let { "Start" }) +
                 SeasonView.seasonLabel(view.season).substring(2)
             val values = history.map { it.overall } + listOfNotNull(start) + p.overall

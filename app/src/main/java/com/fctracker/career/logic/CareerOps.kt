@@ -4,6 +4,7 @@ import com.fctracker.career.AppState
 import com.fctracker.career.AwardEntry
 import com.fctracker.career.Fixture
 import com.fctracker.career.HistoricalSeason
+import com.fctracker.career.InjuryRecord
 import com.fctracker.career.LeagueTableData
 import com.fctracker.career.MatchResult
 import com.fctracker.career.Player
@@ -171,18 +172,31 @@ object CareerOps {
             )
         }).let { it.copy(activeInjuries = it.players.count { p -> p.isInjured }) }
 
+    /** "He is fit": off the list today (or on his return day, when that came first). */
     fun clearInjury(state: AppState, playerId: String): AppState =
-        state.copy(players = state.players.map { if (it.id == playerId) CareerReport.clearedInjury(it) else it }).let { it.copy(activeInjuries = it.players.count { p -> p.isInjured }) }
+        state.copy(players = state.players.map { if (it.id == playerId) CareerReport.clearedInjury(it, listOfNotNull(it.injuryReturnDate, today(state)).minOrNull()) else it }).let { it.copy(activeInjuries = it.players.count { p -> p.isInjured }) }
 
     /** League and cup matches played while he was out (counted from the matches logged). */
     fun matchesMissed(p: Player, matches: List<MatchResult>, today: String?): Int {
         val start = p.injuryStartDate ?: return 0
         val end = listOfNotNull(p.injuryReturnDate, today).minOrNull() ?: today ?: return 0
-        return matches.count { m ->
+        return matchesMissed(p, start, end, matches)
+    }
+
+    /** Matches from [start] to [end] (both included) that [p] did not play in. */
+    fun matchesMissed(p: Player, start: String, end: String, matches: List<MatchResult>): Int =
+        matches.count { m ->
             m.matchDate >= start && m.matchDate <= end && m.playerPerformances.none {
                 it.playerId == p.id || (p.gamePlayerId != null && it.playerId == p.gamePlayerId.toString()) || it.playerName.equals(p.name, true)
             }
         }
+
+    /** Injuries he got over in the [days] before [today], newest first. */
+    fun recentRecoveries(players: List<Player>, today: String?, days: Int = 45): List<Pair<Player, InjuryRecord>> {
+        val from = today?.let { Dates.plusDays(it, -days) }
+        return players.flatMap { p -> p.injuryHistory.map { p to it } }
+            .filter { (_, r) -> r.end != null && (from == null || r.end >= from) }
+            .sortedByDescending { it.second.end }
     }
 
     /** Fixtures still to come before the player is back (after [today], before his return day). */

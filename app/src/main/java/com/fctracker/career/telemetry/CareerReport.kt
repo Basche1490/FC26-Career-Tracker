@@ -7,6 +7,7 @@ import com.fctracker.career.CompetitionLeaders
 import com.fctracker.career.Fixture
 import com.fctracker.career.LeagueTableData
 import com.fctracker.career.NationCoefficient
+import com.fctracker.career.InjuryRecord
 import com.fctracker.career.Player
 import com.fctracker.career.PlayerSeasonStat
 import com.fctracker.career.Source
@@ -219,10 +220,11 @@ object CareerReport {
                         }
                         if (wasFit) newInjuries += p.displayName
                     } else if (p.isInjured && p.injurySource == Source.GAME && p.injuryFollowGame) {
-                        p = clearedInjury(p)
+                        p = clearedInjury(p, back)
                     }
                 } else if (injuriesKnown && p.isInjured && p.injurySource == Source.GAME && p.injuryFollowGame) {
-                    p = clearedInjury(p)      // the game no longer has him injured
+                    // the game no longer has him injured: fit by today at the latest
+                    p = clearedInjury(p, listOfNotNull(p.injuryReturnDate, careerDate).minOrNull())
                 }
                 if (p != before) { players[idx] = p; changed = true }
             }
@@ -324,8 +326,14 @@ object CareerReport {
         return Result(s, changed, newInjuries, newTrophies)
     }
 
-    fun clearedInjury(p: Player): Player = p.copy(
+    /**
+     * The player fit again, the injury kept in his history (fit on [end]; his return date when not given), so the injury
+     * screen still shows it under "Back from injury" with the matches it cost.
+     */
+    fun clearedInjury(p: Player, end: String? = null): Player = p.copy(
         isInjured = false, injuryName = null, injuryStartDate = null, injuryReturnDate = null, injuryGameReturnDate = null,
-        injurySource = null, injuryFollowGame = true, injuryNote = null
+        injurySource = null, injuryFollowGame = true, injuryNote = null,
+        injuryHistory = if (!p.isInjured) p.injuryHistory
+            else (p.injuryHistory + InjuryRecord(p.injuryName ?: "Injury", p.injuryStartDate, end ?: p.injuryReturnDate, p.injurySource)).takeLast(30)
     )
 }

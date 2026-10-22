@@ -142,6 +142,8 @@ data class Player(
     /** The return date the game gave (kept so the edit dialog can say "The game said about 31 Oct"). */
     val injuryGameReturnDate: String? = null,
     val injuryNote: String? = null,
+    /** Injuries he is over (newest last): the injury screen shows the recent ones with the matches they cost. */
+    val injuryHistory: List<InjuryRecord> = emptyList(),
     /** Matches still to miss through suspension (0 = not suspended) and the day it ends, from the game. */
     val suspendedGames: Int = 0,
     val suspensionEnd: String? = null,

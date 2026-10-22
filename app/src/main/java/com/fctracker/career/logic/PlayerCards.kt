@@ -215,9 +215,12 @@ object PlayerNames {
             val inner = m.groupValues[2].trim()
             commonOf(inner)?.let { return it }
             commonOf(first)?.let { return it }
-            // "Short (Full Name)": the part in brackets spells out the name in front of it
+            // "Short (Full Name)": the name in front is the one shown ("Leo Guerra (Leonardo Guerra Diaz)" is Leo Guerra)
+            // when the brackets hold a full name: one sharing a word with it, or of two words or more. "Jo (Captain)",
+            // typed that way, stays as it is.
             val shortWords = words(first)
-            if (shortWords.isNotEmpty() && words(inner).containsAll(shortWords)) return first
+            val innerWords = words(inner)
+            if (shortWords.isNotEmpty() && (innerWords.any { it in shortWords } || innerWords.size >= 2)) return first
             return n
         }
         return commonOf(n)?.takeIf { !it.equals(n, ignoreCase = true) } ?: n

@@ -203,6 +203,15 @@ data class PlayerNote(
     val date: String = ""
 )
 
+/** An injury that is over: what it was, the day it started and the day he was fit again. */
+data class InjuryRecord(
+    val name: String = "Injury",
+    val start: String? = null,
+    val end: String? = null,
+    /** "game" or "manual", as the injury was. */
+    val source: String? = null
+)
+
 /** A player's overall rating at the end of a season (or today, for the current one). */
 data class SeasonRating(
     val season: Int = 0,

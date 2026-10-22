@@ -157,9 +157,8 @@ object TelemetryProcessor {
 
                     "injury" -> {
                         val name = data.optString("playerName")
-                        val idx = squad.indexOfFirst {
-                            it.name.equals(name, ignoreCase = true) || it.displayName.equals(name, ignoreCase = true)
-                        }
+                        // by the game's id when the event has one, else by the name (short or full, accents ignored)
+                        val idx = findSquadPlayer(squad, data.optString("playerId").ifBlank { null }, name)?.let { hit -> squad.indexOf(hit) } ?: -1
                         if (events.none { it.title == evTitle && it.timestamp == timestamp }) {
                             events.add(LiveEvent(evTitle, evMessage, timestamp))
                             hasNew = true
@@ -618,7 +617,7 @@ object TelemetryProcessor {
                     averageRating = avg
                 )
                 if (player.isInjured && player.injuryReturnDate != null && matchDate >= player.injuryReturnDate) {
-                    base.copy(isInjured = false, injuryName = null, injuryStartDate = null, injuryReturnDate = null)
+                    CareerReport.clearedInjury(base, player.injuryReturnDate)
                 } else base
             }
         }.toMutableList()

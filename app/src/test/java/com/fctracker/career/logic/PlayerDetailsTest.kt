@@ -41,6 +41,8 @@ class PlayerDetailsTest {
         // without the database, "Short (Full Name)" still loses the part in brackets when it spells out the same name
         assertEquals("Marco Varela", PlayerLookup.NONE.shortName("Marco Varela (Marco Antonio Varela)"))
         assertEquals("Jo (Captain)", PlayerLookup.NONE.shortName("Jo (Captain)"))
+        assertEquals("Leo Guerra", PlayerNames.shown("Leo Guerra (Leonardo Guerra Diaz)"))
+        assertEquals("Pedri", PlayerNames.shown("Pedri (Pedro González López)"))
     }
 
     @Test fun regensAndDealsSavedTheLongWayAreShortened() {

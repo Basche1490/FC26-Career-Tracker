@@ -35,6 +35,7 @@ import com.fctracker.career.ui.screens.TransferFormModal
 import com.fctracker.career.ui.screens.TransfersScreen
 import com.fctracker.career.ui.screens.formationsMap
 import com.fctracker.career.ui.theme.FCTheme
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -59,6 +60,21 @@ class ScreenshotTest {
 
     private val out = File(System.getProperty("screenshots.dir") ?: "build/screenshots").apply { mkdirs() }
 
+    /**
+     * Pictures are not fetched: every test gets its own image loader that fails at once, so no screen waits on the
+     * network (a loader left over from an earlier test, with requests hanging on a CDN, kept the last tests of a run
+     * from ever going idle) and the screens show their stand-in pictures.
+     */
+    @Before fun offlineImages() {
+        val app = RuntimeEnvironment.getApplication()
+        val http = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { throw java.io.IOException("no network in the screenshot tests") }
+            .build()
+        coil.Coil.setImageLoader(
+            coil.ImageLoader.Builder(app).okHttpClient(http).components { add(coil.decode.SvgDecoder.Factory()) }.crossfade(false).allowHardware(false).build()
+        )
+    }
+
     // -- a small career ------------------------------------------------------------------------------------------------
 
     private val starters = listOf(
@@ -74,7 +90,8 @@ class ScreenshotTest {
             isInjured = true, injuryName = "Hamstring strain", injuryStartDate = "2028-10-01", injuryReturnDate = "2028-11-05", injurySource = "game",
             wageK = 22, squadRole = "Important", contractEnd = "2030-06-30"),
         Player(id = "st", name = "Leo Guerra", primaryPosition = "ST", overall = 77, number = 9, birthDate = "2004-03-03", nationality = "Argentina"),
-        Player(id = "rw", name = "Diego Ruiz", primaryPosition = "RW", overall = 72, number = 7, birthDate = "2002-12-12", nationality = "Mexico")
+        Player(id = "rw", name = "Diego Ruiz", primaryPosition = "RW", overall = 72, number = 7, birthDate = "2002-12-12", nationality = "Mexico",
+            injuryHistory = listOf(com.fctracker.career.InjuryRecord("Ankle sprain", "2028-09-10", "2028-10-05", "game")))
     )
 
     private fun squad(): List<Player> {
@@ -247,9 +264,9 @@ class ScreenshotTest {
         compose.onNodeWithText("Wages").performClick()
         shoot("12_wages")
         compose.onNodeWithText("Squad role").performClick()
-        compose.waitForIdle()
+        shoot("13a_wages_by_role")
         compose.onNodeWithText("Contract end").performClick()
-        compose.waitForIdle()
+        shoot("13b_wages_by_contract")
         compose.onNodeWithText("Highest wage").performClick()
         shoot("13_wages_after_sorting")
     }
@@ -263,6 +280,8 @@ class ScreenshotTest {
         shoot("15_injuries")
     }
 
+    // a taller window: the all-time squad list is at the bottom of a long page
+    @Config(qualifiers = "w400dp-h4000dp-xhdpi")
     @Test fun careerSummary() {
         val vm = viewModel()
         show { CareerSummaryScreen(vm, {}, {}) }

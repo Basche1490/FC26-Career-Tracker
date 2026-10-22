@@ -898,7 +898,7 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
             val competitive = !match.competition.contains("friendly", ignoreCase = true)
             val updatedPlayers = state.players.map { player ->
                 var p = if (player.isInjured && player.injuryReturnDate != null && match.matchDate >= player.injuryReturnDate) {
-                    player.copy(isInjured = false, injuryName = null, injuryStartDate = null, injuryReturnDate = null)
+                    com.fctracker.career.telemetry.CareerReport.clearedInjury(player, player.injuryReturnDate)
                 } else {
                     player
                 }

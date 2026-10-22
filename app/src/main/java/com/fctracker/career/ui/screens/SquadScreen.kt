@@ -415,6 +415,35 @@ private fun InjuriesList(viewModel: MainViewModel, state: AppState, view: Season
         }
         item { Muted("Tap an injury to change it, for example when he needs longer than the game says. Matches missed counts the league and cup matches played while he was out; \"more to miss\" counts the fixtures before he is back.", 11.sp) }
         if (!console) item { Muted("The game keeps every player's latest injury, the day it happened and how many days it lasts; a player stays on this list until those days have run out.", 11.sp) }
+        // injuries that are over: a player the game has just declared fit still shows here, with what the injury cost
+        val recovered = if (view.isArchived) emptyList() else CareerOps.recentRecoveries(view.players, today)
+        if (recovered.isNotEmpty()) {
+            item { SectionHeader("Back from injury (${recovered.size})", icon = Icons.Default.Healing) }
+            item {
+                RowsCard {
+                    recovered.forEachIndexed { i, (p, r) ->
+                        if (i > 0) RowDivider()
+                        val missed = if (r.start != null && r.end != null) CareerOps.matchesMissed(p, r.start, r.end, view.matches) else 0
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            NumberedHeadshot(p.headshotUrl, p.displayName, p.number, 42.dp)
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    FcText(p.displayName, 15.sp, FontWeight.SemiBold, maxLines = 1)
+                                    Tag(if (p.isInjured) "Injured again" else "Fit", if (p.isInjured) Tone.BAD else Tone.GOOD)
+                                }
+                                Muted(r.name, 12.sp)
+                                Mono(listOfNotNull(r.start?.let { "Out ${Dates.dayMonth(it)}" }, r.end?.let { "back ${Dates.dayMonth(it)}" }).joinToString(" · "), 11.sp, c.muted, FontWeight.Normal)
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                Figure("$missed", 20.sp, c.muted, FontWeight.SemiBold)
+                                Muted(if (missed == 1) "match missed" else "matches missed", 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+            item { Muted("Injuries players got over in the last 45 days.", 11.sp) }
+        }
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 SectionHeader("Suspensions (${suspended.size})", Modifier.weight(1f), icon = Icons.Default.Warning)

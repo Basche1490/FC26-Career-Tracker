@@ -67,7 +67,16 @@ class CareerReportTest {
 
         // With "Follow the game" on, the game clears him once he is fit.
         val following = CareerReport.apply(r.state, JSONObject("""{"careerDate":"2026-11-01","players":[{"playerId":222,"name":"Jonah Pike"}]}"""))
-        assertFalse(following.state.players.first { it.id == "p2" }.isInjured)
+        val fit = following.state.players.first { it.id == "p2" }
+        assertFalse(fit.isInjured)
+        // ...and the injury stays on the injury screen under "Back from injury", fit on his return day
+        assertEquals(listOf(com.fctracker.career.InjuryRecord("Hamstring strain", "2026-10-10", "2026-10-31", Source.GAME)), fit.injuryHistory)
+        assertEquals(listOf("p2"), CareerOps.recentRecoveries(following.state.players, "2026-11-01").map { it.first.id })
+        assertTrue(CareerOps.recentRecoveries(following.state.players, "2027-01-30").isEmpty())
+
+        // declared fit before his return day: fit on the day of the report
+        val early = CareerReport.apply(r.state, JSONObject("""{"careerDate":"2026-10-20","players":[{"playerId":222,"name":"Jonah Pike"}]}"""))
+        assertEquals("2026-10-20", early.state.players.first { it.id == "p2" }.injuryHistory.single().end)
     }
 
     @Test fun aManualInjuryIsNeverClearedByTheGame() {

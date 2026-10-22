@@ -4707,11 +4707,13 @@ do
                     local r = t:GetFirstRecord()
                     while r and r > 0 do
                         local rec = r
+                        -- a field that has never given a value is one the game does not have: it is not read again
+                        -- (the Live Editor logs an error for every try). Once it gave one, an empty row does not count.
                         local function get(f)
-                            if missing[f] then return nil end
+                            if missing[f] == true then return nil end
                             local ok, v = pcall(function() return t:GetRecordFieldValue(rec, f) end)
-                            if ok and v ~= nil then return v end
-                            missing[f] = true
+                            if ok and v ~= nil then missing[f] = false return v end
+                            if missing[f] == nil then missing[f] = true end
                             return nil
                         end
                         if wanted(get) then
