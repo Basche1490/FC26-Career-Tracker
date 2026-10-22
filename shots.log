@@ -1,0 +1,60 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.3.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+Calculating task graph as no cached configuration is available for tasks: :app:testDebugUnitTest
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:javaPreCompileDebug FROM-CACHE
+> Task :app:generateDebugResources FROM-CACHE
+> Task :app:packageDebugResources FROM-CACHE
+> Task :app:mapDebugSourceSetPaths
+> Task :app:createDebugCompatibleScreenManifests
+> Task :app:extractDeepLinksDebug FROM-CACHE
+> Task :app:processDebugNavigationResources FROM-CACHE
+> Task :app:checkDebugAarMetadata
+> Task :app:compileDebugNavigationResources FROM-CACHE
+> Task :app:javaPreCompileDebugUnitTest FROM-CACHE
+> Task :app:mergeDebugResources FROM-CACHE
+> Task :app:processDebugMainManifest
+> Task :app:processDebugManifest
+> Task :app:parseDebugLocalResources FROM-CACHE
+> Task :app:generateDebugRFile FROM-CACHE
+> Task :app:processDebugManifestForPackage
+> Task :app:mergeDebugAssets
+> Task :app:processDebugUnitTestManifest
+> Task :app:processDebugResources
+> Task :app:packageDebugUnitTestForUnitTest
+> Task :app:generateDebugUnitTestConfig
+> Task :app:compileDebugKotlin
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/MainViewModel.kt:690:21 Condition is always 'true'.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/recap/RecapScreen.kt:237:72 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/AssistantScreen.kt:135:52 'val Icons.Filled.StickyNote2: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.StickyNote2.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/CareerSummaryScreen.kt:224:82 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/HomeScreen.kt:220:117 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/HomeScreen.kt:346:109 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/HomeScreen.kt:587:108 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/PlayerProfileScreen.kt:137:105 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/PlayerProfileScreen.kt:156:108 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/PlayerProfileScreen.kt:178:129 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/PlayerProfileScreen.kt:190:65 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/PlayerProfileScreen.kt:215:99 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/SeasonSummaryScreen.kt:187:69 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/SeasonSummaryScreen.kt:202:76 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/SeasonSummaryScreen.kt:639:137 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/SettingsScreen.kt:237:34 'val Icons.Filled.ShowChart: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ShowChart.
+w: file:///home/runner/work/FC26-Career-Tracker/FC26-Career-Tracker/app/src/main/java/com/fctracker/career/ui/screens/SetupGuideScreen.kt:145:35 Condition is always 'true'.
+
+> Task :app:compileDebugJavaWithJavac NO-SOURCE
+> Task :app:processDebugJavaRes
+> Task :app:bundleDebugClassesToRuntimeJar
+> Task :app:bundleDebugClassesToCompileJar
+> Task :app:compileDebugUnitTestKotlin
+> Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :app:processDebugUnitTestJavaRes
+> Task :app:testDebugUnitTest
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run-1792697253091.json
+
+BUILD SUCCESSFUL in 1m 18s
+28 actionable tasks: 18 executed, 10 from cache
+Configuration cache entry stored.

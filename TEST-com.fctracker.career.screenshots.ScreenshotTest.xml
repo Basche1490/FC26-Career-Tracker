@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.fctracker.career.screenshots.ScreenshotTest" tests="14" skipped="0" failures="0" errors="0" timestamp="2026-10-22T19:28:33.307Z" hostname="runnervmdkmh8" time="13.8">
+  <properties/>
+  <testcase name="careerSummary" classname="com.fctracker.career.screenshots.ScreenshotTest" time="8.218"/>
+  <testcase name="formationAndInjuries" classname="com.fctracker.career.screenshots.ScreenshotTest" time="1.412"/>
+  <testcase name="matchDetails" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.459"/>
+  <testcase name="lineup" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.287"/>
+  <testcase name="profileOfALoanPlayer" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.329"/>
+  <testcase name="logDealOut" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.311"/>
+  <testcase name="wagesAfterSorting" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.93"/>
+  <testcase name="squadRoster" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.311"/>
+  <testcase name="matches" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.349"/>
+  <testcase name="transfers" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.277"/>
+  <testcase name="headToHead" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.207"/>
+  <testcase name="profileOfAPromotedPlayer" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.249"/>
+  <testcase name="editPlayer" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.233"/>
+  <testcase name="logMatchNew" classname="com.fctracker.career.screenshots.ScreenshotTest" time="0.226"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
