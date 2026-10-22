@@ -18,6 +18,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -385,7 +386,7 @@ fun ScoutNetworkTab(viewModel: com.fctracker.career.MainViewModel, state: AppSta
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.weight(1f).fillMaxWidth()
                 ) {
-                    items(state.scoutReports, key = { it.id }) { report ->
+                    itemsIndexed(state.scoutReports, key = { i, r -> "${r.id}#$i" }) { _, report ->
                         DarkCard {
                             Column(modifier = Modifier.fillMaxWidth()) {
                                 Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {

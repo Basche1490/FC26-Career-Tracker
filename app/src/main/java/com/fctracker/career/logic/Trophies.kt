@@ -35,6 +35,15 @@ object Trophies {
 
     data class Added(val state: AppState, val names: List<String>)
 
+    /** True when [name] carries [startYear]'s season (or no season at all, so it is shown with the current one). */
+    fun inSeason(name: String, startYear: Int): Boolean = sameSeason(name, startYear) || !SEASON.containsMatchIn(name)
+
+    /** Removes a trophy from the list; a trophy that came from the game is remembered so it is not added again. */
+    fun remove(state: AppState, name: String): AppState = state.copy(
+        teamTrophies = state.teamTrophies.filterNot { it.name == name },
+        dismissedTrophies = (state.dismissedTrophies + name).distinct().takeLast(50)
+    )
+
     /** Adds the trophies in [won] (competition, season start year) that are not on the list yet. */
     fun addFromGame(state: AppState, won: List<Pair<String, Int>>): Added {
         var s = state
@@ -42,6 +51,7 @@ object Trophies {
         for ((competition, year) in won) {
             if (competition.isBlank() || year < 1900) continue
             val trophy = name(competition, year)
+            if (has(s.dismissedTrophies, competition, year)) continue      // the person removed it
             if (year >= s.startYear) {
                 if (!has(s.teamTrophies.map { it.name }, competition, year)) {
                     s = s.copy(teamTrophies = s.teamTrophies + TeamTrophy(name = trophy))

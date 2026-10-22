@@ -102,7 +102,7 @@ fun MilestonesScreen(viewModel: MainViewModel, onBack: () -> Unit) {
             item { FcLabel("ON YOUR PHONE") }
             if (list.isEmpty()) item {
                 AlertPreview("Marco Varela: 150 matches", "150th appearance for ${state.clubName}, in the 3–1 win against Leicester City.", "example")
-            } else list.take(3).forEach { m -> item(key = "alert-${m.key}") { AlertPreview(m.title, m.detail, Dates.dayMonth(m.date)) } }
+            } else list.take(3).forEachIndexed { i, m -> item(key = "alert-${m.key}-$i") { AlertPreview(m.title, m.detail, Dates.dayMonth(m.date)) } }
         }
         item { SectionHeader(if (view.isArchived) view.label else "This season", icon = Icons.Default.EmojiEvents) }
         if (list.isEmpty()) item { EmptyCard("No milestones ${if (view.isArchived) "that season" else "yet this season"}. They are noticed by themselves from your matches and the game’s numbers.") }

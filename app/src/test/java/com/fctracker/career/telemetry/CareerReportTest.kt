@@ -138,6 +138,19 @@ class CareerReportTest {
         assertEquals(listOf("FA Cup 2026/27", "FA Cup 2027/28"), next.state.teamTrophies.map { it.name })
     }
 
+    @Test fun aRemovedTrophyIsNotAddedAgain() {
+        val json = """{"trophies":[{"competition":"FA Cup","startYear":2026}]}"""
+        val r = report(json)
+        val removed = com.fctracker.career.logic.Trophies.remove(r.state, "FA Cup 2026/27")
+        assertTrue(removed.teamTrophies.isEmpty())
+        val again = CareerReport.apply(removed, JSONObject(json))
+        assertTrue(again.state.teamTrophies.isEmpty())
+        assertFalse(again.changed)
+        assertTrue(com.fctracker.career.logic.Trophies.inSeason("FA Cup 2026/27", 2026))
+        assertFalse(com.fctracker.career.logic.Trophies.inSeason("FA Cup 2025/26", 2026))
+        assertTrue(com.fctracker.career.logic.Trophies.inSeason("Fans' Cup", 2026))
+    }
+
     @Test fun aTrophyForASeasonAlreadyEndedGoesToThatSeason() {
         val ended = CareerOps.endSeason(base.copy(careerDate = "2027-05-25"))
         assertEquals(2027, ended.startYear)

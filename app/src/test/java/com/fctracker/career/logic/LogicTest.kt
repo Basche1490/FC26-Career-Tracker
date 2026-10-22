@@ -288,8 +288,11 @@ class StoryAndRecapTest {
             scoutReports = listOf(com.fctracker.career.ScoutReport(playerName = "Tom Scout", position = "ST", age = "19", ratingRange = "65-70", potentialRange = "80-85", value = "€2M", scoutName = "Ana", recommendation = "Sign him")),
             gameTeamSheet = com.fctracker.career.TeamSheet(formation = "4-3-3", starting = listOf(111), positions = mapOf("111" to "ST")),
             leagueTables = state.leagueTables + LeagueTableData(league = "EFL League One", rows = listOf(TableRow("Wigan Athletic", 14, 9, 3, 2, 25, 10, 30))),
-            historicalSeasons = listOf(past))
+            historicalSeasons = listOf(past),
+            players = listOf(varela.copy(form = "Excellent", attributes = mapOf("Finishing" to 84, "Composure" to 80), seasonStartAttributes = mapOf("Finishing" to 81, "Composure" to 80)), pike),
+            teamTrophies = listOf(com.fctracker.career.TeamTrophy(name = "FA Cup 2026/27")))
         val all = AiContext.build(full)
+        listOf("form: Excellent", "best attributes: Finishing 84, Composure 80", "changed this season: Finishing +3", "FA Cup 2026/27").forEach { assertTrue(it, all.contains(it)) }
         listOf("Tactical vision: Gegenpressing", "Attack Expert", "== SCOUT REPORTS", "Tom Scout", "Team sheet picked in the game (4-3-3)", "Other league EFL League One: 1. Wigan Athletic",
             "== PAST SEASONS ==", "Win promotion (Completed)", "== MATCHES 2025/26 (League One) ==").forEach { assertTrue(it, all.contains(it)) }
     }

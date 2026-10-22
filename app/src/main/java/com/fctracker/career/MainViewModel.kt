@@ -512,7 +512,18 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
     }
 
         fun addTeamTrophy(trophy: TeamTrophy) {
-        _state.update { it.copy(teamTrophies = it.teamTrophies + trophy) }
+        _state.update { s ->
+            s.copy(teamTrophies = s.teamTrophies + trophy, dismissedTrophies = s.dismissedTrophies.filterNot { it.equals(trophy.name, true) })
+        }
+        persistData()
+    }
+    fun removeTeamTrophy(name: String) {
+        _state.update { com.fctracker.career.logic.Trophies.remove(it, name) }
+        persistData()
+    }
+    fun removePlayerAward(id: String) {
+        _state.update { s -> s.copy(playerAwards = s.playerAwards.filterNot { it.id == id }) }
+        persistData()
     }
     fun addPlayerAward(award: PlayerAward) {
         _state.update { it.copy(playerAwards = it.playerAwards + award) }
@@ -1179,6 +1190,10 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
     fun addWorldWinner(w: WorldWinner) { _state.update { CareerOps.addWorldWinner(it, w) }; persistData() }
     fun deleteWorldWinner(season: Int, competition: String) { _state.update { CareerOps.deleteWorldWinner(it, season, competition) }; persistData() }
     fun addWorldTopScorer(t: WorldTopScorer) { _state.update { CareerOps.addWorldTopScorer(it, t) }; persistData() }
+    fun removeWorldTopScorer(season: Int, region: String) {
+        _state.update { s -> s.copy(worldTopScorers = s.worldTopScorers.filterNot { it.season == season && it.region.equals(region, true) }) }
+        persistData()
+    }
 
     fun setOwnCoefficient(season: Int, points: Double) { edit { CareerOps.setOwnCoefficient(it, season, points) }; persistData() }
     fun addCoefficientClub(c: ClubCoefficient) {

@@ -177,8 +177,8 @@ fun CareerSummaryScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, openP
     FcPage(header = { FcTopBar("Career Summary", sub = "${state.clubName} · ${state.managerName}", onNav = onMenuClick) }) {
         item { SectionHeader("Season-by-season timeline", sub = if (state.historicalSeasons.isNotEmpty()) "Tap a season to open it (read-only)" else null, icon = Icons.Default.History) }
         if (state.historicalSeasons.isEmpty()) item { Muted("No completed seasons yet. Completed seasons and their top transfers will appear here.", 13.sp) }
-        state.historicalSeasons.sortedBy { it.year }.forEach { h ->
-            item(key = "season-${h.year}") {
+        state.historicalSeasons.sortedBy { it.year }.forEachIndexed { i, h ->
+            item(key = "season-${h.year}-$i") {
                 val gold = h.finalPosition == 1 || h.trophies.isNotEmpty()
                 FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp, onClick = { viewModel.setViewingSeasonYear(h.year); nav("dashboard") }) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

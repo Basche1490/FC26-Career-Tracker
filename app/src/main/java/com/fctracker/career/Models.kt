@@ -518,5 +518,7 @@ data class AppState(
     val milestonesPrimed: Boolean = false,
     /** Squad · Tactics: the club's tactical vision and the coaches hired per department (department -> coach level). */
     val tacticalVision: String = "Standard",
+    /** Trophies the person removed: the game's report does not add them again. */
+    val dismissedTrophies: List<String> = emptyList(),
     val coaches: Map<String, String> = emptyMap()
 )

@@ -743,9 +743,13 @@ private fun LazyListScope.awardsTab(viewModel: MainViewModel, state: AppState, v
 private fun AwardsTabContent(viewModel: MainViewModel, state: AppState, view: SeasonView) {
     var assigning by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<AwardEntry?>(null) }
+    var removingTrophy by remember { mutableStateOf<String?>(null) }
+    var removingAward by remember { mutableStateOf<com.fctracker.career.PlayerAward?>(null) }
     val game = view.awards.filter { it.source == Source.GAME }
     val own = view.awards.filter { it.source != Source.GAME }
-    val trophies = if (view.isArchived) view.archived?.trophies.orEmpty() else state.teamTrophies.map { it.name }
+    // the trophy list holds the whole career: this season's tab shows this season's (and any without a season in the name)
+    val trophies = if (view.isArchived) view.archived?.trophies.orEmpty()
+        else state.teamTrophies.map { it.name }.filter { com.fctracker.career.logic.Trophies.inSeason(it, state.startYear) }
     val totals = SeasonFacts.allTotals(view.players, view.matches, view.squadStats)
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
@@ -758,13 +762,18 @@ private fun AwardsTabContent(viewModel: MainViewModel, state: AppState, view: Se
         FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
             SectionHeader("Your own awards & trophies", icon = Icons.Default.Star)
             if (trophies.isEmpty() && own.isEmpty() && (view.isArchived || state.playerAwards.isEmpty())) Muted("None yet.", 12.sp)
-            trophies.forEach { AwardRow(it, "Team trophy", "Trophy", Tone.WARN, Tone.WARN) }
+            trophies.forEach { t ->
+                Box(Modifier.clickable(enabled = !view.isArchived) { removingTrophy = t }) { AwardRow(t, "Team trophy", "Trophy", Tone.WARN, Tone.WARN) }
+            }
             own.forEach { a ->
                 Box(Modifier.clickable(enabled = !view.isArchived) { deleting = a }) { AwardRow(a.title, listOf(a.recipient, a.period).filter { it.isNotBlank() }.joinToString(" · "), "Yours", Tone.MUTED, Tone.MUTED) }
             }
             if (!view.isArchived) state.playerAwards.forEach { a ->
-                AwardRow(a.name, "${state.players.firstOrNull { it.id == a.playerId }?.displayName ?: ""}${if (a.monthYear.isNotBlank()) " · ${a.monthYear}" else ""}", "Yours", Tone.MUTED, Tone.MUTED)
+                Box(Modifier.clickable { removingAward = a }) {
+                    AwardRow(a.name, "${state.players.firstOrNull { it.id == a.playerId }?.displayName ?: ""}${if (a.monthYear.isNotBlank()) " · ${a.monthYear}" else ""}", "Yours", Tone.MUTED, Tone.MUTED)
+                }
             }
+            if (!view.isArchived && (trophies.isNotEmpty() || own.isNotEmpty())) Muted("Tap a trophy or award to remove it.", 11.sp)
             if (!view.isArchived) FcButton("Assign awards & honors", { assigning = true }, kind = ButtonKind.SECONDARY, icon = Icons.Default.EmojiEvents, full = true)
         }
         SectionHeader("Season milestones & record holders", icon = Icons.Default.TrackChanges)
@@ -775,6 +784,10 @@ private fun AwardsTabContent(viewModel: MainViewModel, state: AppState, view: Se
     }
     if (assigning) AssignAwardsDialog(viewModel, state, onDismiss = { assigning = false })
     deleting?.let { a -> ConfirmDialog("Remove this award?", "${a.title} · ${a.recipient}", "Remove", { viewModel.deleteAward(a.id) }, { deleting = null }) }
+    removingTrophy?.let { t ->
+        ConfirmDialog("Remove this trophy?", "$t. If it came from the game, it is not added again.", "Remove", { viewModel.removeTeamTrophy(t) }, { removingTrophy = null })
+    }
+    removingAward?.let { a -> ConfirmDialog("Remove this award?", a.name, "Remove", { viewModel.removePlayerAward(a.id) }, { removingAward = null }) }
 }
 
 @Composable
@@ -841,11 +854,16 @@ private fun EuropeTabContent(viewModel: MainViewModel, state: AppState, view: Se
     val c = FcTheme.colors
     var addPoints by remember { mutableStateOf(false) }
     var addClub by remember { mutableStateOf(false) }
+    var removing by remember { mutableStateOf<ClubCoefficient?>(null) }
     val coefficients = view.coefficients.sortedBy { if (it.rank > 0) it.rank else Int.MAX_VALUE }
     val mine = coefficients.firstOrNull { it.isUser || it.club.equals(state.clubName, true) }
     val ownTotal = CareerOps.ownCoefficientTotal(state)
     val top = coefficients.filter { it.rank in 1..10 }
     val countryClubs = coefficients.filter { it.rank > 10 && it.country.equals(state.country, true) && it !== mine }
+    // clubs added by hand without a rank, or from another country further down: still shown
+    val others = coefficients.filter { it !== mine && it !in top && it !in countryClubs }
+    val editable = console && !view.isArchived
+    val tap: (ClubCoefficient) -> (() -> Unit)? = { r -> if (editable) ({ removing = r }) else null }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Muted(if (console) "The European club ranking: points from European matches over the last five seasons. On console you add your club's points and the clubs you want to compare with." else "Club coefficients from your game: points from European matches over the last five seasons. It updates after every European round.", 12.sp)
         if (coefficients.isEmpty() && !console) EmptyCard("The ranking arrives from your game with the next report from the PC.")
@@ -856,13 +874,18 @@ private fun EuropeTabContent(viewModel: MainViewModel, state: AppState, view: Se
                     listOf("#", "CLUB", "SEASON", "5 YEARS").forEachIndexed { i, h -> FcLabel(h, Modifier.weight(w[i]), size = 10.sp) }
                 }
                 HRule()
-                top.forEach { CoefRow(it, it === mine, w) }
+                top.forEach { CoefRow(it, it === mine, w, tap(it)) }
                 if (countryClubs.isNotEmpty()) {
                     Muted("Other clubs from ${state.country}", 11.sp, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     HRule()
-                    countryClubs.forEach { CoefRow(it, false, w) }
+                    countryClubs.forEach { CoefRow(it, false, w, tap(it)) }
                 }
-                if (mine != null && mine.rank > 10) CoefRow(mine, true, w)
+                if (others.isNotEmpty()) {
+                    Muted(if (console) "Clubs you compare with" else "Other clubs", 11.sp, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                    HRule()
+                    others.forEach { CoefRow(it, false, w, tap(it)) }
+                }
+                if (mine != null && (mine.rank > 10 || mine.rank <= 0)) CoefRow(mine, true, w, tap(mine))
                 if (mine == null) {
                     val ownSeason = state.ownCoefficientPoints[state.startYear.toString()] ?: 0.0
                     CoefRow(ClubCoefficient(0, "${state.clubName}${if (ownTotal <= 0) " · not ranked" else ""}", state.country, ownSeason, ownTotal, true), true, w)
@@ -880,10 +903,11 @@ private fun EuropeTabContent(viewModel: MainViewModel, state: AppState, view: Se
                 KeyValue("Points over five seasons", String.format(java.util.Locale.US, "%.3f", mine?.total ?: ownTotal))
                 state.ownCoefficientPoints.entries.sortedBy { it.key }.forEach { (y, p) -> KeyValue(SeasonView.seasonLabel(y.toIntOrNull() ?: 0), String.format(java.util.Locale.US, "%.3f", p)) }
             }
-            if (console && !view.isArchived) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (editable) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FcButton("Add your points", { addPoints = true }, kind = ButtonKind.SECONDARY, icon = Icons.Default.Add, small = true)
                 FcButton("Add a club", { addClub = true }, kind = ButtonKind.GHOST, icon = Icons.Default.Add, small = true)
             }
+            if (editable && coefficients.isNotEmpty()) Muted("Tap a club in the table to remove it.", 11.sp)
         }
         if (view.nationCoefficients.isNotEmpty()) {
             val nations = view.nationCoefficients.sortedByDescending { it.points }.take(6)
@@ -928,12 +952,14 @@ private fun EuropeTabContent(viewModel: MainViewModel, state: AppState, view: Se
             FieldPair({ m -> FcNumberField("This season", season, { season = it }, m, decimal = true) }, { m -> FcNumberField("5 years", total, { total = it }, m, decimal = true) })
         }
     }
+    removing?.let { r -> ConfirmDialog("Remove ${r.club}?", "It leaves this ranking. You can add it again with Add a club.", "Remove", { viewModel.removeCoefficientClub(r.club) }, { removing = null }) }
 }
 
 @Composable
-private fun CoefRow(r: ClubCoefficient, me: Boolean, w: List<Float>) {
+private fun CoefRow(r: ClubCoefficient, me: Boolean, w: List<Float>, onClick: (() -> Unit)? = null) {
     val c = FcTheme.colors
-    Row(Modifier.fillMaxWidth().background(if (me) c.accentBg else Color.Transparent).padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().background(if (me) c.accentBg else Color.Transparent).let { if (onClick != null) it.clickable(onClick = onClick) else it }
+        .padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
         Mono(if (r.rank > 0) "${r.rank}" else "–", 13.sp, c.muted, FontWeight.Normal, Modifier.weight(w[0]))
         Row(Modifier.weight(w[1]), verticalAlignment = Alignment.CenterVertically) {
             FcText(r.club, 13.sp, if (me) FontWeight.Bold else FontWeight.Medium, maxLines = 1, modifier = Modifier.weight(1f, fill = false))

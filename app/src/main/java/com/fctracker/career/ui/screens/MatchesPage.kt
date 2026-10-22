@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -166,7 +167,7 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
             }
             list.groupBy { Dates.monthYear(it.date) }.forEach { (month, fixtures) ->
                 item { FcLabel(month.ifBlank { "No date" }) }
-                items(fixtures, key = { it.id }) { f ->
+                itemsIndexed(fixtures, key = { i, f -> "$month|${f.id}#$i" }) { _, f ->
                     FixtureRow(f, table, onClick = { if (f.source != Source.GAME || console) fixtureDialog = f })
                 }
             }
@@ -213,7 +214,7 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
                 else FcButton("Clear filters", { result = ResultFilter.ALL; competition = MatchInsights.ALL_COMPETITIONS }, kind = ButtonKind.SECONDARY, small = true)
             }
         }
-        items(visible, key = { it.id }) { m ->
+        itemsIndexed(visible, key = { i, m -> "${m.id}#$i" }) { _, m ->
             val open = expandedId == m.id || (expandedId == null && m.id == visible.firstOrNull()?.id)
             SwipeRow(enabled = !view.isArchived, onEdit = { editMatch = m; showForm = true }, onDelete = { deleteMatch = m }) {
                 MatchTimelineRow(

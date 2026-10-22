@@ -154,7 +154,9 @@ fun WorldScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
     editing?.let { e ->
         WinnerDialog(state, e, e.season, onDismiss = { editing = null }, onSave = { w, scorer ->
             if (!w.competition.equals(e.competition, true)) viewModel.deleteWorldWinner(e.season, e.competition)
-            viewModel.addWorldWinner(w); scorer?.let { viewModel.addWorldTopScorer(it) }; editing = null
+            viewModel.addWorldWinner(w)
+            if (scorer != null) viewModel.addWorldTopScorer(scorer) else viewModel.removeWorldTopScorer(w.season, w.region)   // the field was emptied
+            editing = null
         }, onDelete = { viewModel.deleteWorldWinner(e.season, e.competition); editing = null })
     }
 }

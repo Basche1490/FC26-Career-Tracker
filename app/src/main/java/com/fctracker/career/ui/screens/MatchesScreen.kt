@@ -13,6 +13,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -797,7 +798,7 @@ fun MatchFormModal(viewModel: MainViewModel, state: AppState, initialMatch: Matc
                         }
                         Spacer(Modifier.height(12.dp))
                         LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(eligibleSquadPlayers, key = { it.id }) { p ->
+                            itemsIndexed(eligibleSquadPlayers, key = { i, p -> "${p.id}#$i" }) { _, p ->
                                 val isSelected = performances.containsKey(p.id)
                                 val rowAlpha = if (isSelected) 0.42f else 1.0f
                                 Row(

@@ -2616,6 +2616,43 @@ do
         g.close()
     end
 
+    -- J. the game marks a competition as won for the club (career_competitionprogress)
+    do
+        local function latest_career(vfs)
+            local latest, latest_name
+            for path, text in pairs(vfs) do
+                if path:find("/outbox/", 1, true) and text:find('"dataType": "career"', 1, true) and (not latest_name or path > latest_name) then
+                    latest, latest_name = json_decode(text), path
+                end
+            end
+            return latest
+        end
+        local g = play({ db_extra = function(db)
+            db.career_competitionprogress = {
+                { teamid = MANAGED, compobjid = 1856, compshortname = "FAC", season = 2028, hasteamwon = 1 },
+                { teamid = MANAGED, compobjid = 779, compshortname = "CHA", season = 2028, hasteamwon = 0 },
+                { teamid = 50, compobjid = 585, compshortname = "EFL", season = 2028, hasteamwon = 1 } }       -- another club's
+        end })
+        g.set(7, { id = 7, date = 20290215, h = sidx(MANAGED), a = sidx(106), hs = 3, as = 0, done = true, comp = 1856 })
+        _G.GetCurrentDate = function() return { year = 2029, month = 3, day = 1 } end
+        g.tick(50)
+        local r = latest_career(g.vfs) or {}
+        local tr = r.trophies or {}
+        check(#tr == 1 and tr[1].competition == "FA Cup" and tr[1].season == "2028/29", "a cup the game marks as won is a trophy, for the season of its last match",
+            tr[1] and (tr[1].competition .. " " .. tr[1].season))
+        g.close()
+
+        g = play({ db_extra = function(db)
+            db.career_competitionprogress = {
+                { teamid = MANAGED, compobjid = 1856, compshortname = "FAC", season = 2027, hasteamwon = 1 },      -- last season's
+                { teamid = MANAGED, compobjid = 1856, compshortname = "FAC", season = 2028, hasteamwon = 0 } }
+        end })
+        g.tick(50)
+        r = latest_career(g.vfs) or {}
+        check(r.trophies == nil, "a win kept from an earlier season is not counted again")
+        g.close()
+    end
+
     -- E. the app's "Re-send last match" reaches the script through resend_request.json
     do
         local g = play({ exporter = false })

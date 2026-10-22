@@ -116,7 +116,13 @@ $modeLine
             val stats = t?.let { "${it.appearances}, ${it.goals}, ${it.assists}, ${if (it.averageRating > 0) "%.1f".format(it.averageRating) else "-"}, ${it.motm}, ${it.cleanSheets}, ${it.yellowCards}Y ${it.redCards}R" } ?: "-"
             val regen = if (p.isRegen) " · regen${p.regenOriginalName?.let { " (based on $it)" } ?: ""}" else ""
             val bonus = p.bonus?.let { " · bonus: $it" } ?: ""
-            line("${p.displayName} | ${if (p.number > 0) p.number else "-"} | $pos | ${p.age} | ${p.overall} (${p.startingOverall}) / ${p.potential} | ${money(cur, p.valueM)} | $cur${p.wageK}K | $contract | ${p.squadRole ?: "-"} | ${p.status}$loan$injury$susp$xi$regen$bonus | $stats$history | ${notesFor.ifBlank { "-" }}")
+            val form = p.form.takeIf { it.isNotBlank() }?.let { " · form: $it" } ?: ""
+            // the game's attributes: the best ones, and what changed since the start of the season
+            val best = p.attributes.entries.sortedByDescending { it.value }.take(5).joinToString(", ") { "${it.key} ${it.value}" }.takeIf { it.isNotBlank() }?.let { " · best attributes: $it" } ?: ""
+            val grown = p.attributes.mapNotNull { (k, v) -> p.seasonStartAttributes[k]?.let { k to v - it } }.filter { it.second != 0 }
+                .sortedByDescending { kotlin.math.abs(it.second) }.take(4).joinToString(", ") { "${it.first} ${if (it.second > 0) "+" else ""}${it.second}" }
+                .takeIf { it.isNotBlank() }?.let { " · changed this season: $it" } ?: ""
+            line("${p.displayName} | ${if (p.number > 0) p.number else "-"} | $pos | ${p.age} | ${p.overall} (${p.startingOverall}) / ${p.potential} | ${money(cur, p.valueM)} | $cur${p.wageK}K | $contract | ${p.squadRole ?: "-"} | ${p.status}$loan$injury$susp$xi$regen$bonus$form$best$grown | $stats$history | ${notesFor.ifBlank { "-" }}")
         }
         val xi = state.players.filter { it.isStartingXI && isActive(it) }
         if (xi.isNotEmpty()) line("Starting XI (${state.activeFormation}): ${xi.joinToString(", ") { "${it.displayName} (${it.primaryPosition})" }}")

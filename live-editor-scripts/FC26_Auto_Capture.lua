@@ -4500,7 +4500,8 @@ end
 -- minutes, and soon after a match or a transfer; sent only when something changed.
 -- Tables it reads (all opened before by the table census without trouble): leagueteamlinks, teamplayerlinks,
 -- career_playercontract, career_playerlastgrowth, playersuspensions, players, teams, teamstadiumlinks, stadiums,
--- clubcoefficients, competition. It never opens "transfers" or "scenarioevents" (those closed the game).
+-- clubcoefficients, competition, career_competitionprogress. It never opens "transfers" or "scenarioevents" (those
+-- closed the game).
 -- ---------------------------------------------------------------------------------------------------------------------
 local check_career_report
 do
@@ -4864,16 +4865,42 @@ do
             if cname ~= "" and cname ~= "INVALID" and holder > 0 and holder < 4294967295 then champions[cname] = holder end
         end
 
-        -- Trophies the club won: a finished league it tops, a cup final it won (judged in June and July, when every final
-        -- has been played), and any competition whose holder became the club while this script was running.
+        -- Trophies the club won: what the game marks as won for the club (career_competitionprogress), a finished league
+        -- it tops, a cup final it won (judged in June and July, when every final has been played), and any competition
+        -- whose holder became the club while this script was running. The season is the one of the club's last match in
+        -- that competition (or of the day it was noticed).
         local trophies, have = CR.array(), {}
-        local function add_trophy(name, iso, is_league)
-            local start = CR.season_start(iso)
+        local function add_trophy(name, iso, is_league, start_year)
+            local start = start_year or CR.season_start(iso)
             if not name or name == "" or not start then return end
             local key = name:lower() .. "|" .. start
             if have[key] then return end
             have[key] = true
             trophies[#trophies + 1] = { competition = name, season = CR.season_label(start), startYear = start, league = is_league == true }
+        end
+        local progress = career_rows("career_competitionprogress", { "teamid", "compobjid", "compshortname", "season", "hasteamwon" })
+        local latest_season
+        for _, r in ipairs(progress) do
+            local sv = tonumber(r.season)
+            if tonumber(r.teamid) == managed_tid and sv and (latest_season == nil or sv > latest_season) then latest_season = sv end
+        end
+        for _, r in ipairs(progress) do
+            local sv = tonumber(r.season)
+            local won = r.hasteamwon == true or tonumber(r.hasteamwon) == 1
+            if tonumber(r.teamid) == managed_tid and won and (latest_season == nil or sv == latest_season) then
+                local obj = tonumber(r.compobjid) or 0
+                local name = career_comp_name(obj) or managed_comp_name[obj] or (r.compshortname and tostring(r.compshortname)) or ""
+                local last_date
+                for _, f in ipairs(managed) do
+                    if tonumber(f.compobjid) == obj and f.completed and f.date ~= "" and (not last_date or f.date > last_date) then last_date = f.date end
+                end
+                if last_date then
+                    add_trophy(name, last_date, is_league_competition(name))
+                else
+                    local now_season = CR.season_start(today)
+                    if sv and now_season and (sv == now_season or sv == now_season - 1) then add_trophy(name, nil, is_league_competition(name), sv) end
+                end
+            end
         end
         for c, name in pairs(comps) do
             if name then
