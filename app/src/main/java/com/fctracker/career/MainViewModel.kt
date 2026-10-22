@@ -1137,6 +1137,11 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
         edit { CareerOps.moveLeague(it, newLeague, movedWithMe, promoted) }
         persistData()
     }
+    fun setTacticalVision(vision: String) { edit { it.copy(tacticalVision = vision) }; persistData() }
+    fun setCoach(department: String, coach: String?) {
+        edit { s -> s.copy(coaches = if (coach == null) s.coaches - department else s.coaches + (department to coach)) }
+        persistData()
+    }
     fun saveLeaders(leaders: CompetitionLeaders) {
         edit { s -> s.copy(leaders = listOf(leaders.copy(source = Source.MANUAL)) + s.leaders.filterNot { it.competition.equals(leaders.competition, true) }) }
         persistData()

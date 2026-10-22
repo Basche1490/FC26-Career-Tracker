@@ -72,8 +72,9 @@ const val MAX_NOTES = 5
 
 /** What the assistant reads: every page of the app (shown on the "Knows your whole career" card). */
 val ASSISTANT_KNOWS = listOf(
-    "Matches and lineups", "Fixtures", "League table", "Squad, contracts, wages", "Injuries", "Formation", "Transfers and budget",
-    "Youth academy", "Stats and awards", "Cup runs", "Europe ranking", "Around the World", "Objectives", "Past seasons", "Club history", "Your notes"
+    "Matches and lineups", "Fixtures", "League tables", "Squad, contracts, wages", "Injuries", "Formation and tactics", "Transfers and budget",
+    "Scout reports", "Youth academy", "Stats and awards", "Cup runs", "Europe ranking", "Around the World", "Objectives", "Milestones",
+    "Past seasons", "Club history", "Player notes", "Your notes"
 )
 
 private fun isProblem(text: String) = text.startsWith("API key needed") || text.startsWith("Error:") || text.startsWith("Error ")

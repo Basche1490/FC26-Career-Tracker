@@ -66,7 +66,15 @@ $modeLine
         line("Club: ${state.clubName}${if (state.isExistingTeam) " (real club)" else " (own created club)"} · Manager: ${state.managerName} · ${state.leagueName}, ${state.country}")
         line("Season: ${season(state.startYear)} · Game date: ${today.ifBlank { "not known" }} · Plays on: ${if (state.platform == "console") "console (everything typed in)" else "PC (data from the game)"}")
         line("Transfer budget: ${money(cur, state.transferBudget)} · Wage budget: ${if (state.wageBudgetK > 0) "$cur${state.wageBudgetK.toInt()}K a week" else "not set"} · Wage bill: $cur${state.players.filter { isActive(it) }.sumOf { it.wageK }}K a week")
-        line("Formation: ${state.activeFormation}")
+        line("Formation: ${state.activeFormation} · Tactical vision: ${state.tacticalVision.ifBlank { "Standard" }}" +
+            (if (state.coaches.isNotEmpty()) " · Coaches: ${state.coaches.entries.joinToString(", ") { "${it.key} ${it.value}" }}" else " · No coaches hired"))
+        line("Squad value: ${money(cur, state.squadValue)}${if (state.previousSquadValue > 0) " (was ${money(cur, state.previousSquadValue)})" else ""}")
+        state.gameTeamSheet?.takeIf { it.starting.isNotEmpty() }?.let { sheet ->
+            fun nameOf(id: Int) = state.players.firstOrNull { it.gamePlayerId == id }?.displayName ?: "player $id"
+            line("Team sheet picked in the game${if (sheet.formation.isNotBlank()) " (${sheet.formation})" else ""}: " +
+                sheet.starting.joinToString(", ") { id -> nameOf(id) + (sheet.positions[id.toString()]?.let { " $it" } ?: "") } +
+                (if (sheet.bench.isNotEmpty()) "; bench: ${sheet.bench.joinToString(", ") { nameOf(it) }}" else ""))
+        }
 
         // CLUB
         val ci = state.clubInfo
@@ -153,9 +161,10 @@ $modeLine
                 line("${i + 1}. ${row.club}${if (row.isUser) " (YOU)" else ""} P${row.played} W${row.won} D${row.drawn} L${row.lost} GF${row.goalsFor} GA${row.goalsAgainst} GD${row.goalDifference} Pts${row.points}${if (row.form.isNotBlank()) " form ${row.form}" else ""}$zone")
             }
         }
+        // The other leagues the app holds (the leagues above and below, the big five): every club, compactly.
         state.leagueTables.filter { it !== ownTable && it.rows.isNotEmpty() }.forEach { t ->
-            val top = LeagueTables.sorted(t.rows).take(3).joinToString(", ") { "${it.club} ${it.points}" }
-            line("Other league ${t.league}: top three $top")
+            val rows = LeagueTables.sorted(t.rows)
+            line("Other league ${t.league}: " + rows.mapIndexed { i, r -> "${i + 1}. ${r.club} ${r.points}pts (P${r.played} GD${r.goalDifference}${if (r.form.isNotBlank()) " ${r.form}" else ""})" }.joinToString("; "))
         }
 
         // STATS
@@ -185,6 +194,21 @@ $modeLine
             val got = state.transfers.filter { !it.isIncomingDeal() }.sumOf { it.feeM }
             line("Spent ${money(cur, spent)}, received ${money(cur, got)}")
             state.transfers.sortedBy { it.date }.forEach { line("${it.date} · ${it.type} · ${it.playerName} · ${it.fromToClub} · ${it.feeLabel(cur)}${it.swapPlayerName?.let { s -> " (swap: $s)" } ?: ""}") }
+        }
+
+        // SCOUTING
+        if (state.scoutReports.isNotEmpty()) {
+            line()
+            line("== SCOUT REPORTS (transfer targets) ==")
+            state.scoutReports.forEach { r -> line("${r.playerName} · ${r.position} · age ${r.age} · OVR ${r.ratingRange} · POT ${r.potentialRange} · value ${r.value} · scout ${r.scoutName}: ${r.recommendation}") }
+        }
+
+        // FINANCES
+        val fb = state.financialBreakdown
+        if (fb.initialBudget > 0 || fb.totalExpenses > 0 || fb.totalPlayerSales > 0) {
+            line()
+            line("== FINANCES ==")
+            line("Budget at the start ${money(cur, fb.initialBudget)} · spent ${money(cur, fb.totalExpenses)} · sales ${money(cur, fb.totalPlayerSales)} · net spend ${money(cur, fb.netSpend)} · wages ${money(cur, fb.wageExpenditure)}")
         }
 
         // OBJECTIVES
@@ -233,6 +257,14 @@ $modeLine
             state.worldTopScorers.filter { it.season == ws }.forEach { line("Top scorer ${it.region} ${it.competition}: ${it.player} (${it.club}) ${it.goals}") }
         }
 
+        // NOTES
+        if (notes.isNotEmpty()) {
+            line()
+            line("== MANAGER'S NOTES ==")
+            notes.forEach { line("${it.title}: ${it.content.take(600)}") }
+        }
+
+
         // PAST SEASONS
         if (state.historicalSeasons.isNotEmpty()) {
             line()
@@ -247,14 +279,47 @@ $modeLine
                     (if (s.trophies.isNotEmpty()) " · trophies: ${s.trophies.joinToString(", ")}" else "") +
                     (bigIn?.takeIf { it.feeM > 0 }?.let { " · biggest signing ${it.playerName} ${it.feeLabel(cur)}" } ?: "") +
                     (bigOut?.takeIf { it.feeM > 0 }?.let { " · biggest sale ${it.playerName} ${it.feeLabel(cur)}" } ?: ""))
+                if (s.objectives.isNotEmpty()) line("   objectives: " + s.objectives.joinToString("; ") { "${it.description} (${it.status})" })
+                if (s.awards.isNotEmpty()) line("   awards: " + s.awards.take(8).joinToString("; ") { "${it.title} ${it.recipient}".trim() })
+                s.leagueTables.firstOrNull { it.league.equals(s.leagueName, true) }?.let { t ->
+                    val rows = LeagueTables.sorted(t.rows)
+                    if (rows.isNotEmpty()) line("   final table top: " + rows.take(4).mapIndexed { i, r -> "${i + 1}. ${r.club} ${r.points}" }.joinToString(", "))
+                }
             }
         }
 
-        // NOTES
-        if (notes.isNotEmpty()) {
-            line()
-            line("== MANAGER'S NOTES ==")
-            notes.forEach { line("${it.title}: ${it.content.take(600)}") }
+        // ALL-TIME (every season of the career added up)
+        run {
+            data class T(var name: String, var apps: Int = 0, var goals: Int = 0, var assists: Int = 0)
+            val all = linkedMapOf<String, T>()
+            fun add(players: List<Player>, matches: List<com.fctracker.career.MatchResult>, stats: List<com.fctracker.career.PlayerSeasonStat>) {
+                for (t in SeasonFacts.allTotals(players, matches, stats)) {
+                    if (t.appearances == 0 && t.goals == 0) continue
+                    val key = t.player.gamePlayerId?.let { "g$it" } ?: t.player.id
+                    val e = all.getOrPut(key) { T(t.player.displayName) }
+                    e.name = t.player.displayName; e.apps += t.appearances; e.goals += t.goals; e.assists += t.assists
+                }
+            }
+            state.historicalSeasons.forEach { add(it.players + it.academyPlayers, it.matches, it.squadStats) }
+            if (state.historicalSeasons.isNotEmpty() && all.isNotEmpty()) {
+                add(state.players + state.academyPlayers, state.recentMatches, state.squadStats)
+                line()
+                line("== ALL-TIME FOR THE CLUB (this career) ==")
+                line("Most appearances: " + all.values.sortedByDescending { it.apps }.take(8).joinToString(", ") { "${it.name} ${it.apps}" })
+                line("Top scorers: " + all.values.filter { it.goals > 0 }.sortedByDescending { it.goals }.take(8).joinToString(", ") { "${it.name} ${it.goals}" })
+                line("Most assists: " + all.values.filter { it.assists > 0 }.sortedByDescending { it.assists }.take(5).joinToString(", ") { "${it.name} ${it.assists}" })
+                val record = SeasonFacts.split(state.historicalSeasons.flatMap { it.matches } + state.recentMatches)
+                line("Career record: ${record.played} played, ${record.won} won, ${record.drawn} drawn, ${record.lost} lost, goals ${record.goalsFor}-${record.goalsAgainst}")
+            }
+        }
+
+        // PAST SEASONS' MATCHES, newest season first (last, so that a very long career loses the oldest detail first)
+        state.historicalSeasons.sortedByDescending { it.year }.forEach { s ->
+            if (s.matches.isNotEmpty()) {
+                line()
+                line("== MATCHES ${season(s.year)} (${s.leagueName}) ==")
+                s.matches.sortedBy { it.matchDate }.forEach { m -> line(matchLine(m, state, detailed = false)) }
+            }
         }
 
         val text = sb.toString()

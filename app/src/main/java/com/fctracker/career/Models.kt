@@ -515,5 +515,8 @@ data class AppState(
     /** The starting XI and bench picked in the game (PC), for "Use my team sheet from the game". */
     val gameTeamSheet: TeamSheet? = null,
     /** True once the milestones already reached when the app first looked were stored quietly (no alert flood). */
-    val milestonesPrimed: Boolean = false
+    val milestonesPrimed: Boolean = false,
+    /** Squad · Tactics: the club's tactical vision and the coaches hired per department (department -> coach level). */
+    val tacticalVision: String = "Standard",
+    val coaches: Map<String, String> = emptyMap()
 )

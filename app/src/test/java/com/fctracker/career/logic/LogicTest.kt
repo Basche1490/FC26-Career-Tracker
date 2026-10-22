@@ -280,6 +280,18 @@ class StoryAndRecapTest {
         listOf("== CAREER ==", "== SQUAD", "Marco Varela", "== UPCOMING FIXTURES ==", "Hull City", "== MATCHES THIS SEASON", "== LEAGUE TABLE").forEach { assertTrue(it, text.contains(it)) }
         assertTrue(AiContext.systemPrompt(state, "chat").contains("OFF_TOPIC"))
         assertTrue(AiContext.names(state).contains("Hull City"))
+
+        // Every other page too: tactics and coaches, scout reports, the game's team sheet, other leagues, past seasons and their matches.
+        val past = HistoricalSeason(year = 2025, leagueName = "League One", finalPosition = 1, matches = matches.take(2), players = listOf(varela),
+            objectives = listOf(com.fctracker.career.Objective(category = "League", priority = "High", description = "Win promotion", status = "Completed")))
+        val full = state.copy(tacticalVision = "Gegenpressing", coaches = mapOf("Attack" to "Expert (5 stars)"),
+            scoutReports = listOf(com.fctracker.career.ScoutReport(playerName = "Tom Scout", position = "ST", age = "19", ratingRange = "65-70", potentialRange = "80-85", value = "€2M", scoutName = "Ana", recommendation = "Sign him")),
+            gameTeamSheet = com.fctracker.career.TeamSheet(formation = "4-3-3", starting = listOf(111), positions = mapOf("111" to "ST")),
+            leagueTables = state.leagueTables + LeagueTableData(league = "EFL League One", rows = listOf(TableRow("Wigan Athletic", 14, 9, 3, 2, 25, 10, 30))),
+            historicalSeasons = listOf(past))
+        val all = AiContext.build(full)
+        listOf("Tactical vision: Gegenpressing", "Attack Expert", "== SCOUT REPORTS", "Tom Scout", "Team sheet picked in the game (4-3-3)", "Other league EFL League One: 1. Wigan Athletic",
+            "== PAST SEASONS ==", "Win promotion (Completed)", "== MATCHES 2025/26 (League One) ==").forEach { assertTrue(it, all.contains(it)) }
     }
 
     @Test fun milestonesAreAnnouncedOnce() {

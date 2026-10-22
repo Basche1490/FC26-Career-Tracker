@@ -33,6 +33,8 @@ import com.fctracker.career.ui.theme.WinColor
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Public
 
 /** Youth Academy: the prospects (from the game on PC, added by hand on console) and the scouting network. */
 @Composable
@@ -116,17 +118,14 @@ fun AcademyPlayerCard(player: Player, modifier: Modifier = Modifier, archived: B
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** Youth scouting: which countries suit the kind of player you want (the game's scouting network is set up in the game). */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun ScoutingNetworkTab() {
     var selectedType by remember { mutableStateOf("Technically Gifted") }
-    var typeExpanded by remember { mutableStateOf(false) }
-    val playerTypes = listOf("Technically Gifted", "Winger", "Physically Strong", "Playmaker", "Goalkeeper", "Attacker", "Defensive Minded", "Any")
-    
     val selectedPositions = remember { androidx.compose.runtime.mutableStateListOf<String>() }
-    var positionsExpanded by remember { mutableStateOf(false) }
+    val playerTypes = listOf("Technically Gifted", "Winger", "Physically Strong", "Playmaker", "Goalkeeper", "Attacker", "Defensive Minded", "Any")
     val allPositions = listOf("GK", "CB", "LB", "RB", "CDM", "CM", "CAM", "LM", "RM", "LW", "RW", "ST", "CF")
-    
     val suggestions = mapOf(
         "Technically Gifted" to listOf("Spain", "Argentina", "Brazil", "Italy", "Portugal"),
         "Winger" to listOf("Brazil", "Spain", "Netherlands", "England", "France"),
@@ -137,97 +136,29 @@ fun ScoutingNetworkTab() {
         "Defensive Minded" to listOf("Italy", "Germany", "England", "Uruguay", "Senegal"),
         "Any" to listOf("Brazil", "France", "Spain", "Germany", "Argentina")
     )
-    
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text("Scout Instructions", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
-        Spacer(modifier = Modifier.height(8.dp))
-        Text("Select the type of player you are looking for, and we will recommend the best countries to send your scouts to.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        
-        Spacer(modifier = Modifier.height(24.dp))
-        
-        ExposedDropdownMenuBox(
-            expanded = typeExpanded,
-            onExpandedChange = { typeExpanded = it }
-        ) {
-            OutlinedTextField(
-                value = selectedType,
-                onValueChange = {},
-                readOnly = true,
-                label = { Text("Player Type") },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = typeExpanded) },
-                modifier = Modifier.menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
-            )
-            ExposedDropdownMenu(
-                expanded = typeExpanded,
-                onDismissRequest = { typeExpanded = false }
-            ) {
-                playerTypes.forEach { type ->
-                    DropdownMenuItem(
-                        text = { Text(type) },
-                        onClick = {
-                            selectedType = type
-                            typeExpanded = false
-                        }
-                    )
-                }
-            }
-        }
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        ExposedDropdownMenuBox(
-            expanded = positionsExpanded,
-            onExpandedChange = { positionsExpanded = it }
-        ) {
-            OutlinedTextField(
-                value = if (selectedPositions.isEmpty()) "Any Position" else selectedPositions.joinToString(", "),
-                onValueChange = {},
-                readOnly = true,
-                label = { Text("Positions (Max 3)") },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = positionsExpanded) },
-                modifier = Modifier.menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
-            )
-            ExposedDropdownMenu(
-                expanded = positionsExpanded,
-                onDismissRequest = { positionsExpanded = false }
-            ) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        com.fctracker.career.ui.components.FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 12.dp) {
+            com.fctracker.career.ui.components.SectionHeader("Scout instructions", icon = Icons.Default.Search)
+            com.fctracker.career.ui.components.Muted("Pick the kind of player you want; the best countries to send your scouts to are listed below.", 12.sp)
+            com.fctracker.career.ui.components.FcSelectField("Player type", selectedType, playerTypes, { selectedType = it })
+            com.fctracker.career.ui.components.FcLabel("POSITIONS (UP TO 3)")
+            androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 allPositions.forEach { pos ->
-                    val isSelected = selectedPositions.contains(pos)
-                    DropdownMenuItem(
-                        text = { 
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Checkbox(checked = isSelected, onCheckedChange = null)
-                                Text(pos)
-                            }
-                        },
-                        onClick = {
-                            if (isSelected) {
-                                selectedPositions.remove(pos)
-                            } else if (selectedPositions.size < 3) {
-                                selectedPositions.add(pos)
-                            }
-                        }
-                    )
+                    val on = pos in selectedPositions
+                    com.fctracker.career.ui.components.FcChip(pos, on, { if (on) selectedPositions.remove(pos) else if (selectedPositions.size < 3) selectedPositions.add(pos) })
                 }
             }
         }
-        
-        Spacer(modifier = Modifier.height(32.dp))
-        
-        Text("Recommended Scouting Regions", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
-        Spacer(modifier = Modifier.height(12.dp))
-        
-        val recommended = suggestions[selectedType] ?: emptyList()
-        recommended.forEach { country ->
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(country, fontWeight = FontWeight.Bold, color = Color.White)
-                Icon(Icons.Default.Add, contentDescription = "Deploy Scout", tint = MaterialTheme.colorScheme.primary)
+        com.fctracker.career.ui.components.SectionHeader("Recommended scouting regions", icon = Icons.Default.Public)
+        RowsCard {
+            (suggestions[selectedType] ?: emptyList()).forEachIndexed { i, country ->
+                if (i > 0) RowDivider()
+                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    com.fctracker.career.ui.components.FcText(country, 14.sp, FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    com.fctracker.career.ui.components.Muted(if (selectedPositions.isEmpty()) selectedType else "$selectedType · ${selectedPositions.joinToString("/")}", 12.sp)
+                }
             }
         }
+        com.fctracker.career.ui.components.Muted("Send the scouts in the game's Youth Academy screen; new prospects then arrive here by themselves on PC.", 11.sp)
     }
 }
-
