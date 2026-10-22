@@ -884,12 +884,20 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
 
     fun addMatchResult(match: MatchResult) {
         _state.update { state ->
+            val competitive = !match.competition.contains("friendly", ignoreCase = true)
             val updatedPlayers = state.players.map { player ->
-                if (player.isInjured && player.injuryReturnDate != null && match.matchDate >= player.injuryReturnDate) {
+                var p = if (player.isInjured && player.injuryReturnDate != null && match.matchDate >= player.injuryReturnDate) {
                     player.copy(isInjured = false, injuryName = null, injuryStartDate = null, injuryReturnDate = null)
                 } else {
                     player
                 }
+                // A suspended player serves one match of his ban with every competitive match he misses.
+                val played = match.playerPerformances.any { it.playerId == p.id || it.playerName.equals(p.name, true) }
+                if (competitive && p.suspendedGames > 0 && !played) {
+                    val left = p.suspendedGames - 1
+                    p = p.copy(suspendedGames = left, suspensionEnd = if (left > 0) p.suspensionEnd else null)
+                }
+                p
             }
             CareerOps.dropPlayedFixture(state.copy(
                 recentMatches = listOf(match) + state.recentMatches,
@@ -1135,6 +1143,11 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
     }
     fun moveLeague(newLeague: String, movedWithMe: List<String>, promoted: Boolean) {
         edit { CareerOps.moveLeague(it, newLeague, movedWithMe, promoted) }
+        persistData()
+    }
+    /** A ban typed in by the person (console, or a correction on PC): [games] = 0 clears it. */
+    fun setSuspension(playerId: String, games: Int, end: String?) {
+        edit { s -> s.copy(players = s.players.map { if (it.id == playerId) it.copy(suspendedGames = games.coerceIn(0, 20), suspensionEnd = end?.takeIf { games > 0 && it.isNotBlank() }) else it }) }
         persistData()
     }
     fun setTacticalVision(vision: String) { edit { it.copy(tacticalVision = vision) }; persistData() }

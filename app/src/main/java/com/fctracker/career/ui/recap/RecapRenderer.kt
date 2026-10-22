@@ -152,7 +152,10 @@ object RecapRenderer {
 
     private fun plan(b: RecapBlock, u: Float, w: Float, s: Style, a: Assets, pageNumber: Int): Placed = when (b) {
         is RecapBlock.Big -> {
-            val v = sl(b.value, tp(s.semi, 64 * u, WHITE), w, maxLines = 1)
+            // The big figure keeps one line: a long one ("61W 28D 33L") is drawn smaller rather than cut.
+            val bp = tp(s.semi, 64 * u, WHITE)
+            while (bp.measureText(b.value) > w && bp.textSize > 22 * u) bp.textSize = bp.textSize - 2 * u
+            val v = sl(b.value, bp, w, maxLines = 1)
             val cap = if (b.caption.isNotBlank()) sl(b.caption, tp(s.body, 14 * u, SOFT), w, maxLines = 2) else null
             Placed(v.height + (cap?.let { it.height + 4 * u } ?: 0f)) { c, x, y ->
                 c.layoutAt(v, x, y)

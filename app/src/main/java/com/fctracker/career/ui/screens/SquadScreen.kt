@@ -59,6 +59,7 @@ import com.fctracker.career.ui.components.ConfirmDialog
 import com.fctracker.career.ui.components.EmptyCard
 import com.fctracker.career.ui.components.Fab
 import com.fctracker.career.ui.components.FcButton
+import com.fctracker.career.ui.components.Stepper
 import com.fctracker.career.ui.components.FcCard
 import com.fctracker.career.ui.components.FcDateField
 import com.fctracker.career.ui.components.FcDialog
@@ -382,6 +383,8 @@ private fun InjuriesList(viewModel: MainViewModel, state: AppState, view: Season
     val c = FcTheme.colors
     var editing by remember { mutableStateOf<Player?>(null) }
     var adding by remember { mutableStateOf(false) }
+    var banFor by remember { mutableStateOf<Player?>(null) }
+    var addingBan by remember { mutableStateOf(false) }
     val today = ContractTime.referenceDate(state)
     val injured = view.players.filter { it.isInjured }.sortedBy { it.injuryReturnDate ?: "9999" }
     val suspended = view.players.filter { it.suspendedGames > 0 }
@@ -423,13 +426,19 @@ private fun InjuriesList(viewModel: MainViewModel, state: AppState, view: Season
         }
         item { Muted("Tap an injury to change it, for example when he needs longer than the game says. Matches missed counts the league and cup matches played while he was out.", 11.sp) }
         if (!console) item { Muted("The game keeps every player's latest injury, the day it happened and how many days it lasts; a player stays on this list until those days have run out.", 11.sp) }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionHeader("Suspensions (${suspended.size})", Modifier.weight(1f), icon = Icons.Default.Warning)
+                FcButton("Add suspension", { addingBan = true }, kind = ButtonKind.SECONDARY, icon = Icons.Default.Add, small = true)
+            }
+        }
+        if (suspended.isEmpty()) item { Muted(if (console) "Nobody is suspended. Add a ban after a red card or too many bookings; it counts down with every match you log." else "Nobody is suspended. Bans arrive from the game; you can add or correct one here.", 12.sp) }
         if (suspended.isNotEmpty()) {
-            item { SectionHeader("Suspensions (${suspended.size})", icon = Icons.Default.Warning) }
             item {
                 RowsCard {
                     suspended.forEachIndexed { i, p ->
                         if (i > 0) RowDivider()
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(Modifier.fillMaxWidth().clickable { banFor = p }.padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             NumberedHeadshot(p.headshotUrl, p.displayName, p.number, 42.dp)
                             Column(Modifier.weight(1f)) {
                                 FcText(p.displayName, 15.sp, FontWeight.SemiBold)
@@ -444,6 +453,25 @@ private fun InjuriesList(viewModel: MainViewModel, state: AppState, view: Season
     }
     editing?.let { p -> InjuryEditDialog(viewModel, p, onDismiss = { editing = null }) }
     if (adding) AddInjuryDialog(viewModel, view.players.filter { isActivePlayer(it) && !it.isInjured }, CareerOps.today(state), onDismiss = { adding = false })
+    if (addingBan || banFor != null) SuspensionDialog(viewModel, banFor, view.players.filter { isActivePlayer(it) && it.suspendedGames == 0 }, onDismiss = { addingBan = false; banFor = null })
+}
+
+/** Add or change a ban: the player, the matches left and (optionally) the last day of it. */
+@Composable
+private fun SuspensionDialog(viewModel: MainViewModel, existing: Player?, candidates: List<Player>, onDismiss: () -> Unit) {
+    var player by remember { mutableStateOf(existing) }
+    var games by remember { mutableStateOf(existing?.suspendedGames?.takeIf { it > 0 } ?: 1) }
+    var end by remember { mutableStateOf(existing?.suspensionEnd ?: "") }
+    FcDialog(if (existing == null) "Add suspension" else "Suspension · ${existing.displayName}", onDismiss, actions = {
+        if (existing != null) FcButton("Lift ban", { viewModel.setSuspension(existing.id, 0, null); onDismiss() }, kind = ButtonKind.SECONDARY, small = true)
+        FcButton("Cancel", onDismiss, kind = ButtonKind.SECONDARY, small = true)
+        FcButton("Save", { player?.let { viewModel.setSuspension(it.id, games, end.ifBlank { null }) }; onDismiss() }, small = true, enabled = player != null)
+    }) {
+        if (existing == null) FcSelectField("Player", player?.displayName ?: "Choose a player", candidates.map { it.displayName }, { name -> player = candidates.firstOrNull { it.displayName == name } })
+        Stepper("Matches left", games, { games = it }, min = 1, max = 20)
+        FcDateField("Until (optional)", end.ifBlank { null }, { end = it }, hint = "Leave empty when the game counts matches, not days.")
+        Muted("One match comes off with every competitive match you log that he does not play.", 11.sp)
+    }
 }
 
 /** Change an injury: a later return date, the injury's name, a note; "Follow the game" decides whose date counts. */
