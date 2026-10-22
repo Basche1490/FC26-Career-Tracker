@@ -135,8 +135,8 @@ fun PlayerProfileScreen(viewModel: MainViewModel, playerId: String, onBack: () -
             FcCard(Modifier.fillMaxWidth(), padding = 14.dp, gap = 10.dp) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SectionHeader("Overall rating by season", Modifier.weight(1f), icon = Icons.Default.ShowChart)
-                    if (values.size >= 2) {
-                        val d = values.last() - values.first()
+                    val d = values.last() - values.first()
+                    if (values.size >= 2 && d != 0) {
                         Pill("${if (d >= 0) "+" else ""}$d since ${labels.first()}", if (d > 0) Tone.GOOD else if (d < 0) Tone.BAD else Tone.MUTED)
                     }
                 }

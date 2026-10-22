@@ -150,7 +150,8 @@ class ScreenshotTest {
         historicalSeasons = listOf(
             HistoricalSeason(year = 2027, leagueName = "EFL League One", finalPosition = 2,
                 players = listOf(Player(id = "old9", name = "Gone Striker", primaryPosition = "ST", goals = 160, matchesPlayed = 300, status = "Sold"),
-                    Player(id = "st", name = "Leo Guerra", primaryPosition = "ST", goals = 3, matchesPlayed = 2)),
+                    Player(id = "st", name = "Leo Guerra", primaryPosition = "ST", goals = 3, matchesPlayed = 2),
+                    Player(id = "oldgk", name = "Old Keeper", primaryPosition = "GK", overall = 70, matchesPlayed = 8, status = "Sold")),
                 transfers = listOf(TransferLog(playerName = "Leo Guerra", type = "In (Permanent)", feeM = 2.0, fromToClub = "Boca", date = "2027-07-10"),
                     TransferLog(playerName = "Leo Guerra (Leonardo Guerra Diaz)", type = "In (Permanent)", feeM = 2.5, fromToClub = "Boca", date = "2027-07-10")),
                 matches = listOf(
