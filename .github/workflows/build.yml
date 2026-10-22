@@ -162,6 +162,8 @@ jobs:
           mkdir -p /tmp/shots
           cp app/build/screenshots/*.png /tmp/shots/ 2>/dev/null || true
           cp shots.log /tmp/shots/ 2>/dev/null || true
+          # the test results hold the full message of a failed test (the log has only its first line)
+          cp app/build/test-results/testDebugUnitTest/*.xml /tmp/shots/ 2>/dev/null || true
           echo "::notice title=Screenshots::$(cd /tmp/shots && ls -1 | tr '\n' ' ')"
           cd /tmp/shots
           git init -q -b ci/screenshots

@@ -65,7 +65,7 @@ Check 'file.marker_once' (([regex]::Matches($text, '##PS-START')).Count -eq 1) '
 
 # ---- 2. versions -------------------------------------------------------------------------------------------------
 Check 'version.real_lua' ((Get-LuaVersion (Join-Path $RealRepo 'live-editor-scripts/FC26_Auto_Capture.lua')) -match '^\d+\.\d+\.\d+$') (Get-LuaVersion (Join-Path $RealRepo 'live-editor-scripts/FC26_Auto_Capture.lua'))
-Check 'version.real_exporter' ((Get-LuaVersion (Join-Path $RealRepo 'live-editor-scripts/FC26_AutoCapture_v1.1.1.lua')) -eq '1.1.2')
+Check 'version.real_exporter' ((Get-LuaVersion (Join-Path $RealRepo 'live-editor-scripts/FC26_AutoCapture_v1.1.1.lua')) -eq '1.1.3')
 Check 'version.real_bridge' ((Get-BridgeVersion (Join-Path $RealRepo 'pc-bridge')) -match '^\d+\.\d+\.\d+$') (Get-BridgeVersion (Join-Path $RealRepo 'pc-bridge'))
 $py = Select-String -LiteralPath (Join-Path $RealRepo 'pc-bridge/telemetry_bridge.py') -Pattern '^BRIDGE_VERSION = "(.*)"' | Select-Object -First 1
 $ps = Select-String -LiteralPath (Join-Path $RealRepo 'pc-bridge/bridge.ps1') -Pattern '^\$BridgeVersion = "(.*)"' | Select-Object -First 1
