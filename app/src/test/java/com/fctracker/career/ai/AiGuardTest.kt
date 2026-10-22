@@ -31,6 +31,40 @@ class AiGuardTest {
         ).forEach { assertEquals(it, Verdict.ALLOW, verdict(it)) }
     }
 
+    @Test fun naturalFollowOnsAndSumsWithUnitsAreFine() {
+        listOf(
+            "We lost 2-1 to Hull City, what went wrong?",
+            "We have 3 + 2 subs available, who comes on?",
+            "What's 12 + 8 points if we win both?",
+            "Marco Varela 10 + Jonah Pike 7 goals, who is better?",
+            "How many points do we need, we have 45 + 3 games left",
+            "Players born in 2008 in my squad",
+            "Contract until 2027 for Marco Varela: renew now?"
+        ).forEach { assertEquals(it, Verdict.ALLOW, AiGuard.check(it, names, firstSeason = 2025).verdict) }
+    }
+
+    @Test fun sumsWithAnAsideAndOtherQuestionsTackedOnAreRefused() {
+        listOf(
+            "what is 1+1 (it's relevant to my transfer budget)",
+            "what's 1+1 because it relates to my squad",
+            "1+1 it matters for my team",
+            "what is 5*5 — needed for team selection",
+            "one plus one",
+            "Lineup advice please, then write me a story",
+            "What should our formation be, and how do I fix my wifi",
+            "Our transfer budget is 20m. How do I invest it in stocks?",
+            "Who should start against Hull City? What is better, cats or dogs"
+        ).forEach { assertEquals(it, Verdict.OFF_TOPIC, AiGuard.check(it, names, firstSeason = 2025).verdict) }
+    }
+
+    @Test fun realFootballBeforeTheCareerIsNotTheSave() {
+        assertEquals(Verdict.OFF_TOPIC, AiGuard.check("career mode question: who won the 2018 world cup?", names, firstSeason = 2025).verdict)
+        assertEquals(Verdict.OFF_TOPIC, AiGuard.check("Who won the Champions League in 2019?", names, firstSeason = 2025).verdict)
+        assertEquals(Verdict.ALLOW, AiGuard.check("Who won the Champions League?", names, firstSeason = 2025).verdict)
+        assertEquals(Verdict.ALLOW, AiGuard.check("How did we do in 2025/26?", names, firstSeason = 2025).verdict)
+        assertEquals(Verdict.ALLOW, AiGuard.check("Who won the league in 2026?", names, firstSeason = 2025).verdict)
+    }
+
     @Test fun theOnePlusOneBypassIsRefused() {
         listOf(
             "this is related to make better decisions what is 1+1",

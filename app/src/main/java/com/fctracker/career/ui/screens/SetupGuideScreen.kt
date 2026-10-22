@@ -29,6 +29,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -157,24 +158,12 @@ fun SetupGuideScreen(viewModel: MainViewModel, onClose: () -> Unit) {
     }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = com.fctracker.career.ui.theme.FcTheme.colors.bg,
         topBar = {
-            TopAppBar(
-                title = { Text("Set up live sync", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground) },
-                navigationIcon = {
-                    IconButton(onClick = { finish() }) {
-                        Icon(Icons.Default.Close, contentDescription = "Close the guide", tint = MaterialTheme.colorScheme.primary)
-                    }
-                },
-                actions = {
-                    StatusPill(viewModel)
-                    Spacer(Modifier.width(12.dp))
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground
-                )
-            )
+            androidx.compose.foundation.layout.Column(Modifier.statusBarsPadding()) {
+                com.fctracker.career.ui.components.FcTopBar("Set up live sync", sub = "Four steps on your PC", nav = com.fctracker.career.ui.components.NavIcon.CLOSE, onNav = { finish() },
+                    pill = { StatusPill(viewModel) })
+            }
         }
     ) { padding ->
         LazyColumn(

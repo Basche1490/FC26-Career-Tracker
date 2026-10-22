@@ -32,7 +32,8 @@ object Assistant {
         // A short follow-up is fine when the conversation so far was about the career.
         val lastUser = history.lastOrNull { it.role == "user" && !it.local }
         val followUp = lastUser != null
-        val check = AiGuard.check(message, names, followUp = followUp, rolePlay = mode != MODE_CHAT)
+        val firstSeason = (state.historicalSeasons.map { it.year } + state.startYear).minOrNull()
+        val check = AiGuard.check(message, names, followUp = followUp, rolePlay = mode != MODE_CHAT, firstSeason = firstSeason)
         val nextOpponent = CareerOps.nextFixture(state)?.opponent
         return when (check.verdict) {
             AiGuard.Verdict.EMPTY -> Step.Local("Ask me anything about your career.")

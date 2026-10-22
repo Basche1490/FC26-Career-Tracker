@@ -36,6 +36,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -353,20 +354,12 @@ fun ConnectionScreen(viewModel: MainViewModel, onOpenSetup: () -> Unit, onMenuCl
     val accent = levelColor(health.level)
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = com.fctracker.career.ui.theme.FcTheme.colors.bg,
         topBar = {
-            TopAppBar(
-                title = { Text("PC Connection", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground) },
-                navigationIcon = {
-                    IconButton(onClick = onMenuClick) {
-                        Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.primary)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground
-                )
-            )
+            androidx.compose.foundation.layout.Column(Modifier.statusBarsPadding()) {
+                com.fctracker.career.ui.components.FcTopBar("PC Connection", sub = "Phone, bridge and capture script", onNav = onMenuClick,
+                    pill = { StatusPill(health.level, health.pill, onClick = {}) })
+            }
         }
     ) { padding ->
         LazyColumn(

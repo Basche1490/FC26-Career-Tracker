@@ -54,8 +54,37 @@ object AiGuard {
         "buying", "bid", "starting", "start", "starter", "press", "pressing", "counter", "attack", "attacking", "fit", "fitness",
         "form", "win", "won", "wins", "winning", "draw", "drew", "lose", "lost", "loss", "losing", "defeat", "result", "points",
         "position", "season", "home", "away", "derby", "rival", "board", "interview", "release", "value", "development", "growth",
-        "train", "training", "drill", "window", "deadline", "kit", "role", "minutes", "streak", "header", "coach"
+        "train", "training", "drill", "window", "deadline", "kit", "role", "minutes", "streak", "header", "coach",
+        "born", "age", "aged", "older", "younger", "oldest", "youngest", "nationality", "height", "footed", "weak-foot", "skill-moves"
     )
+
+    /**
+     * Ordinary conversational words. A clause made only of these ("what went wrong", "who is better", "who comes on")
+     * adds nothing new: next to a career question it is fine. A clause with any other word ("the capital of Peru") has
+     * a subject of its own and must be about the career itself.
+     */
+    private val CONVERSATIONAL = setOf(
+        "a", "an", "the", "and", "or", "but", "if", "then", "so", "of", "to", "in", "on", "at", "by", "for", "with", "about", "from", "up", "down",
+        "out", "off", "over", "into", "than", "as", "is", "are", "was", "were", "be", "been", "being", "am", "do", "does", "did", "done", "doing",
+        "have", "has", "had", "having", "will", "would", "should", "could", "can", "may", "might", "must", "shall", "what", "what's", "whats",
+        "who", "who's", "whos", "whom", "whose", "which", "when", "where", "why", "how", "how's", "it", "it's", "its", "this", "that", "these",
+        "those", "there", "here", "we", "we're", "our", "us", "i", "i'm", "im", "me", "my", "you", "your", "he", "him", "his", "she", "her",
+        "they", "them", "their", "one", "ones", "some", "any", "all", "both", "either", "neither", "each", "every", "more", "most", "less",
+        "least", "much", "many", "few", "lot", "lots", "very", "too", "also", "just", "only", "still", "yet", "again", "now", "next", "last",
+        "first", "second", "third", "instead", "rather", "else", "other", "another", "same", "not", "no", "yes", "don't", "dont", "didn't",
+        "isn't", "aren't", "wasn't", "won't", "can't", "cant", "shouldn't", "better", "best", "worse", "worst", "good", "bad", "great",
+        "right", "wrong", "well", "badly", "went", "go", "goes", "going", "gone", "come", "comes", "coming", "came", "get", "gets", "got",
+        "make", "makes", "made", "take", "takes", "took", "give", "gives", "gave", "put", "keep", "keeps", "kept", "play", "plays", "playing",
+        "played", "pick", "picks", "picked", "choose", "drop", "dropped", "change", "changes", "changed", "fix", "improve", "improved",
+        "happen", "happens", "happened", "need", "needs", "needed", "want", "wants", "think", "thoughts", "reckon", "recommend",
+        "suggest", "advice", "advise", "help", "plan", "option", "options", "idea", "ideas", "reason", "because", "since", "left",
+        "available", "enough", "possible", "likely", "chance", "chances", "against", "versus", "vs", "before", "after", "during",
+        "week", "weekend", "today", "tomorrow", "tonight", "soon", "later", "time", "times", "game's", "him?", "do?", "okay", "ok",
+        "thanks", "thank", "please", "explain", "why's", "compare", "comparison", "difference", "same", "similar", "worth", "deserve",
+        "deserves", "should've", "earlier", "upcoming", "coming", "big", "small", "young", "old", "new", "top", "bottom"
+    )
+
+    private val SEASON = Regex("\\b\\d{4}/\\d{2,4}\\b")
 
     // Phrases that are about the career.
     private val STRONG_PHRASES = listOf(
@@ -78,7 +107,8 @@ object AiGuard {
         "politics", "political", "religion", "religious", "bible", "quran", "diagnosis", "symptom", "dating", "girlfriend",
         "boyfriend", "movie", "netflix", "celebrity", "celebrities", "planet", "physics", "biology", "mathematics", "resume",
         "horoscope", "astrology", "grammar", "synonym", "calculus", "algebra", "equation", "geometry", "trigonometry", "integral",
-        "derivative", "poem", "poetry", "lyrics", "riddle"
+        "derivative", "poem", "poetry", "lyrics", "riddle", "wifi", "router", "invest", "investing", "investment", "stocks",
+        "mortgage", "tax", "taxes", "vpn", "joke", "jokes"
     )
 
     private val OFF_TOPIC_PHRASES = listOf(
@@ -129,7 +159,40 @@ object AiGuard {
         Regex("^\\W*\\(?-?\\d+(\\.\\d+)?\\s*([+*/×÷^-]|plus|minus|times|divided by|multiplied by|x)\\s*\\(?-?\\d+(\\.\\d+)?\\)?\\s*(([+*/×÷^-])\\s*\\d+\\s*)*(=\\s*\\??)?\\W*$")
     )
 
-    private val CLAUSE_SPLIT = Regex("[.?!;:\\n]+|\\b(also|and also|plus|btw|by the way|but first|before that|after that|anyway|oh and|and then|then tell me|and tell me|and what|and how much|and how many|and who is|and where)\\b|,\\s*(what|how|who|where|when|tell me)\\b")
+    // A sum of plain numbers is only about the save when a football unit follows it ("20 + 15 goals", "12 + 8 pts").
+    private val BARE_SUM = Regex("(?<![\\w.])-?\\d+(\\.\\d+)?\\s*([+*/×÷^]|\\bplus\\b|\\btimes\\b|divided by|multiplied by|x(?=\\s*\\(?-?\\d))\\s*\\(?-?\\d+(\\.\\d+)?\\)?(\\s*([+*/×÷^]|plus|times)\\s*\\d+(\\.\\d+)?)*")
+    private val NUMBER_UNITS = setOf(
+        "goal", "goals", "assist", "assists", "point", "points", "pts", "app", "apps", "appearance", "appearances", "match", "matches", "game", "games",
+        "win", "wins", "draw", "draws", "loss", "losses", "defeat", "defeats", "clean", "sheet", "sheets", "save", "saves", "card", "cards", "yellow", "yellows",
+        "red", "reds", "minute", "minutes", "min", "mins", "m", "k", "million", "millions", "mil", "thousand", "bn", "billion", "ovr", "overall", "rating", "ratings",
+        "potential", "pot", "year", "years", "season", "seasons", "month", "months", "week", "weeks", "day", "days", "player", "players", "shot", "shots",
+        "tackle", "tackles", "pass", "passes", "%", "percent", "per", "a", "each", "rounds", "round", "matchdays", "fixtures", "wage", "wages", "fee", "fees",
+        "euro", "euros", "pounds", "dollars", "budget", "transfer", "sub", "subs", "substitute", "substitutes", "place", "places", "spot", "spots",
+        "position", "positions", "signing", "signings", "loan", "loans", "injury", "injuries", "starter", "starters", "defender", "defenders",
+        "midfielder", "midfielders", "forward", "forwards", "striker", "strikers", "keeper", "keepers", "youth", "academy", "prospect", "prospects"
+    )
+
+    /** True when the message holds a sum of plain numbers that no football unit follows ("what is 1+1 (it's for my budget)"). */
+    private fun hasBareSum(text: String): Boolean = BARE_SUM.findAll(text).any { m ->
+        val after = text.substring(m.range.last + 1).trimStart().split(TOKEN_SPLIT).firstOrNull { it.isNotEmpty() }
+        val beforeWords = text.substring(0, m.range.first).split(TOKEN_SPLIT).filter { it.isNotEmpty() }
+        val before = beforeWords.lastOrNull()
+        !(after != null && after in NUMBER_UNITS) && !(before != null && before in NUMBER_UNITS && before !in setOf("a", "per", "each"))
+    }
+
+    /** Every sum in the text is followed by a football unit ("20 + 15 goals", "45 + 3 games"). */
+    private fun sumHasUnits(text: String): Boolean = BARE_SUM.containsMatchIn(text) && !hasBareSum(text)
+
+    // A year before the career began is real football history, not this save ("who won the 2018 World Cup?").
+    private val YEAR = Regex("\\b(19\\d{2}|20\\d{2})(/\\d{2,4})?\\b")
+    private val YEAR_EXEMPT = Regex("(born|born in|birth|age|until|till|to|expires?|expiring|contract|deal)\\s*$")
+
+    private fun mentionsYearBefore(text: String, firstSeason: Int): Boolean = YEAR.findAll(text).any { m ->
+        val y = m.groupValues[1].toInt()
+        y < firstSeason && !YEAR_EXEMPT.containsMatchIn(text.substring(0, m.range.first).trimEnd())
+    }
+
+    private val CLAUSE_SPLIT = Regex("[.?!;:\\n]+|\\b(also|and also|plus|btw|by the way|but first|before that|after that|anyway|oh and|and then|then tell me|and tell me|and what|and how much|and how many|and who is|and where|then|now)\\b|,\\s*(what|how|who|where|when|tell me)\\b|,?\\s*\\band\\s+(?=(how|what|who|where|when|why|can|could|would|will|tell|write|give|explain|show|make|list|translate|calculate|solve|describe)\\b)")
 
     // Things that look like sums but are football: formations, seasons, dates, money.
     private val FOOTBALL_NUMBERS = listOf(
@@ -197,7 +260,7 @@ object AiGuard {
      * player chat, where the conversation itself is the career. Neither lets anything else through: a sum, code,
      * a poem or a general question is refused in every mode.
      */
-    fun check(message: String, names: Collection<String> = emptyList(), followUp: Boolean = false, rolePlay: Boolean = false): Check {
+    fun check(message: String, names: Collection<String> = emptyList(), followUp: Boolean = false, rolePlay: Boolean = false, firstSeason: Int? = null): Check {
         val text = normalize(message)
         if (text.isEmpty()) return Check(Verdict.EMPTY)
         if (GREETINGS.matches(text)) return Check(Verdict.GREETING)
@@ -208,29 +271,33 @@ object AiGuard {
         if (isOffTopicTopic(text)) return Check(Verdict.OFF_TOPIC, "asks about something other than the career")
         var sums = text
         FOOTBALL_NUMBERS.forEach { sums = it.replace(sums, " ") }
-        if (PURE_SUM.any { it.containsMatchIn(sums) }) return Check(Verdict.OFF_TOPIC, "asks for a sum that is not about the career")
+        if (PURE_SUM.any { it.containsMatchIn(sums) } || hasBareSum(sums)) return Check(Verdict.OFF_TOPIC, "asks for a sum that is not about the career")
+        if (firstSeason != null && mentionsYearBefore(text, firstSeason)) return Check(Verdict.OFF_TOPIC, "asks about football before this career began")
 
         val clauses = text.split(CLAUSE_SPLIT).map { stripJustifications(it.trim()) }.filter { it.isNotBlank() }
         if (clauses.isEmpty()) return Check(Verdict.OFF_TOPIC, "only says it is related, without a question about the career")
 
         var anyCareer = false
         var anyContent = false
+        var anyOrdinary = false
         for (clause in clauses) {
             if (GREETINGS.matches(clause)) continue
             val toks = tokens(clause)
-            val specific = isSpecific(clause, toks, n)
+            val specific = isSpecific(clause, toks, n) || SEASON.containsMatchIn(clause)
             // A sum is fine when it is about the save's numbers (a fee, a wage, goals), never on its own.
-            if (isArithmetic(clause) && !specific) return Check(Verdict.OFF_TOPIC, "\"$clause\" is not about the career")
+            if (isArithmetic(clause) && !specific && !sumHasUnits(clause)) return Check(Verdict.OFF_TOPIC, "\"$clause\" is not about the career")
             if (specific || isGeneric(toks)) {
                 anyCareer = true
                 continue
             }
+            // Only ordinary words ("what went wrong", "who is better"): nothing new, fine next to a career question.
+            if (toks.all { it in CONVERSATIONAL || it in WEAK_WORDS || it in n.words || it.all { ch -> ch.isDigit() } }) { anyOrdinary = true; continue }
             anyContent = true
             val weak = toks.any { it in WEAK_WORDS }
             val shortFollowUp = (followUp || rolePlay) && toks.size <= 14
             if (!weak && !shortFollowUp && !rolePlay) return Check(Verdict.OFF_TOPIC, "\"$clause\" is not about the career")
         }
-        if (!anyCareer && !anyContent) return Check(Verdict.GREETING)
+        if (!anyCareer && !anyContent && !anyOrdinary) return Check(Verdict.GREETING)
         if (!anyCareer && !followUp && !rolePlay) return Check(Verdict.OFF_TOPIC, "nothing in it is about football or the career")
         return Check(Verdict.ALLOW)
     }
