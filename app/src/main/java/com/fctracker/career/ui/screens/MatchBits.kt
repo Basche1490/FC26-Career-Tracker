@@ -65,7 +65,7 @@ fun GoalLines(m: MatchResult, state: AppState?, modifier: Modifier = Modifier) {
                 }
                 goalAssisterLabel(g, state)?.let { a ->
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Icon(SoccerBootIcon, contentDescription = "Assist", tint = c.muted, modifier = Modifier.size(14.dp))
+                        AssistIcon(c.muted, contentDescription = "Assist")
                         Muted(a, 12.sp, maxLines = 1)
                     }
                 }

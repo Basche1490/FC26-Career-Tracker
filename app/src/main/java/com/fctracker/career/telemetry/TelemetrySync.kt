@@ -298,7 +298,8 @@ class TelemetrySync(
                 nowSeconds = nowSeconds,
                 today = today,
                 crestUrlFor = ::getTeamCrestUrl,
-                signedPlayer = { name -> players.signedPlayer(name, current.startYear) }
+                signedPlayer = { name -> players.signedPlayer(name, current.startYear) },
+                lookup = players.index
             )
             notices = result.notices
             result.state

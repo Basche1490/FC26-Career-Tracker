@@ -125,6 +125,7 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
     var deleteFixture by remember { mutableStateOf<Fixture?>(null) }
     var expandedId by remember { mutableStateOf<String?>(null) }
     var headToHead by remember { mutableStateOf<String?>(null) }
+    var formPage by remember { mutableStateOf(0) }       // 1: the form opens on the line-up ("Lineup & stats")
 
     val matches = view.matches
     val upcoming = if (view.isArchived) emptyList() else CareerOps.upcoming(state)
@@ -151,7 +152,7 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
         fab = when {
             view.isArchived -> null
             showUpcoming && console -> ({ Fab("Add fixture", { newFixture = true }) })
-            else -> ({ Fab("Log match", { editMatch = null; showForm = true }) })
+            else -> ({ Fab("Log match", { editMatch = null; formPage = 0; showForm = true }) })
         }
     ) {
         if (!view.isArchived) item { Segmented(listOf("Played (${matches.size})", "Upcoming (${upcoming.size})"), tab, { tab = it; competition = MatchInsights.ALL_COMPETITIONS }) }
@@ -210,7 +211,7 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
             // a played day opens that match: its details (editable in the current season, read-only when archived)
             SeasonCalendar(view.season, matches, upcoming, onMatch = { m ->
                 expandedId = m.id
-                if (view.isArchived) detailMatch = m else { editMatch = m; showForm = true }
+                if (view.isArchived) detailMatch = m else { editMatch = m; formPage = 0; showForm = true }
             })
         }
         if (comps.size > 2) {
@@ -233,11 +234,11 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
         }
         itemsIndexed(visible, key = { i, m -> "${m.id}#$i" }) { _, m ->
             val open = expandedId == m.id || (expandedId == null && m.id == visible.firstOrNull()?.id)
-            SwipeRow(enabled = !view.isArchived, onEdit = { editMatch = m; showForm = true }, onDelete = { deleteMatch = m }) {
+            SwipeRow(enabled = !view.isArchived, onEdit = { editMatch = m; formPage = 0; showForm = true }, onDelete = { deleteMatch = m }) {
                 MatchTimelineRow(
                     m, state, open,
                     onToggle = { expandedId = if (open) "none" else m.id },
-                    onLineup = { if (view.isArchived) detailMatch = m else { editMatch = m; showForm = true } },
+                    onLineup = { if (view.isArchived) detailMatch = m else { editMatch = m; formPage = 1; showForm = true } },
                     onDelete = if (view.isArchived) null else ({ deleteMatch = m }),
                     archived = view.isArchived
                 )
@@ -249,11 +250,11 @@ fun MatchesScreen(viewModel: MainViewModel, onMenuClick: () -> Unit) {
         MatchFormModal(viewModel = viewModel, state = state, initialMatch = editMatch, onDismiss = { showForm = false }, onSave = { m ->
             if (editMatch != null) viewModel.updateMatchResult(m) else viewModel.addMatchResult(m)
             showForm = false
-        }, onHeadToHead = if (editMatch != null) ({ opp -> showForm = false; headToHead = opp }) else null)
+        }, onHeadToHead = if (editMatch != null) ({ opp -> showForm = false; headToHead = opp }) else null, initialPage = formPage)
     }
     headToHead?.let { opp ->
         HeadToHeadPage(state, opp, onClose = { headToHead = null }, onOpenMatch = { h ->
-            if (h.archived) detailMatch = h.match else { editMatch = h.match; showForm = true }
+            if (h.archived) detailMatch = h.match else { editMatch = h.match; formPage = 0; showForm = true }
         })
     }
     deleteMatch?.let { m ->
@@ -481,12 +482,12 @@ fun MatchDetailDialog(m: MatchResult, state: AppState, onDismiss: () -> Unit, on
                     FcText(name, 14.sp, FontWeight.SemiBold, maxLines = 1)
                     androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (isMotm) LineupSymbol("MOTM", c.warn) { Icon(Icons.Default.Star, null, tint = c.warn, modifier = Modifier.size(14.dp)) }
-                        if (p.goals > 0) LineupSymbol("${p.goals}", c.muted) { Icon(Icons.Default.SportsSoccer, null, tint = c.muted, modifier = Modifier.size(14.dp)) }
-                        if (assists > 0) LineupSymbol(if (assists == 1) "1 assist" else "$assists assists", c.muted) { Icon(SoccerBootIcon, null, tint = c.muted, modifier = Modifier.size(14.dp)) }
+                        if (p.goals > 0) LineupSymbol(countText(p.goals), c.muted, if (p.goals == 1) "1 goal" else "${p.goals} goals") { Icon(Icons.Default.SportsSoccer, null, tint = c.muted, modifier = Modifier.size(14.dp)) }
+                        if (assists > 0) LineupSymbol(countText(assists), c.muted, if (assists == 1) "1 assist" else "$assists assists") { AssistIcon(c.muted) }
                         if (p.saves > 0) LineupSymbol("${p.saves} saves", c.muted) { Icon(Icons.Default.Shield, null, tint = c.muted, modifier = Modifier.size(14.dp)) }
                         if (p.cleanSheet) LineupSymbol("Clean sheet", c.good) { Icon(Icons.Default.Check, null, tint = c.good, modifier = Modifier.size(14.dp)) }
-                        if (p.yellowCard) LineupSymbol("Yellow card", c.warn) { BookingCard(false, 14.dp) }
-                        if (p.redCard) LineupSymbol("Red card", c.bad) { BookingCard(true, 14.dp) }
+                        if (p.yellowCard) LineupSymbol("", c.warn, "Yellow card") { BookingCard(false, 14.dp) }
+                        if (p.redCard) LineupSymbol("", c.bad, "Red card") { BookingCard(true, 14.dp) }
                         p.subInMinute?.let { mm -> LineupSymbol("On $mm'", c.good) { Icon(Icons.Default.SwapVert, null, tint = c.good, modifier = Modifier.size(14.dp)) } }
                         p.subOutMinute?.let { mm -> LineupSymbol("Off $mm'", c.muted) { Icon(Icons.Default.SwapVert, null, tint = c.muted, modifier = Modifier.size(14.dp)) } }
                     }

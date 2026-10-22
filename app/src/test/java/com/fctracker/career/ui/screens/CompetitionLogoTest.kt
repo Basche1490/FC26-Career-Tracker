@@ -11,8 +11,10 @@ class CompetitionLogoTest {
 
     @Test
     fun theCarabaoCupAndTheChampionshipNeverShareALogo() {
-        assertEquals(LogoSource.WikipediaPage("EFL Cup"), first("Carabao Cup"))
-        assertEquals(LogoSource.WikipediaPage("EFL Cup"), first("EFL Cup"))
+        // the Carabao Cup's own logo, then its Wikipedia article
+        assertEquals(LogoSource.Url(CARABAO_CUP_LOGO), first("Carabao Cup"))
+        assertEquals(LogoSource.Url(CARABAO_CUP_LOGO), first("EFL Cup"))
+        assertEquals(LogoSource.WikipediaPage("EFL Cup"), competitionLogoSources("Carabao Cup")[1])
         assertEquals(LogoSource.WikipediaPage("EFL Championship"), first("EFL Championship"))
         assertNotEquals(first("Carabao Cup"), first("EFL Championship"))
         assertNotEquals(first("League One"), first("EFL Championship"))

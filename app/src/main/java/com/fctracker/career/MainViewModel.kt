@@ -1252,24 +1252,24 @@ class MainViewModel(application: android.app.Application) : androidx.lifecycle.A
     }
 
     /** The short (common) name of a real player from the database ("Sergio Busquets" for "Sergio Busquets Burgos"). */
-    fun shortPlayerName(fullName: String): String {
-        val key = com.fctracker.career.data.PlayerDatabase.normalize(fullName)
-        return shortNames[key] ?: fullName
-    }
+    /** "Sergio Busquets" for "Sergio Busquets Burgos": players are named the short way the game shows them. */
+    fun shortPlayerName(fullName: String): String = playerDb.index.shortName(fullName)
 
-    private val shortNames: Map<String, String> by lazy {
-        loadAllEafcPlayers()
-        allEafcPlayers.filter { it.commonName.isNotBlank() }.associate { com.fctracker.career.data.PlayerDatabase.normalize(it.name) to it.commonName.trim() }
-    }
-
-    /** Regens saved before the short names were used are named the short way too. */
+    /**
+     * Names saved the long way ("Regen of Sergio Busquets (Sergio Busquets Burgos)", a deal for "Pedro González López")
+     * are shortened, every player gets the short name the game shows, and a card a signing got with guessed details
+     * (born 1 January 1999, playing CM) is corrected from the database card of the same player.
+     */
     private fun shortenRegenNames() {
-        val lookup: (String) -> String? = { n -> shortNames[com.fctracker.career.data.PlayerDatabase.normalize(n)] }
-        // and a prospect who is already in the first team leaves the academy list
-        _state.update { com.fctracker.career.logic.Academy.firstTeamOnly(com.fctracker.career.logic.RegenNames.shorten(it, lookup)) }
+        val index = playerDb.index
+        _state.update {
+            val named = com.fctracker.career.logic.RegenNames.shorten(it, index::commonNameOf)
+            // and a prospect who is already in the first team leaves the academy list
+            com.fctracker.career.logic.Academy.firstTeamOnly(com.fctracker.career.logic.PlayerRepair.repair(named, index))
+        }
     }
 
-    // after shortNames above: properties and init blocks run in the order they are written
+    // after the properties above: properties and init blocks run in the order they are written
     init {
         viewModelScope.launch(Dispatchers.IO) {
             loadAllEafcPlayers()

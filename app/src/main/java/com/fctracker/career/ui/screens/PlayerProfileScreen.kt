@@ -282,7 +282,8 @@ fun PlayerProfileScreen(viewModel: MainViewModel, playerId: String, onBack: () -
                 }
             }
             item { FcButton("Edit player", { editing = true }, kind = ButtonKind.SECONDARY, icon = Icons.Default.Edit, full = true) }
-            if (!p.isAcademy) item { FcButton("Move back to youth academy", { confirmAcademy = true }, kind = ButtonKind.SECONDARY, full = true) }
+            // only a player who came up from the academy can go back to it
+            if (!p.isAcademy && p.isPromoted) item { FcButton("Move back to youth academy", { confirmAcademy = true }, kind = ButtonKind.SECONDARY, full = true) }
             item { FcButton("Record player retirement", { confirmRetire = true }, kind = ButtonKind.DANGER, full = true) }
         } else {
             item { Muted("No edit, academy or retirement buttons in an archived season.", 11.sp) }

@@ -1,4 +1,4 @@
--- FC26 AutoCapture v2.10.0 (Precision Live Telemetry & Atlas Tracker)
+-- FC26 AutoCapture v2.11.0 (Precision Live Telemetry & Atlas Tracker)
 -- Complete support for EFL Championship, Premier League, FA Cup, Carabao Cup, Play-offs.
 -- Gathers REAL in-game data: Real League Position, Real Lineups, Real Goal Scorers, Real MOTM.
 -- Strict League Rules: League matches NEVER have extra time or penalty shootouts.
@@ -26,7 +26,7 @@ require "imports/career_mode/helpers"
 
 assert(IsInCM(), "FC26 AutoCapture must be executed while a career is loaded")
 
-local VERSION = "2.10.0"
+local VERSION = "2.11.0"
 local SCRIPT_INSTANCE = "FC26_AUTOCAP_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
 _G["FC26_AUTOCAPTURE_CURRENT_INSTANCE"] = SCRIPT_INSTANCE
 
@@ -2601,6 +2601,119 @@ local function decode_fifa_date(days)
     return nil
 end
 
+-- BEGIN player_profile (this exact block is also run by tests/lua/test_transfer_logic.lua)
+-- A player's details from his players row: his positions, birthday, nation (the game's id), height, weight, foot,
+-- weak foot and ratings. They go with a signing, so the app's new card is right from the start, and with the career
+-- report, so a card that was made with guessed details is corrected. Nothing is guessed here: a value that is missing
+-- or impossible is left out. Needs to_int and decode_fifa_date (above). One table, PROFILE: the main chunk is near
+-- Lua's limit of 200 locals.
+local PROFILE = {}
+do
+    PROFILE.FIELDS = { "playerid", "preferredposition1", "preferredposition2", "preferredposition3", "birthdate", "nationality",
+        "height", "weight", "preferredfoot", "weakfootabilitytypecode", "overallrating", "potential" }
+    -- preferredposition 0-27, named the way the app names positions (left and right variants as the central one)
+    PROFILE.POSITIONS = { [0] = "GK", "CB", "RWB", "RB", "CB", "CB", "CB", "LB", "LWB", "CDM", "CDM", "CDM", "RM", "CM",
+        "CM", "CM", "LM", "CAM", "CAM", "CAM", "CF", "CF", "CF", "RW", "ST", "ST", "ST", "LW" }
+
+    local function value(row, field)
+        local v = row[field]
+        if type(v) == "table" then v = v.value end
+        return v
+    end
+
+    -- row: a players row (plain values or { value = ... } cells). Returns nil when it carries nothing usable.
+    function PROFILE.from_row(row)
+        if type(row) ~= "table" then return nil end
+        local p, positions, seen = {}, {}, {}
+        for i = 1, 3 do
+            local id = tonumber(value(row, "preferredposition" .. i))
+            local name = id and id >= 0 and PROFILE.POSITIONS[math.floor(id)] or nil
+            if name and not seen[name] then
+                seen[name] = true
+                positions[#positions + 1] = name
+            end
+        end
+        if #positions > 0 then p.positions = positions end
+        local iso, y = decode_fifa_date(value(row, "birthdate"))
+        if iso and y >= 1900 and y <= 2200 then p.birthDate = iso end
+        local nation = to_int(value(row, "nationality"), 0)
+        if nation > 0 and nation < 1000 then p.nation = nation end
+        local height, weight = to_int(value(row, "height"), 0), to_int(value(row, "weight"), 0)
+        if height >= 140 and height <= 220 then p.height = height end
+        if weight >= 40 and weight <= 130 then p.weight = weight end
+        local foot = to_int(value(row, "preferredfoot"), 0)
+        if foot == 1 then p.foot = "Right" elseif foot == 2 then p.foot = "Left" end
+        local weak = to_int(value(row, "weakfootabilitytypecode"), 0)
+        if weak >= 1 and weak <= 5 then p.weakFoot = weak end
+        local overall, potential = to_int(value(row, "overallrating"), 0), to_int(value(row, "potential"), 0)
+        if overall >= 1 and overall <= 99 then p.overall = overall end
+        if potential >= 1 and potential <= 99 then p.potential = potential end
+        if next(p) == nil then return nil end
+        return p
+    end
+
+    -- The profile as JSON, the keys always in the same order (the same player always gives the same text).
+    function PROFILE.json(p)
+        local parts = {}
+        if p.positions then
+            local names = {}
+            for i, n in ipairs(p.positions) do names[i] = '"' .. n .. '"' end
+            parts[#parts + 1] = '"positions": [' .. table.concat(names, ", ") .. ']'
+        end
+        if p.birthDate then parts[#parts + 1] = '"birthDate": "' .. p.birthDate .. '"' end
+        for _, k in ipairs({ "nation", "height", "weight" }) do
+            if p[k] then parts[#parts + 1] = string.format('"%s": %d', k, p[k]) end
+        end
+        if p.foot then parts[#parts + 1] = '"foot": "' .. p.foot .. '"' end
+        for _, k in ipairs({ "weakFoot", "overall", "potential" }) do
+            if p[k] then parts[#parts + 1] = string.format('"%s": %d', k, p[k]) end
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+end
+-- END player_profile
+
+-- Profiles of the wanted players (wanted[pid] = true), read from the players table: pid -> profile.
+function PROFILE.read(wanted)
+    local out = {}
+    if type(wanted) ~= "table" or next(wanted) == nil then return out end
+    pcall(function()
+        if type(GetDBTableRows) == "function" then
+            local rows = GetDBTableRows("players")
+            if type(rows) == "table" then
+                for _, r in ipairs(rows) do
+                    local cell = r.playerid
+                    local pid = tonumber(type(cell) == "table" and cell.value or cell) or 0
+                    if pid > 0 and wanted[pid] then out[pid] = PROFILE.from_row(r) end
+                end
+            end
+        end
+    end)
+    if next(out) ~= nil then return out end
+    pcall(function()
+        if LE and LE.db then
+            local pt = LE.db:GetTable("players")
+            if pt then
+                local r = pt:GetFirstRecord()
+                while r and r > 0 do
+                    local pid = tonumber(pt:GetRecordFieldValue(r, "playerid")) or 0
+                    if pid > 0 and wanted[pid] then
+                        local row = {}
+                        for _, f in ipairs(PROFILE.FIELDS) do
+                            local rec = r
+                            local ok, v = pcall(function() return pt:GetRecordFieldValue(rec, f) end)
+                            if ok then row[f] = v end
+                        end
+                        out[pid] = PROFILE.from_row(row)
+                    end
+                    r = pt:GetNextValidRecord()
+                end
+            end
+        end
+    end)
+    return out
+end
+
 function get_current_career_date()
     local ok, d = pcall(function() return GetCurrentDate() end)
     if ok and d and d.year and d.year > 2000 then
@@ -3200,6 +3313,10 @@ local function beam_transfer_to_bridge(t_data)
         string.format('"date": "%s"', jstr(date))
     }
     if t_data.feeUnknown then parts[#parts + 1] = '"feeUnknown": true' end
+    -- the game's id (the app then finds the player whatever his name), and for a signing his details from the game
+    local pid = math.floor(tonumber(t_data.pid) or 0)
+    if pid > 0 then parts[#parts + 1] = string.format('"playerId": %d', pid) end
+    if type(t_data.profile) == "table" then parts[#parts + 1] = '"profile": ' .. PROFILE.json(t_data.profile) end
     local payload = "{\n  " .. table.concat(parts, ",\n  ") .. "\n}"
 
     send_payload_to_bridge(payload, string.format("Transfer [%s]: %s (%s)", tostring(t_data.type), player, other))
@@ -3330,7 +3447,8 @@ local function emit_described(d, managed_club, force_sync)
     if manual_override[norm_name(d.playerName) .. "|" .. transfer_direction(d.type)] then return false end
     local sent = emit_transfer(d.key, {
         playerName = d.playerName, type = d.type, feeM = d.feeM, feeUnknown = d.feeUnknown,
-        fromToClub = d.fromToClub, date = d.date, clubName = managed_club, message = d.message
+        fromToClub = d.fromToClub, date = d.date, clubName = managed_club, message = d.message,
+        pid = d.pid, profile = d.profile
     }, force_sync)
     if sent then
         log_monitor(string.format("Transfer rule: %s -> %s (%s)", d.playerName, d.type, d.why or "?"))
@@ -3447,9 +3565,16 @@ local function sync_season_transfers(managed_tid, force_sync)
     })
     assign_big_deals(ctx, read_big_deals(managed_tid), arrivals, leavers)
 
+    -- the new players' details from the game go with their signing (positions, birthday, nation...)
+    local arrival_set = {}
+    for _, pid in ipairs(arrivals) do arrival_set[pid] = true end
+    local profiles = PROFILE.read(arrival_set)
+
     local synced_count = 0
     for _, pid in ipairs(arrivals) do
-        if emit_described(describe_arrival(pid, ctx), managed_club, force_sync) then synced_count = synced_count + 1 end
+        local d = describe_arrival(pid, ctx)
+        d.profile = profiles[pid]
+        if emit_described(d, managed_club, force_sync) then synced_count = synced_count + 1 end
     end
     for _, pid in ipairs(sorted_keys(loans_out)) do
         if emit_described(describe_departure(pid, ctx), managed_club, force_sync) then synced_count = synced_count + 1 end
@@ -4718,6 +4843,7 @@ do
         for pid in pairs(squad) do squad_ids[pid] = true end
         local player_fields = { "playerid", "overallrating", "potential" }
         for _, a in ipairs(CR.ATTRIBUTES) do player_fields[#player_fields + 1] = a[1] end
+        for _, f in ipairs(PROFILE.FIELDS) do player_fields[#player_fields + 1] = f end
         for _, r in ipairs((career_rows("players", player_fields, { field = "playerid", ids = squad_ids }))) do
             local pid = tonumber(r.playerid) or 0
             if squad[pid] then ratings[pid] = r end
@@ -4763,6 +4889,8 @@ do
                     if o > 0 and o < 100 then p.overall = o end
                     if pot > 0 and pot < 100 then p.potential = pot end
                     p.attributes = CR.attributes(rt)
+                    -- positions, birthday, nation...: the app corrects a card that was made with guessed details
+                    p.profile = PROFILE.from_row(rt)
                 end
                 if info.form then p.form = info.form end
                 if injuries[pid] then p.injury = { name = "Injury", start = injuries[pid].start, back = injuries[pid].back } end

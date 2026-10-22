@@ -50,6 +50,9 @@ private fun page(title: String, siteForFallback: String? = null): List<LogoSourc
     listOf<LogoSource>(LogoSource.WikipediaPage(title)) +
         (siteForFallback?.let { listOf(LogoSource.Url(favicon(it))) } ?: emptyList())
 
+/** The Carabao Cup (EFL Cup) logo. */
+const val CARABAO_CUP_LOGO = "https://assets.travelgroep.nl/images/83955/83955.png"
+
 /** Names that say nothing about which competition it is (the app's own placeholders). */
 private val GENERIC_COMPETITIONS = setOf("league", "cup", "domestic cup", "continental", "continental cup", "friendly", "friendlies")
 
@@ -65,7 +68,9 @@ fun competitionLogoSources(competition: String): List<LogoSource> {
     val c = competition.trim().lowercase()
     if (c.isEmpty() || c in GENERIC_COMPETITIONS || c.contains("friendl")) return emptyList()
     return when {
-        c.contains("carabao") || c.contains("efl cup") || c.contains("league cup") || c.contains("carling") -> page("EFL Cup")
+        // the Carabao Cup's own logo first; Wikipedia's picture when that one cannot be loaded
+        c.contains("carabao") || c.contains("efl cup") || c.contains("league cup") || c.contains("carling") ->
+            listOf<LogoSource>(LogoSource.Url(CARABAO_CUP_LOGO)) + page("EFL Cup")
         c.contains("efl trophy") || c.contains("papa john") || c.contains("vertu") -> page("EFL Trophy")
         c.contains("league one") -> page("EFL League One")
         c.contains("league two") -> page("EFL League Two")

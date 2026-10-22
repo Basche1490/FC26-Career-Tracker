@@ -106,6 +106,7 @@ fun SettingsScreen(viewModel: MainViewModel, onMenuClick: () -> Unit, nav: (Stri
             item { NotificationsCard(viewModel, console, nav) }
             item { SaveSlotsCard(viewModel) }
             item { DataCard(viewModel) }
+            item { Muted("Assist icon: “Footwear” by Magnific, flaticon.com.", 11.sp) }
         }
     }
 }

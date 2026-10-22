@@ -48,7 +48,23 @@ android {
 
   buildFeatures { compose = true }
 
-  testOptions { unitTests { isReturnDefaultValues = true } }
+  testOptions {
+    unitTests {
+      isReturnDefaultValues = true
+      isIncludeAndroidResources = true
+      // The screenshot tests (Robolectric) only run when asked for: gradle :app:testDebugUnitTest -Pscreenshots.
+      // CI runs them in a job of their own and keeps the pictures; the normal unit tests leave them out.
+      all { test ->
+        if (project.hasProperty("screenshots")) {
+          test.filter.includeTestsMatching("com.fctracker.career.screenshots.*")
+          test.systemProperty("screenshots.dir", layout.buildDirectory.dir("screenshots").get().asFile.absolutePath)
+          test.maxHeapSize = "3g"
+        } else {
+          test.exclude("**/screenshots/**")
+        }
+      }
+    }
+  }
 
   dependenciesInfo {
     includeInApk = false
@@ -81,4 +97,9 @@ dependencies {
   testImplementation(libs.kotlinx.coroutines.test)
   // The Android SDK's org.json is a stub in plain JVM unit tests, so tests use the real implementation.
   testImplementation("org.json:json:20240303")
+  // Screenshot tests: the real screens drawn on the JVM (see testOptions above).
+  testImplementation("org.robolectric:robolectric:4.14.1")
+  testImplementation(platform(libs.androidx.compose.bom))
+  testImplementation("androidx.compose.ui:ui-test-junit4")
+  debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

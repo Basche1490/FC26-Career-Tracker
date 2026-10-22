@@ -504,11 +504,18 @@ internal fun EstimatedChip(onClick: () -> Unit) {
 }
 
 
-/** One symbol under a lineup name: an icon and a short word ("2", "1 assist", "Off 77'"). */
+/**
+ * One symbol under a lineup name: an icon, and a short word when it says more than the icon ("2" goals, "Off 77'").
+ * [description] is what a screen reader says for it ("Yellow card").
+ */
 @Composable
-internal fun LineupSymbol(text: String, color: Color, icon: @Composable () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+internal fun LineupSymbol(text: String, color: Color, description: String? = null, icon: @Composable () -> Unit) {
+    val m = if (description != null) Modifier.semantics(mergeDescendants = true) { contentDescription = description } else Modifier
+    Row(m, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         icon()
-        Text(text, fontSize = 11.sp, color = color)
+        if (text.isNotBlank()) Text(text, fontSize = 11.sp, color = color)
     }
 }
+
+/** A count beside an icon only from two up: one goal is just the ball, two are the ball and "2". */
+internal fun countText(n: Int) = if (n > 1) "$n" else ""

@@ -12,6 +12,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -161,7 +162,10 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
             }
         }
 
-        CompositionLocalProvider(LocalOpenDrawer provides openDrawer) {
+        // Log match, Log deal, Edit player and Head to head open over everything, in this window (see FcOverlays)
+        val overlays = remember { com.fctracker.career.ui.components.FcOverlays() }
+        CompositionLocalProvider(LocalOpenDrawer provides openDrawer, com.fctracker.career.ui.components.LocalFcOverlays provides overlays) {
+          Box(Modifier.fillMaxSize()) {
             ModalNavigationDrawer(
                 drawerState = drawerState,
                 scrimColor = com.fctracker.career.ui.theme.FcScrim,
@@ -206,6 +210,8 @@ fun MainApp(viewModel: MainViewModel = viewModel()) {
                     }
                 }
             }
+            com.fctracker.career.ui.components.FcOverlayHost(overlays)
+          }
         }
     }
 }

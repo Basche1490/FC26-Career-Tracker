@@ -152,7 +152,7 @@ fun TransferFormModal(
                         if (!playerPicked) {
                             val shown = candidates.filter { player.isBlank() || it.displayName.contains(player, true) || it.name.contains(player, true) || it.primaryPosition.equals(player.trim(), true) }
                             if (shown.isEmpty()) Muted("No first-team player matches.", 12.sp)
-                            else SquadPickList(shown.take(14)) { p -> player = p.displayName; playerPicked = true }
+                            else SquadPickList(shown) { p -> player = p.displayName; playerPicked = true }
                         }
                     } else {
                         FcField("Player name", player, { player = it; playerPicked = false }, placeholder = "Type a name",

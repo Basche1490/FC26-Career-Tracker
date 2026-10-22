@@ -16,6 +16,9 @@ import com.fctracker.career.TeamSheet
 import com.fctracker.career.WorldTopScorer
 import com.fctracker.career.WorldWinner
 import com.fctracker.career.logic.Dates
+import com.fctracker.career.logic.GameProfile
+import com.fctracker.career.logic.PlayerCards
+import com.fctracker.career.logic.PlayerLookup
 import com.fctracker.career.logic.WorldWinners
 import com.fctracker.career.logic.LeagueTables
 import com.fctracker.career.logic.Trophies
@@ -61,7 +64,11 @@ object CareerReport {
         return players.indexOfFirst { sameName(it.name, name) || sameName(it.displayName, name) }
     }
 
-    fun apply(state: AppState, data: JSONObject): Result {
+    /**
+     * @param lookup the built-in player database: players are named by their short name ("Pedri") and a card's nation is
+     * taken from the database card of the same game id
+     */
+    fun apply(state: AppState, data: JSONObject, lookup: PlayerLookup = PlayerLookup.NONE): Result {
         var s = state
         var changed = false
         val newInjuries = mutableListOf<String>()
@@ -120,7 +127,7 @@ object CareerReport {
         // -- league leaders --------------------------------------------------------------------------------------------
         data.optJSONArray("leaders")?.takeUnless { lastSeasonsData }?.let { arr ->
             fun list(a: JSONArray?) = a.objects().mapNotNull { o ->
-                val p = o.str("player")
+                val p = o.str("player").let { if (it.isEmpty()) it else lookup.shortName(it) }
                 if (p.isEmpty()) null else StatLeader(p, o.str("club"), o.int("value"), o.str("club").equals(s.clubName, true) || o.optBoolean("user", false))
             }
             val incoming = arr.objects().map { o ->
@@ -133,7 +140,7 @@ object CareerReport {
         data.optJSONArray("stats")?.takeUnless { lastSeasonsData }?.let { arr ->
             val incoming = arr.objects().map { o ->
                 PlayerSeasonStat(
-                    playerName = o.str("name"), gamePlayerId = o.int("playerId").takeIf { it > 0 }, competition = o.str("competition"),
+                    playerName = o.str("name").let { if (it.isEmpty()) it else lookup.shortName(it) }, gamePlayerId = o.int("playerId").takeIf { it > 0 }, competition = o.str("competition"),
                     appearances = o.int("apps"), goals = o.int("goals"), assists = o.int("assists"), cleanSheets = o.int("cleanSheets"),
                     yellowCards = o.int("yellow"), redCards = o.int("red"), averageRating = o.dbl("rating"), motm = o.int("motm")
                 )
@@ -149,6 +156,14 @@ object CareerReport {
             val suspensionsKnown = data.optBoolean("suspensionsKnown", true)
             val players = s.players.toMutableList()
             val reported = mutableSetOf<Int>()
+            // nation names by the game's id, learned from players the database knows (it names their nation)
+            val nations = mutableMapOf<Int, String>()
+            for (o in arr.objects()) {
+                val id = o.int("playerId")
+                val nation = o.optJSONObject("profile")?.let { GameProfile.parse(it) }?.nation ?: continue
+                val known = if (id > 0) lookup.byGameId(id, s.startYear)?.nationality else null
+                if (!known.isNullOrBlank() && !known.equals("Unknown", true)) nations.putIfAbsent(nation, known)
+            }
             for (o in arr.objects()) {
                 val idx = findPlayer(players, o.int("playerId"), o.str("name"))
                 if (idx < 0) continue
@@ -156,6 +171,18 @@ object CareerReport {
                 var p = players[idx]
                 val before = p
                 if (o.int("playerId") > 0 && p.gamePlayerId == null) p = p.copy(gamePlayerId = o.int("playerId"))
+                val dbCard = p.gamePlayerId?.let { lookup.byGameId(it, s.startYear) }
+                // the short name the game shows, when nobody named him otherwise
+                if (p.nickname.isNullOrBlank() && p.customDisplayName.isNullOrBlank()) {
+                    val short = dbCard?.nickname?.takeIf { it.isNotBlank() } ?: lookup.shortName(p.name).takeIf { it != p.name }
+                    if (short != null && !short.equals(p.name, true)) p = p.copy(nickname = short)
+                }
+                // a card made with guessed details (born 1 January 1999, playing CM) takes the game's own
+                GameProfile.parse(o.optJSONObject("profile"))?.let { g ->
+                    val nation = dbCard?.nationality?.takeIf { it.isNotBlank() && !it.equals("Unknown", true) } ?: GameProfile.nationName(g.nation, nations)
+                    p = PlayerCards.withProfile(p, g, nation, s.startYear)
+                }
+                if (dbCard != null) p = PlayerCards.withDatabase(p, dbCard)
                 if (o.int("number") > 0) p = p.copy(number = o.int("number"))
                 o.str("role").takeIf { it.isNotEmpty() }?.let { p = p.copy(squadRole = it) }
                 if (o.has("wage") && o.int("wage") > 0) p = p.copy(wageK = o.int("wage"))
@@ -227,7 +254,7 @@ object CareerReport {
                 if (merged != s.worldWinners) { s = s.copy(worldWinners = merged); changed = true }
             }
             data.optJSONArray("topScorers")?.let { arr ->
-                val incoming = arr.objects().map { o -> WorldTopScorer(region = o.str("region"), competition = o.str("competition"), player = o.str("player"), club = o.str("club"), goals = o.int("goals")) }
+                val incoming = arr.objects().map { o -> WorldTopScorer(region = o.str("region"), competition = o.str("competition"), player = o.str("player").let { if (it.isEmpty()) it else lookup.shortName(it) }, club = o.str("club"), goals = o.int("goals")) }
                 val merged = WorldWinners.mergeScorers(s.worldTopScorers, incoming, worldSeason)
                 if (merged != s.worldTopScorers) { s = s.copy(worldTopScorers = merged); changed = true }
             }

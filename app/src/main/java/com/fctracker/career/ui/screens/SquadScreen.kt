@@ -211,7 +211,9 @@ private fun RosterList(state: AppState, view: SeasonView, console: Boolean, open
     val first = roster.filter { !it.isAcademy && !it.status.equals("Academy", true) }
     val attention = remember(first, today) { if (today == null) emptyList() else ContractTime.attentionList(first, today) }
     val match: (Player) -> Boolean = { p -> query.isBlank() || p.displayName.contains(query, true) || p.name.contains(query, true) || p.primaryPosition.contains(query, true) }
-    val shown = (if (attentionOnly && attention.isNotEmpty()) attention else first.sortedByDescending { it.overall }).filter(match)
+    // strikers first, the goalkeepers last; the best first within a position
+    val byPosition = first.sortedWith(compareBy<Player>({ LineupOrder.rank(it.primaryPosition) }, { LineupOrder.side(it.primaryPosition) }).thenByDescending { it.overall })
+    val shown = (if (attentionOnly && attention.isNotEmpty()) attention else byPosition).filter(match)
     val youth = (view.academy + roster.filter { it.isAcademy || it.status.equals("Academy", true) }).distinctBy { it.id }.filter(match).sortedByDescending { it.overall }
     SquadList {
         item {

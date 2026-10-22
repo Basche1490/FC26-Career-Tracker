@@ -3,8 +3,9 @@ package com.fctracker.career.data
 import android.content.Context
 import com.fctracker.career.EafcPlayer
 import com.fctracker.career.Player
+import com.fctracker.career.logic.PlayerCards
+import com.fctracker.career.logic.PlayerIndex
 import org.json.JSONArray
-import java.text.Normalizer
 
 /**
  * The built-in EA FC player list (assets/players.json): search, squad import and "who is this signing?".
@@ -15,6 +16,9 @@ class PlayerDatabase(private val loader: () -> String) {
     constructor(context: Context) : this({
         context.applicationContext.assets.open("players.json").bufferedReader().use { it.readText() }
     })
+
+    /** Look-ups by the game's id, by name, and players' short names (see [PlayerIndex]). */
+    val index: PlayerIndex by lazy { PlayerIndex(all) }
 
     val all: List<EafcPlayer> by lazy {
         try {
@@ -38,8 +42,8 @@ class PlayerDatabase(private val loader: () -> String) {
     }
 
     companion object {
-        const val FIRST_ID = 1
-        const val LAST_ID = 280000
+        const val FIRST_ID = PlayerCards.FIRST_ID
+        const val LAST_ID = PlayerCards.LAST_ID
 
         fun parse(json: String): List<EafcPlayer> {
             val array = JSONArray(json)
@@ -70,53 +74,17 @@ class PlayerDatabase(private val loader: () -> String) {
             return list
         }
 
-        fun headshotUrl(id: Int): String =
-            if (id in FIRST_ID..LAST_ID) "https://cdn.futbin.com/content/fifa25/img/players/$id.png" else ""
+        fun headshotUrl(id: Int): String = PlayerCards.headshotUrl(id)
 
         /** "6/15/1992 12:00:00 AM" -> "1992-06-15". Anything unreadable is returned as it was. */
-        fun isoBirthDate(raw: String): String {
-            val datePart = raw.trim().split(" ")[0]
-            val parts = datePart.split("/")
-            return if (parts.size == 3 && parts[2].length == 4) {
-                "${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}"
-            } else datePart
-        }
+        fun isoBirthDate(raw: String): String = PlayerCards.isoBirthDate(raw)
 
         /** Age counted the way the app counts it everywhere: season year minus birth year. */
-        fun ageIn(seasonYear: Int, isoBirthDate: String): Int {
-            val birthYear = isoBirthDate.substringBefore("-").toIntOrNull() ?: return 25
-            return seasonYear - birthYear
-        }
+        fun ageIn(seasonYear: Int, isoBirthDate: String): Int = PlayerCards.ageIn(seasonYear, isoBirthDate)
 
         /** A squad player built from a database card. */
-        fun toPlayer(e: EafcPlayer, seasonYear: Int): Player {
-            val alt = e.alternatePositions.split(",")
-            val iso = isoBirthDate(e.birthdate)
-            return Player(
-                name = e.name,
-                nickname = e.commonName.takeIf { it.isNotBlank() },
-                primaryPosition = e.position,
-                secondaryPosition = alt.getOrNull(0)?.trim()?.takeIf { it.isNotBlank() },
-                tertiaryPosition = alt.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() },
-                age = ageIn(seasonYear, iso),
-                startingOverall = e.rating,
-                overall = e.rating,
-                potential = e.potential,
-                valueM = e.value,
-                wageK = e.wage,
-                nationality = e.nationality,
-                birthDate = iso,
-                height = e.height,
-                weight = e.weight,
-                preferredFoot = e.preferredFoot,
-                weakFoot = e.weakFoot,
-                headshotUrl = headshotUrl(e.id)
-            )
-        }
+        fun toPlayer(e: EafcPlayer, seasonYear: Int): Player = PlayerCards.toPlayer(e, seasonYear)
 
-        fun normalize(s: String): String {
-            val decomposed = Normalizer.normalize(s, Normalizer.Form.NFD)
-            return decomposed.replace("\\p{InCombiningDiacriticalMarks}+".toRegex(), "").lowercase().trim()
-        }
+        fun normalize(s: String): String = PlayerCards.normalize(s)
     }
 }

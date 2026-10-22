@@ -126,10 +126,12 @@ fun MatchFormModal(
     initialMatch: MatchResult?,
     onDismiss: () -> Unit,
     onSave: (MatchResult) -> Unit,
-    onHeadToHead: ((String) -> Unit)? = null
+    onHeadToHead: ((String) -> Unit)? = null,
+    initialPage: Int = 0
 ) {
     val c = FcTheme.colors
-    var page by remember { mutableStateOf(0) }
+    // 0 = the match, 1 = the line-up and every player's numbers ("Lineup & stats" on a match opens that one)
+    var page by remember { mutableStateOf(initialPage.coerceIn(0, 1)) }
     var matchDate by remember { mutableStateOf(initialMatch?.matchDate?.takeIf { Dates.isDate(it) } ?: CareerOps.today(state)) }
     var opponent by remember { mutableStateOf(initialMatch?.opponentName ?: "") }
     var opponentCrestUrl by remember { mutableStateOf(initialMatch?.opponentCrestUrl ?: "") }
@@ -297,7 +299,11 @@ fun MatchFormModal(
                 }
             }
             item { FcButton("Save match result", { onSave(build()) }, icon = Icons.Default.Save, full = true, enabled = canSave) }
-            item { FcButton("Edit lineup and player stats", { page = 1 }, kind = ButtonKind.SECONDARY, icon = Icons.Default.Groups, full = true) }
+            item {
+                // a new match has no line-up yet: the button says so
+                FcButton(if (performances.isEmpty()) "Add lineup and player stats" else "Edit lineup and player stats (${performances.size})", { page = 1 },
+                    kind = ButtonKind.SECONDARY, icon = Icons.Default.Groups, full = true)
+            }
             if (onHeadToHead != null && opponent.isNotBlank()) item {
                 Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(role = Role.Button) { onHeadToHead(opponent.trim()) }.padding(vertical = 12.dp),
@@ -310,6 +316,12 @@ fun MatchFormModal(
         }
     }
 }
+
+/** A line-up row with something entered for it (a rating other than the default, goals, cards, a substitution...). */
+internal fun hasNumbers(p: PlayerPerformance): Boolean =
+    (p.rating > 0 && p.rating != PlayerPerformance(playerId = "").rating) || p.goals > 0 || p.assists > 0 || p.goalAssisters.any { it != null } ||
+        p.subInMinute != null || p.subOutMinute != null || p.yellowCard || p.redCard || p.saves > 0 || p.passes > 0 || p.shots > 0 ||
+        p.tackles > 0 || p.interceptions > 0 || p.isMotm
 
 /** Up, the number, down: the design's score stepper. */
 @Composable
@@ -377,7 +389,7 @@ private fun LineupPage(
                     FcButton("Auto-pick XI", {
                         // the eleven on the pitch in Squad, in their places; players who already have numbers stay
                         val eleven = formationEleven(state.players, state.activeFormation)
-                        val keep = performances.values.filter { p -> p.rating > 0 || p.goals > 0 || p.assists > 0 || p.subInMinute != null || p.subOutMinute != null }.map { it.playerId }.toSet()
+                        val keep = performances.values.filter { hasNumbers(it) }.map { it.playerId }.toSet()
                         performances.keys.toList().filter { it !in keep && eleven.none { e -> e.first.id == it } }.forEach { performances.remove(it) }
                         eleven.forEach { (p, pos) -> performances[p.id] = (performances[p.id] ?: PlayerPerformance(playerId = p.id)).copy(position = pos) }
                     }, kind = ButtonKind.SECONDARY, small = true)
@@ -409,12 +421,12 @@ private fun LineupPage(
                                     FcText(shown, 14.sp, FontWeight.SemiBold, maxLines = 1)
                                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         if (isMotm) LineupSymbol("MOTM", c.warn) { Icon(Icons.Default.Star, null, tint = c.warn, modifier = Modifier.size(14.dp)) }
-                                        if (perf.goals > 0) LineupSymbol("${perf.goals}", c.muted) { Icon(Icons.Default.SportsSoccer, "Goals", tint = c.muted, modifier = Modifier.size(14.dp)) }
-                                        if (assists > 0) LineupSymbol(if (assists == 1) "1 assist" else "$assists assists", c.muted) { Icon(SoccerBootIcon, "Assists", tint = c.muted, modifier = Modifier.size(14.dp)) }
+                                        if (perf.goals > 0) LineupSymbol(countText(perf.goals), c.muted, if (perf.goals == 1) "1 goal" else "${perf.goals} goals") { Icon(Icons.Default.SportsSoccer, null, tint = c.muted, modifier = Modifier.size(14.dp)) }
+                                        if (assists > 0) LineupSymbol(countText(assists), c.muted, if (assists == 1) "1 assist" else "$assists assists") { AssistIcon(c.muted) }
                                         if (keeper && perf.saves > 0) LineupSymbol("${perf.saves} saves", c.muted) { Icon(Icons.Default.Shield, null, tint = c.muted, modifier = Modifier.size(14.dp)) }
                                         if (keeper && goalsAgainst == 0) LineupSymbol("Clean sheet", c.good) { Icon(Icons.Default.Check, null, tint = c.good, modifier = Modifier.size(14.dp)) }
-                                        if (perf.yellowCard) LineupSymbol("Yellow card", c.warn) { BookingCard(false, 14.dp) }
-                                        if (perf.redCard) LineupSymbol("Red card", c.bad) { BookingCard(true, 14.dp) }
+                                        if (perf.yellowCard) LineupSymbol("", c.warn, "Yellow card") { BookingCard(false, 14.dp) }
+                                        if (perf.redCard) LineupSymbol("", c.bad, "Red card") { BookingCard(true, 14.dp) }
                                         perf.subInMinute?.let { m -> LineupSymbol("On $m'", c.good) { Icon(Icons.Default.SwapVert, null, tint = c.good, modifier = Modifier.size(14.dp)) } }
                                         perf.subOutMinute?.let { m -> LineupSymbol("Off $m'", c.muted) { Icon(Icons.Default.SwapVert, null, tint = c.muted, modifier = Modifier.size(14.dp)) } }
                                     }

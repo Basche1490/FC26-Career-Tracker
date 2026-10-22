@@ -9,6 +9,9 @@ import com.fctracker.career.PlayerPerformance
 import com.fctracker.career.Substitution
 import com.fctracker.career.TransferLog
 import com.fctracker.career.isPlaceholderPlayerName
+import com.fctracker.career.logic.GameProfile
+import com.fctracker.career.logic.PlayerCards
+import com.fctracker.career.logic.PlayerLookup
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -55,6 +58,7 @@ object TelemetryProcessor {
      * @param today yyyy-MM-dd, used when a payload has no date
      * @param crestUrlFor maps an opponent name to a crest image URL
      * @param signedPlayer looks a newly signed player up in the built-in player database
+     * @param lookup the built-in player database: a signing by the game's id, and players' short names
      */
     fun apply(
         state: AppState,
@@ -63,7 +67,8 @@ object TelemetryProcessor {
         nowSeconds: Long,
         today: String,
         crestUrlFor: (String) -> String = { "" },
-        signedPlayer: (String) -> Player? = { null }
+        signedPlayer: (String) -> Player? = { null },
+        lookup: PlayerLookup = PlayerLookup.NONE
     ): TelemetryResult {
         var base = state
         val events = state.liveEvents.toMutableList()
@@ -93,14 +98,18 @@ object TelemetryProcessor {
 
                 when (dataType) {
                     "transfer" -> {
-                        val name = data.optString("playerName")
+                        val rawName = data.optString("playerName")
+                        // the name the game shows ("Pedri", not "Pedro González López")
+                        val name = lookup.shortName(rawName)
                         val type = data.optString("type")
                         val date = data.optString("date")
                         val feeM = data.optDouble("feeM", 0.0)
                         val fromToClub = data.optString("fromToClub")
                         val feeUnknown = data.optBoolean("feeUnknown", false)
+                        val gameId = data.optInt("playerId", 0)
+                        val profile = GameProfile.parse(data.optJSONObject("profile"))
 
-                        val existingIdx = transfers.indexOfFirst { sameDeal(it, name, type, date) }
+                        val existingIdx = transfers.indexOfFirst { sameDeal(it, name, type, date, lookup) }
                         if (existingIdx >= 0) {
                             // The same deal again. Take over what the earlier copy was missing (a club, a fee, a
                             // corrected type) but never overwrite what is already there, so edits made by hand stay.
@@ -128,7 +137,8 @@ object TelemetryProcessor {
                                 squad = promoted.first.toMutableList()
                                 academy = promoted.second
                             } else {
-                                squad = applyTransferToSquad(squad, name, type, feeM, signedPlayer)
+                                val signing = Signing(name, rawName, gameId, profile, state.startYear, nationNames(squad))
+                                squad = applyTransferToSquad(squad, signing, type, feeM, signedPlayer, lookup)
                             }
                             if (alert) notices.add(TelemetryNotice(evTitle, evMessage, "transfers", true))
                         }
@@ -178,6 +188,12 @@ object TelemetryProcessor {
                             academy = applied.academy
                             hasNew = true
                         }
+                        // a deal recorded as a signing (or a sale) that the game lists as a loan becomes the loan
+                        val corrected = loanCorrections(transfers, squad, state.startYear)
+                        if (corrected != transfers) {
+                            transfers.clear(); transfers.addAll(corrected)
+                            hasNew = true
+                        }
                         if (report.careerDate != null && report.careerDate != careerDate) {
                             careerDate = report.careerDate   // the newest report wins: a reloaded older save moves it back
                             hasNew = true
@@ -187,7 +203,7 @@ object TelemetryProcessor {
                         // Fixtures, tables, statistics, injuries, awards, winners, the European ranking...: stored
                         // quietly. A new injury is the one part that raises an alert.
                         val before = base.copy(players = squad, academyPlayers = academy, careerDate = careerDate, activeInjuries = injuries)
-                        val r = CareerReport.apply(before, data)
+                        val r = CareerReport.apply(before, data, lookup)
                         if (r.changed) {
                             base = r.state
                             squad = r.state.players.toMutableList()
@@ -254,8 +270,9 @@ object TelemetryProcessor {
     // ---------------------------------------------------------------------------------------------
 
     /** Same player, same day and same kind of deal. An earlier "Promoted In" is the same deal as a later signing. */
-    private fun sameDeal(existing: TransferLog, name: String, type: String, date: String): Boolean {
-        if (!existing.playerName.equals(name, ignoreCase = true) || existing.date != date) return false
+    private fun sameDeal(existing: TransferLog, name: String, type: String, date: String, lookup: PlayerLookup): Boolean {
+        val samePlayer = existing.playerName.equals(name, ignoreCase = true) || lookup.shortName(existing.playerName).equals(name, ignoreCase = true)
+        if (!samePlayer || existing.date != date) return false
         return existing.type.equals(type, ignoreCase = true) ||
             (existing.type.equals("Promoted In", ignoreCase = true) && type.equals("In (Permanent)", ignoreCase = true))
     }
@@ -289,19 +306,67 @@ object TelemetryProcessor {
         return merged
     }
 
+    /**
+     * The game knows best whether a player is here on loan (or away on loan): a "signing" with no fee of a player the
+     * squad report shows on loan from another club is turned into the loan (with that club), and a "sale" with no fee of
+     * a player who is away on loan into the loan out. Only this season's deals are looked at.
+     */
+    internal fun loanCorrections(transfers: List<TransferLog>, squad: List<Player>, seasonYear: Int): List<TransferLog> {
+        val seasonStart = "%04d-07-01".format(seasonYear)
+        fun named(t: TransferLog, p: Player) = t.playerName.equals(p.displayName, true) || t.playerName.equals(p.name, true)
+        return transfers.map { t ->
+            if (t.date < seasonStart || t.feeM > 0.0) return@map t
+            val p = squad.firstOrNull { named(t, it) && it.loanDirection != null } ?: return@map t
+            when {
+                p.loanDirection == "in" && t.type == "In (Permanent)" ->
+                    t.copy(type = "In (Loan)", feeUnknown = false, fromToClub = p.loanClub?.takeIf { it.isNotBlank() && !isKnownClub(t.fromToClub) } ?: t.fromToClub)
+                p.loanDirection == "out" && t.type == "Out (Permanent)" ->
+                    t.copy(type = "Out (Loan)", feeUnknown = false, fromToClub = p.loanClub?.takeIf { it.isNotBlank() && !isKnownClub(t.fromToClub) } ?: t.fromToClub)
+                else -> t
+            }
+        }
+    }
+
+    /** Who a transfer is about: his short and raw names, the game's id, his details from the game. */
+    private class Signing(
+        val name: String,
+        val rawName: String,
+        val gameId: Int,
+        val profile: GameProfile?,
+        val seasonYear: Int,
+        val nations: Map<Int, String>
+    )
+
+    /**
+     * Nation names by the game's id, as the career's own players show them (a squad report or a database card named
+     * the nation of a player whose id is known): better than the app's built-in list for a regen's nation.
+     */
+    private fun nationNames(squad: List<Player>): Map<Int, String> =
+        squad.filter { it.nationalityId != null && it.nationality.isNotBlank() && !it.nationality.equals("Unknown", true) }
+            .groupBy { it.nationalityId!! }.mapValues { (_, list) -> list.groupingBy { it.nationality }.eachCount().maxByOrNull { it.value }!!.key }
+
     private fun applyTransferToSquad(
         squad: MutableList<Player>,
-        name: String,
+        who: Signing,
         type: String,
         feeM: Double,
-        signedPlayer: (String) -> Player?
+        signedPlayer: (String) -> Player?,
+        lookup: PlayerLookup
     ): MutableList<Player> {
-        val idx = squad.indexOfFirst {
-            it.name.equals(name, ignoreCase = true) || it.displayName.equals(name, ignoreCase = true)
-        }
+        val name = who.name
+        // the game's id finds him whatever he is called; otherwise any of his names
+        val idx = squad.indexOfFirst { who.gameId > 0 && it.gamePlayerId == who.gameId }.takeIf { it >= 0 }
+            ?: squad.indexOfFirst {
+                it.name.equals(name, ignoreCase = true) || it.displayName.equals(name, ignoreCase = true) ||
+                    it.name.equals(who.rawName, ignoreCase = true)
+            }
         val isLoan = type.contains("Loan", ignoreCase = true)
+        val nation = GameProfile.nationName(who.profile?.nation, who.nations)
         if (idx >= 0) {
-            val existing = squad[idx]
+            var existing = squad[idx]
+            if (who.gameId > 0 && existing.gamePlayerId == null) existing = existing.copy(gamePlayerId = who.gameId)
+            // a card that was made with guessed details takes the game's
+            who.profile?.let { existing = PlayerCards.withProfile(existing, it, nation, who.seasonYear) }
             squad[idx] = when {
                 type.contains("Out", true) && isLoan ->
                     existing.copy(status = "Loaned Out", isLoanedOut = true, isStartingXI = false)
@@ -315,15 +380,20 @@ object TelemetryProcessor {
                     existing.copy(status = "Active", isLoanedOut = false, isAcademy = false)
             }
         } else if (type.contains("In", true) || type.contains("Sign", true)) {
-            // Prefer the real card from the built-in player database; fall back to a plain placeholder.
-            val known = signedPlayer(name)
-            squad.add(
-                (known ?: Player(name = name, overall = 72, valueM = if (feeM > 0) feeM else 2.0)).copy(
-                    status = if (isLoan) "Loaned In" else "Active",
-                    isLoanedIn = isLoan,
-                    valueM = if (feeM > 0) feeM else (known?.valueM ?: 2.0)
-                )
+            // The real card: by the game's id, then by name in the built-in player database; a regen or a youth
+            // player is not in it, and his card is built from the game's details.
+            val known = (if (who.gameId > 0) lookup.byGameId(who.gameId, who.seasonYear) else null)
+                ?: lookup.byName(who.rawName, who.seasonYear) ?: signedPlayer(who.rawName)
+            val base = known ?: Player(name = name, overall = who.profile?.overall ?: 72, valueM = if (feeM > 0) feeM else 2.0)
+            var card = base.copy(
+                status = if (isLoan) "Loaned In" else "Active",
+                isLoanedIn = isLoan,
+                valueM = if (feeM > 0) feeM else (known?.valueM?.takeIf { it > 0 } ?: 2.0),
+                gamePlayerId = who.gameId.takeIf { it > 0 } ?: base.gamePlayerId
             )
+            // a new card takes what the game says about him now (positions, ratings); a database card keeps its nation
+            who.profile?.let { card = PlayerCards.withProfile(card, it, nation, who.seasonYear, force = true) }
+            squad.add(card)
         }
         return squad
     }

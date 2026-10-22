@@ -1203,7 +1203,9 @@ do
                 { playerid = 462221, teamidloanedfrom = 69 }, { playerid = 461607, teamidloanedfrom = 69 },
             },
             players = {
-                { playerid = 463320, playerjointeamdate = 162802 },      -- EA day count of 2028-07-09
+                { playerid = 463320, playerjointeamdate = 162802,        -- EA day count of 2028-07-09
+                  preferredposition1 = 25, preferredposition2 = 27, preferredposition3 = 26, birthdate = 150000, nationality = 45,
+                  height = 182, weight = 77, preferredfoot = 2, weakfootabilitytypecode = 4, overallrating = 71, potential = 80 },
                 { playerid = 462884, playerjointeamdate = 20280714 },
                 { playerid = 463808, playerjointeamdate = 20280701 },
                 { playerid = 460045, playerjointeamdate = 20280701 },
@@ -1260,6 +1262,12 @@ do
     check(g and g.type == "In (Permanent)" and tonumber(g.feeM) == 26.0 and g.feeUnknown == nil,
         "Guerra is a signing for 26.0M (not 'Promoted In')", g and (g.type .. " " .. g.feeM))
     check(g and g.date == "2028-07-09", "Guerra: signing day from the EA day count", g and g.date)
+    check(g and g.playerId == "463320", "a signing carries the game's player id", g and g.playerId)
+    check(g and g.profile and g.profile:find('"positions": ["ST", "LW"]', 1, true) and g.profile:find('"birthDate": "1993-06-21"', 1, true)
+        and g.profile:find('"nation": 45', 1, true) and g.profile:find('"foot": "Left"', 1, true) and g.profile:find('"overall": 71', 1, true),
+        "a signing carries his details from the game: positions, birthday, nation, foot, rating", g and g.profile)
+    local jes0 = P["Elivélton Jesus"] and P["Elivélton Jesus"][1]
+    check(jes0 and jes0.playerId == "464205" and jes0.profile == nil, "a departure carries the player id but no details")
     local e = one("Oliver Ebner")
     check(e and e.type == "In (Permanent)" and tonumber(e.feeM) == 0 and e.feeUnknown == "true",
         "Ebner is a signing with the fee marked unknown", e and (e.type .. " " .. tostring(e.feeUnknown)))
@@ -2401,7 +2409,7 @@ do
         local status_text = g.vfs[ROOT .. "/script_status.json"]
         check(status_text ~= nil, "script_status.json is written as soon as the script runs")
         local st = status_text and json_decode(status_text) or {}
-        check(st.version == "2.10.0" and st.protocol == 2 and st.app == "fc26-capture", "it names the script, its version and protocol",
+        check(st.version == "2.11.0" and st.protocol == 2 and st.app == "fc26-capture", "it names the script, its version and protocol",
             tostring(st.version))
         check(st.exporter == true, "it says the detailed-stats exporter is running")
         check(st.club == "Torquay AFC", "it names the club", tostring(st.club))
@@ -2449,7 +2457,9 @@ do
             db.career_playercontract = { { playerid = 461483, teamid = MANAGED, playerrole = 1, wage = 14500 } }
             db.players = { { playerid = 461483, overallrating = 71, potential = 78, acceleration = 80, sprintspeed = 83, agility = 75, balance = 70,
                              reactions = 72, ballcontrol = 74, dribbling = 73, finishing = 76, shotpower = 77, longshots = 65, volleys = 60,
-                             penalties = 66, positioning = 75, vision = 60, crossing = 55, gkdiving = 10 },
+                             penalties = 66, positioning = 75, vision = 60, crossing = 55, gkdiving = 10,
+                             preferredposition1 = 25, preferredposition2 = 21, birthdate = 150000, nationality = 45, height = 179, weight = 74,
+                             preferredfoot = 1, weakfootabilitytypecode = 3 },
                            { playerid = 999999, overallrating = 90, potential = 90 } }           -- another club's player
             db.playersuspensions = { { playerid = 460053, games = 2 } }
             db.teams = { { teamid = MANAGED, foundationyear = 1899, rivalteam = 106, leaguetitles = 0, domesticcups = 1, uefa_cl_wins = 0, uefa_el_wins = 0, uefa_uecl_wins = 0,
@@ -2493,6 +2503,10 @@ do
         check(ig.attributes and ig.attributes["Sprint speed"] == 83 and ig.attributes["Finishing"] == 76 and ig.attributes["GK diving"] == 10,
             "the player's attributes, by the names the app shows")
         check(ig.form == "Good" and by_id[460129] and by_id[460129].form == "Poor", "the game's form of each player")
+        check(ig.profile and ig.profile.positions and ig.profile.positions[1] == "ST" and ig.profile.positions[2] == "CF"
+            and ig.profile.birthDate == "1993-06-21" and ig.profile.nation == 45 and ig.profile.foot == "Right" and ig.profile.height == 179,
+            "the player's details from the game: positions, birthday, nation, foot, height")
+        check(by_id[460129] and by_id[460129].profile == nil, "no details when the game has no row for him")
         check(by_id[460129] and by_id[460129].attributes == nil, "no attributes when the game has none for him")
         local st = {}
         for _, x in ipairs(r.stats or {}) do st[x.playerId] = x end
@@ -2795,6 +2809,32 @@ do
     check(text == CR.payload({ club = { transferBudget = 12.5 }, injuriesKnown = true, teamsheet = { positions = { ["1"] = "GK" }, bench = CR.array(), xi = CR.array({ 1, 2 }), formation = "4-3-3" },
         players = CR.array({ { injury = inj, wage = 13, name = 'A "Q"', playerId = 7 } }), fixtures = CR.array(), careerDate = "2028-09-15" }),
         "the same report always gives the same text (nothing is sent twice)")
+end
+
+-- ---------------------------------------------------------------------------------------------------------
+print("7f. player details from the players table (pure functions)")
+do
+    local src = read_file(scripts .. "FC26_Auto_Capture.lua")
+    local block = src:match("%-%- BEGIN player_profile[^\n]*\n(.-)%-%- END player_profile")
+    check(block ~= nil, "player_profile block found between the markers")
+    local helpers = src:match("(local function to_int%(value, default%).-\nend\n)") .. src:match("(local function decode_fifa_date%(days%).-\nend\n)")
+    local PROFILE = assert(load(helpers .. block .. "\nreturn PROFILE", "player_profile"))()
+
+    local p = PROFILE.from_row({ preferredposition1 = 25, preferredposition2 = 24, preferredposition3 = 27, birthdate = 150000, nationality = 14,
+                                 height = 185, weight = 80, preferredfoot = 1, weakfootabilitytypecode = 3, overallrating = 68, potential = 77 })
+    check(p and #p.positions == 2 and p.positions[1] == "ST" and p.positions[2] == "LW", "positions in the app's names, a repeated one once", p and table.concat(p.positions, ","))
+    check(p and p.birthDate == "1993-06-21" and p.nation == 14 and p.height == 185 and p.weight == 80, "birthday, nation, height and weight")
+    check(p and p.foot == "Right" and p.weakFoot == 3 and p.overall == 68 and p.potential == 77, "foot, weak foot and ratings")
+    local cells = PROFILE.from_row({ preferredposition1 = { value = 0 }, preferredposition2 = { value = -1 }, birthdate = { value = 162802 } })
+    check(cells and cells.positions[1] == "GK" and #cells.positions == 1 and cells.birthDate == "2028-07-09", "GetDBTableRows cells; -1 is no position")
+    local sides = PROFILE.from_row({ preferredposition1 = 4, preferredposition2 = 11, preferredposition3 = 19 })
+    check(sides and sides.positions[1] == "CB" and sides.positions[2] == "CDM" and sides.positions[3] == "CAM", "left and right variants are named as the central one")
+    check(PROFILE.from_row({ height = 0, weight = 999, preferredfoot = 7, birthdate = 3 }) == nil and PROFILE.from_row(nil) == nil,
+        "a row with nothing usable gives no profile (nothing is guessed)")
+    check(PROFILE.json(p) == '{"positions": ["ST", "LW"], "birthDate": "1993-06-21", "nation": 14, "height": 185, "weight": 80, "foot": "Right", "weakFoot": 3, "overall": 68, "potential": 77}',
+        "the profile as JSON in a fixed order", PROFILE.json(p))
+    local decoded = json_decode(PROFILE.json(p))
+    check(decoded and decoded.positions[2] == "LW" and decoded.weakFoot == 3, "the JSON reads back")
 end
 
 

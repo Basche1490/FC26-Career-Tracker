@@ -316,13 +316,13 @@ fun EditPlayerDialog(startYear: Int = 2025, player: Player?, allEafcPlayers: Lis
             item { com.fctracker.career.ui.components.FcButton("Save", { save() }, icon = androidx.compose.material.icons.Icons.Default.Save, full = true, enabled = name.isNotBlank()) }
             item {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (player != null && (player.isPromoted || !player.isAcademy)) {
+                    if (player != null && player.isPromoted && !player.isAcademy) {
                         com.fctracker.career.ui.components.FcButton("Move to academy", {
                             onUpdate(player.copy(isAcademy = true, isPromoted = false, status = "Academy", isStartingXI = false)); onDismiss()
                         }, Modifier.weight(1f), kind = com.fctracker.career.ui.components.ButtonKind.SECONDARY)
                     }
                     if (onDelete != null) com.fctracker.career.ui.components.FcButton("Delete", { confirmDelete = true }, Modifier.weight(1f), kind = com.fctracker.career.ui.components.ButtonKind.DANGER)
-                    if ((player == null || !(player.isPromoted || !player.isAcademy)) && onDelete == null) com.fctracker.career.ui.components.FcButton("Cancel", onDismiss, Modifier.weight(1f), kind = com.fctracker.career.ui.components.ButtonKind.SECONDARY)
+                    if ((player == null || !(player.isPromoted && !player.isAcademy)) && onDelete == null) com.fctracker.career.ui.components.FcButton("Cancel", onDismiss, Modifier.weight(1f), kind = com.fctracker.career.ui.components.ButtonKind.SECONDARY)
                 }
             }
         }

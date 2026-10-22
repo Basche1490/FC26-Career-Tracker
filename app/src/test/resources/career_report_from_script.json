@@ -32,7 +32,7 @@
     {"name": "Ignacio Zapata", "playerId": 460053, "suspension": {"games": 2}},
     {"name": "Kento Takeuchi", "playerId": 460055},
     {"form": "Poor", "name": "Marc Palomino", "playerId": 460129},
-    {"attributes": {"Acceleration": 80, "Agility": 75, "Balance": 70, "Ball control": 74, "Crossing": 55, "Dribbling": 73, "Finishing": 76, "GK diving": 10, "Long shots": 65, "Penalties": 66, "Positioning": 75, "Reactions": 72, "Shot power": 77, "Sprint speed": 83, "Vision": 60, "Volleys": 60}, "form": "Good", "injury": {"back": "2028-09-22", "name": "Injury", "start": "2028-08-13"}, "name": "Enrique Iglesias", "number": 9, "overall": 71, "playerId": 461483, "potential": 78, "role": "Crucial", "wage": 15},
+    {"attributes": {"Acceleration": 80, "Agility": 75, "Balance": 70, "Ball control": 74, "Crossing": 55, "Dribbling": 73, "Finishing": 76, "GK diving": 10, "Long shots": 65, "Penalties": 66, "Positioning": 75, "Reactions": 72, "Shot power": 77, "Sprint speed": 83, "Vision": 60, "Volleys": 60}, "form": "Good", "injury": {"back": "2028-09-22", "name": "Injury", "start": "2028-08-13"}, "name": "Enrique Iglesias", "number": 9, "overall": 71, "playerId": 461483, "potential": 78, "profile": {"birthDate": "1993-06-21", "foot": "Right", "height": 179, "nation": 45, "overall": 71, "positions": ["ST", "CF"], "potential": 78, "weakFoot": 3, "weight": 74}, "role": "Crucial", "wage": 15},
     {"name": "Bruno Henrique Gonzaga", "playerId": 462221},
     {"name": "Oliver Ebner", "playerId": 462884},
     {"name": "Leo Guerra", "playerId": 463320},
